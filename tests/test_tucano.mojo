@@ -51,6 +51,12 @@ from tucano import (
     TipoWidget,
     esquema_parquet,
     metadados_parquet,
+    consultar_sql,
+    consultar_sql_em,
+    plano_do_sql,
+    Catalogo,
+    tokenizar,
+    analisar,
     Vetor,
     Etapa,
     TipoEtapa,
@@ -2260,6 +2266,181 @@ def test_m9_fluxo_sobre_muitos_row_groups() raises:
             fluindo.pegar("soma_valor").texto_em(i),
             inteiro.pegar("soma_valor").texto_em(i),
         )
+
+
+# ------------------------------------------------------------------ M10 SQL
+
+
+def test_sql_tokenizador() raises:
+    var t = tokenizar("SELECT a, 1.5 FROM 'x.csv' WHERE b >= 'oi'")
+    assert_equal(t[0].texto, "SELECT")
+    assert_equal(t[1].texto, "a")
+    assert_equal(t[2].texto, ",")
+    assert_equal(t[3].texto, "1.5")
+    assert_equal(t[5].texto, "x.csv")
+    assert_equal(t[7].texto, "b")
+    assert_equal(t[8].texto, ">=")
+    assert_equal(t[9].texto, "oi")
+
+
+def test_sql_analise_basica() raises:
+    var c = analisar(
+        "SELECT cidade, SUM(valor) AS total FROM 'v.parquet'"
+        " WHERE valor > 100 GROUP BY cidade ORDER BY total DESC LIMIT 5"
+    )
+    assert_false(c.tudo)
+    assert_equal(len(c.itens), 2)
+    assert_false(c.itens[0].eh_agregacao)
+    assert_true(c.itens[1].eh_agregacao)
+    assert_equal(c.itens[1].apelido, "total")
+    assert_equal(c.fonte, "v.parquet")
+    assert_true(c.tem_onde)
+    assert_equal(len(c.agrupar), 1)
+    assert_equal(c.agrupar[0], "cidade")
+    assert_true(c.descendente)
+    assert_equal(c.limite, 5)
+
+
+def test_sql_erro_aponta_a_posicao() raises:
+    var pegou = False
+    try:
+        _ = analisar("SELECT a FROM")
+    except e:
+        pegou = True
+        assert_true("posicao" in String(e))
+    assert_true(pegou)
+
+    pegou = False
+    try:
+        _ = analisar("SELEC a FROM x")
+    except e:
+        pegou = True
+        assert_true("'SELECT'" in String(e))
+    assert_true(pegou)
+
+
+def test_sql_funcao_desconhecida_erra() raises:
+    var pegou = False
+    try:
+        _ = analisar("SELECT MEDIANA(v) FROM x")
+    except e:
+        pegou = True
+        assert_true("nao suportada" in String(e))
+        assert_true("SUM" in String(e))
+    assert_true(pegou)
+
+
+def test_sql_vira_o_mesmo_plano() raises:
+    """SQL nao tem motor proprio: vira as mesmas etapas da API fluente."""
+    var q = plano_do_sql(
+        "SELECT grupo, SUM(valor) AS total FROM 'tests/fixtures/grupos.parquet'"
+        " WHERE valor > 100 GROUP BY grupo ORDER BY total DESC",
+        Catalogo(),
+    )
+    var plano = q.descrever()
+    assert_true("FILTER" in plano)
+    assert_true("AGGREGATE [grupo]" in plano)
+    assert_true("PROJECT [grupo, total]" in plano)
+    assert_true("SORT [total desc]" in plano)
+    # e passa pelo mesmo otimizador
+    assert_true("poda de colunas (3 -> 2)" in q.explicar())
+
+
+def test_sql_agregacao_sobre_parquet() raises:
+    var r = consultar_sql(
+        "SELECT grupo, SUM(valor) AS total, COUNT(*) AS n"
+        " FROM 'tests/fixtures/grupos.parquet'"
+        " WHERE valor > 100 GROUP BY grupo ORDER BY total DESC"
+    )
+    assert_equal(r.linhas(), 3)
+    assert_equal(r.colunas(), 3)
+    assert_equal(r.pegar("grupo").texto_em(0), "c")
+    assert_equal(r.pegar("n").texto_em(0), "933")
+
+
+def test_sql_catalogo_e_limite() raises:
+    var cat = Catalogo()
+    cat.registrar("vendas", ler_csv("tests/fixtures/vendas.csv"))
+    var r = consultar_sql_em(
+        "SELECT cidade, valor FROM vendas WHERE valor > 1000"
+        " ORDER BY valor DESC LIMIT 2",
+        cat,
+    )
+    assert_equal(r.linhas(), 2)
+    assert_equal(r.pegar("valor").texto_em(0), "2000.0")
+    assert_equal(r.pegar("valor").texto_em(1), "1500.0")
+
+
+def test_sql_estrela_e_texto() raises:
+    var cat = Catalogo()
+    cat.registrar("vendas", ler_csv("tests/fixtures/vendas.csv"))
+    var r = consultar_sql_em("SELECT * FROM vendas WHERE cidade = 'SP'", cat)
+    assert_equal(r.linhas(), 3)
+    assert_equal(r.colunas(), 3)
+
+
+def test_sql_agregacao_total() raises:
+    var cat = Catalogo()
+    cat.registrar("vendas", ler_csv("tests/fixtures/vendas.csv"))
+    var r = consultar_sql_em(
+        "SELECT AVG(valor) AS media, MAX(valor) AS pico, MIN(valor) AS piso"
+        " FROM vendas",
+        cat,
+    )
+    assert_equal(r.linhas(), 1)
+    assert_equal(r.pegar("media").texto_em(0), "1375.0")
+    assert_equal(r.pegar("pico").texto_em(0), "2000.0")
+    assert_equal(r.pegar("piso").texto_em(0), "800.0")
+
+
+def test_sql_and_or_e_parenteses() raises:
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var r = consultar_sql_em(
+        "SELECT cidade FROM v WHERE (cidade = 'SP' AND valor > 1300)"
+        " OR cidade = 'RJ'",
+        cat,
+    )
+    assert_equal(r.linhas(), 3)
+
+
+def test_sql_coluna_fora_do_group_by_erra() raises:
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var pegou = False
+    try:
+        _ = consultar_sql_em("SELECT data, SUM(valor) FROM v GROUP BY cidade", cat)
+    except e:
+        pegou = True
+        assert_true("nao no GROUP BY" in String(e))
+    assert_true(pegou)
+
+
+def test_sql_fonte_desconhecida_erra() raises:
+    var pegou = False
+    try:
+        _ = consultar_sql("SELECT * FROM tabela_que_nao_existe")
+    except e:
+        pegou = True
+        assert_true("nao e tabela registrada" in String(e))
+    assert_true(pegou)
+
+
+def test_sql_ordena_por_coluna_nao_selecionada() raises:
+    """ORDER BY por coluna fora do SELECT: a ordenacao vai antes da projecao."""
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var r = consultar_sql_em("SELECT cidade FROM v ORDER BY valor DESC", cat)
+    assert_equal(r.colunas(), 1)
+    assert_equal(r.pegar("cidade").texto_em(0), "SP")
+    assert_equal(r.pegar("cidade").texto_em(1), "SP")
+
+
+def test_sql_limite_como_operador() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var r = t.limite(2).coletar()
+    assert_equal(r.linhas(), 2)
+    assert_true("LIMIT 2" in t.limite(2).descrever())
 
 
 def main() raises:

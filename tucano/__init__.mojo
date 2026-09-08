@@ -75,4 +75,6 @@ from .painel import Painel, Widget, TipoWidget
 from .otimizador import otimizar, PlanoOtimizado
 from .fluxo import plano_flui, EstadoAgregacao
 from .arquivo import LeitorArquivo
+from .sql import analisar, tokenizar, ConsultaSQL
+from .motor_sql import Catalogo, plano_do_sql, consultar_sql, consultar_sql_em
 from .consulta import Consulta, lazy

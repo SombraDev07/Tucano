@@ -725,6 +725,8 @@ def executar(cols: List[Coluna], etapas: List[Etapa]) raises -> List[Coluna]:
             atual = op_remover_na(atual, e.nomes)
         elif e.tipo == TipoEtapa.PREENCHER_NA:
             atual = op_preencher_na(atual, e.nome, e.expr)
+        elif e.tipo == TipoEtapa.LIMITE:
+            atual = op_limite(atual, e.limite)
         else:
             raise Error("etapa desconhecida no plano: " + String(e.tipo))
     return atual^
@@ -813,6 +815,7 @@ def avisos_plano(cols: List[Coluna], etapas: List[Etapa]) raises -> List[String]
             e.tipo == TipoEtapa.ORDENACAO
             or e.tipo == TipoEtapa.CONCATENACAO
             or e.tipo == TipoEtapa.REMOVER_NA
+            or e.tipo == TipoEtapa.LIMITE
         ):
             pass
         else:
@@ -1569,6 +1572,23 @@ def ordem_das_linhas(
 
 def linhas_do_lote(cols: List[Coluna]) -> Int:
     return n_linhas(cols)
+
+
+def op_limite(cols: List[Coluna], n: Int) raises -> List[Coluna]:
+    """LimitExec: as primeiras `n` linhas."""
+    var total = n_linhas(cols)
+    var ate = n
+    if ate > total:
+        ate = total
+    if ate < 0:
+        ate = 0
+    var indices = List[Int](capacity=ate)
+    for i in range(ate):
+        indices.append(i)
+    var out = List[Coluna]()
+    for c in cols:
+        out.append(coletar_linhas(c, indices))
+    return out^
 
 
 def op_ordenar(

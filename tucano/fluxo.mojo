@@ -43,6 +43,8 @@ def plano_flui(etapas: List[Etapa]) raises -> String:
             return "juncao precisa do conjunto inteiro"
         if t == TipoEtapa.CONCATENACAO:
             return "concatenacao precisa do conjunto inteiro"
+        if t == TipoEtapa.LIMITE:
+            return "limite depois de agregacao precisa do resultado completo"
         if t == TipoEtapa.AGREGACAO:
             vistos_agregacao += 1
             if i != len(etapas) - 1:

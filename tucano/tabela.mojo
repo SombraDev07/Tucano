@@ -148,6 +148,13 @@ struct Consulta(Copyable, Movable):
         self.etapas.append(Etapa.ordenacao(copia^, desc^))
         return self^
 
+    def limite(var self, n: Int) raises -> Self:
+        """As primeiras `n` linhas do resultado."""
+        if n < 0:
+            raise Error("limite exige um numero nao negativo")
+        self.etapas.append(Etapa.limite_de(n))
+        return self^
+
     def concatenar(var self, outra: Tabela) raises -> Self:
         """Empilha outra tabela. Exige mesmo esquema, na mesma ordem."""
         self.etapas.append(Etapa.concatenacao(outra.lote()))
@@ -599,6 +606,11 @@ struct Tabela(Copyable, Movable):
         """Ordena. Devolve `Consulta`."""
         var q = Consulta(self.lote())
         return q^.ordenar(chaves, descendente)
+
+    def limite(self, n: Int) raises -> Consulta:
+        """As primeiras `n` linhas. Devolve `Consulta`."""
+        var q = Consulta(self.lote())
+        return q^.limite(n)
 
     def concatenar(self, outra: Tabela) raises -> Consulta:
         """Empilha outra tabela. Devolve `Consulta`."""

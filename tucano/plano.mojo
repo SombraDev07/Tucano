@@ -25,6 +25,7 @@ struct TipoEtapa:
     comptime CONCATENACAO = 6
     comptime REMOVER_NA = 7
     comptime PREENCHER_NA = 8
+    comptime LIMITE = 9
 
     @staticmethod
     def nome_logico(tipo: Int) raises -> String:
@@ -46,6 +47,8 @@ struct TipoEtapa:
             return "DROP NULLS"
         if tipo == Self.PREENCHER_NA:
             return "FILL NULLS"
+        if tipo == Self.LIMITE:
+            return "LIMIT"
         raise Error("etapa desconhecida: " + String(tipo))
 
     @staticmethod
@@ -68,6 +71,8 @@ struct TipoEtapa:
             return "DropNullExec"
         if tipo == Self.PREENCHER_NA:
             return "FillNullExec"
+        if tipo == Self.LIMITE:
+            return "LimitExec"
         raise Error("etapa desconhecida: " + String(tipo))
 
 
@@ -82,6 +87,7 @@ struct Etapa(Copyable, Movable):
     var lote_direito: List[Coluna]
     var tipo_juncao: Int
     var descendente: List[Bool]
+    var limite: Int
 
     def __init__(
         out self,
@@ -93,6 +99,7 @@ struct Etapa(Copyable, Movable):
         var lote_direito: List[Coluna] = List[Coluna](),
         tipo_juncao: Int = 0,
         var descendente: List[Bool] = List[Bool](),
+        limite: Int = -1,
     ):
         self.tipo = tipo
         self.expr = expr^
@@ -102,6 +109,7 @@ struct Etapa(Copyable, Movable):
         self.lote_direito = lote_direito^
         self.tipo_juncao = tipo_juncao
         self.descendente = descendente^
+        self.limite = limite
 
     @staticmethod
     def filtro(var pred: Expr) -> Self:
@@ -146,6 +154,13 @@ struct Etapa(Copyable, Movable):
         return Self(TipoEtapa.REMOVER_NA, Expr(), nomes^, "")
 
     @staticmethod
+    def limite_de(n: Int) -> Self:
+        return Self(
+            TipoEtapa.LIMITE, Expr(), List[String](), "", List[Agregacao](),
+            List[Coluna](), 0, List[Bool](), n,
+        )
+
+    @staticmethod
     def preencher_na(nome: String, var expr: Expr) -> Self:
         return Self(TipoEtapa.PREENCHER_NA, expr^, List[String](), nome)
 
@@ -157,6 +172,8 @@ struct Etapa(Copyable, Movable):
             return cabeca + " " + self.nome + " = " + self.expr.descrever()
         if self.tipo == TipoEtapa.PREENCHER_NA:
             return cabeca + " " + self.nome + " <- " + self.expr.descrever()
+        if self.tipo == TipoEtapa.LIMITE:
+            return cabeca + " " + String(self.limite)
         if self.tipo == TipoEtapa.CONCATENACAO:
             return cabeca
         if self.tipo == TipoEtapa.ORDENACAO:
