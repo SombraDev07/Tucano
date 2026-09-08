@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.6.0 — M0 → M5 fechados (paralelismo e Parquet à parte).
+Versão 0.7.0 — M0 → M5 fechados (paralelismo por thread à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -294,6 +294,25 @@ correto por construção enquanto mantissa ≤ 2⁵³ e casas ≤ 22; fora disso
 `LeitorCSV` limita a **tabela materializada**, não a memória total: o buffer de bytes e as
 fronteiras dos campos ficam inteiros em memória. E/S com memória limitada é M9.
 
+### Parquet
+
+| Entrada | Papel |
+|---|---|
+| `ler_parquet(caminho)` | lê o arquivo inteiro |
+| `ler_parquet(caminho, [nomes])` | **column pruning**: as outras colunas nunca são lidas |
+| `para_parquet(tabela, caminho)` | escreve |
+| `esquema_parquet(caminho)` | esquema só do rodapé, sem tocar nos dados |
+| `metadados_parquet(caminho)` | linhas, row groups, codificações, compressão |
+
+Leitura cobre: esquema plano, `PLAIN` e `RLE_DICTIONARY`, níveis de definição RLE/bit-packed,
+páginas V1 e V2, sem compressão e Snappy, múltiplos row groups, tipos lógicos por
+`ConvertedType` e `LogicalType`.
+
+Escrita usa um subconjunto deliberado — `PLAIN`, sem compressão, um row group, colunas
+opcionais — que qualquer leitor aceita. A interoperabilidade é verificada lendo os arquivos
+gerados com outra implementação (`pixi run -e fixtures interop`), não com o próprio leitor:
+um leitor e um escritor com o mesmo mal-entendido concordam entre si.
+
 ---
 
 ## Estabilidade
@@ -308,7 +327,8 @@ fronteiras dos campos ficam inteiros em memória. E/S com memória limitada é M
 | `lazy()` | mantido por compatibilidade — prefira `tabela.onde(...)` |
 | `tucano.executor` / `tucano.vetor` / `tucano.plano` | **interno**, muda no M6 |
 | `tucano.kernels` | **interno**, contrato de ponteiros pode mudar |
-| `tucano.scanner` | **interno** |
+| `tucano.scanner` / `tucano.thrift` / `tucano.codecs` | **interno** |
+| `ler_parquet` / `para_parquet` / `esquema_parquet` | estável |
 | `ler_csv_tipado` / `LeitorCSV` | estável |
 | `ler_csv` / `para_csv` | assinatura estável, implementação refeita em M5 |
 | Layout interno de `Coluna` / `buffer.mojo` | **não é API pública** |

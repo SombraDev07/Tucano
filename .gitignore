@@ -11,3 +11,4 @@
 
 # saidas de teste
 tests/fixtures/_saida_*.csv
+tests/fixtures/_saida_*.parquet

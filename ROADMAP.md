@@ -107,9 +107,9 @@ São três provas, em ordem de honestidade:
 
 ## Estado atual do código (honestidade)
 
-**M0 → M5 fechados**, com duas exceções registradas. Próximo: **M6 — Aggregation + Join**. 78 testes verdes.
+**M0 → M5 fechados.** Próximo: **M6 — Aggregation + Join**. 99 testes verdes.
 
-Duas coisas ficaram de fora, ambas por bloqueio externo e não por escopo: **paralelismo por thread** (sem primitiva no stdlib do Mojo 1.0) e **Parquet** (sem como verificar contra arquivo real). Cada uma tem sua seção.
+Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo por thread**, sem primitiva no stdlib do Mojo 1.0. O Parquet, que estava bloqueado por falta de fixture, foi destravado e entregue — leitura e escrita, com interoperabilidade verificada contra outra implementação.
 
 | Peça | Status |
 |------|--------|
@@ -135,8 +135,9 @@ Duas coisas ficaram de fora, ambas por bloqueio externo e não por escopo: **par
 | `ler_csv_tipado` (schema explícito) | ✅ M5 |
 | `LeitorCSV` (leitura em fatias) | ✅ M5 |
 | `DType.DATAHORA` + `hora`/`minuto`/`segundo` | ✅ M5 |
+| `ler_parquet` com column pruning | ✅ M5 — 3,6× mais rápido que CSV |
+| `para_parquet` com interop verificada | ✅ M5 |
 | Paralelismo por chunk | ❌ **bloqueado** — sem primitiva no Mojo 1.0 |
-| Parquet | ❌ **bloqueado** — sem fixture para verificar |
 | Slab de data em Int32 | ❌ adiado para M6 |
 | Publicação em canal conda | ❌ exige canal próprio |
 | `DType.DATAHORA` | ❌ adiado para M5 |
@@ -164,7 +165,7 @@ Duas coisas ficaram de fora, ambas por bloqueio externo e não por escopo: **par
 | M2.5 | Biblioteca + Correções | crítica | ✅ feito | instalável, sem dívidas de fundação |
 | M3 | Execution Engine | crítica | ✅ feito | executor coluna-a-coluna |
 | M4 | SIMD (+ Parallel) | crítica | ✅ SIMD / ⛔ paralelo | kernels vetorizados |
-| M5 | I/O + Streaming | crítica | ✅ CSV / ⛔ Parquet | scanner tipado, fatias, datahora |
+| M5 | I/O + Streaming | crítica | ✅ feito | scanner CSV, Parquet, fatias, datahora |
 | **M6** | **Aggregation + Join** | **crítica** | **próximo** | group/join como operadores |
 | M7 | Painel | alta | não iniciado | dashboard nativo |
 | M8 | Optimizer | crítica | não iniciado | pushdown + folding + reorder |
@@ -425,7 +426,7 @@ retomar quando o stdlib expuser uma primitiva estável.
 
 ---
 
-## M5 — I/O ✅ (Parquet ⛔ bloqueado)
+## M5 — I/O + Streaming ✅
 
 ### CSV: scanner tipado
 
@@ -457,21 +458,34 @@ O último item saiu de graça de uma decisão pequena: o `Vetor` passou a carreg
 
 `LeitorCSV` entrega a tabela em fatias de N linhas, para não materializar tudo de uma vez. O buffer de bytes e as fronteiras dos campos ainda ficam todos em memória: **E/S com memória limitada de verdade é trabalho do out-of-core (M9)**, e o roadmap não deve fingir o contrário.
 
-### Parquet — bloqueado por verificação
+### Parquet
 
-Não entrou, e a razão não é escopo: **não há como verificar**. A máquina não tem nenhuma ferramenta capaz de produzir um único arquivo Parquet real para testar contra.
+Estava bloqueado por não haver, nesta máquina, forma de produzir um arquivo Parquet real para verificar o leitor contra. Um parser de formato binário sem fixture não é código pronto. O destrave foi adotar `pyarrow` como dependência **de geração de fixture**, em ambiente pixi separado — o princípio de Zero Python é sobre o que a biblioteca carrega em produção, e nenhum módulo em `tucano/` importa nada dele.
 
-Um leitor de Parquet são 1500+ linhas de parsing de formato binário: Thrift compact protocol, níveis de definição em RLE/bit-packed, páginas de dicionário, descompressão Snappy. Escrever isso sem fixture seria produzir código que *parece* pronto e não é — exatamente o que este roadmap se recusa a marcar como feito.
+Com isso, entregue leitura e escrita:
 
-**Destrave:** `pyarrow` está disponível no conda-forge e a rede funciona. Adicioná-lo como dependência **só de geração de fixture** — ambiente separado, nunca no runtime — não fere o princípio de Zero Python, que é sobre o que a biblioteca carrega em produção. É decisão de projeto, não limitação técnica.
+| | ns/linha | |
+|---|---|---|
+| `ler_parquet` (6 colunas) | **215** | **3,6×** mais rápido que CSV |
+| `ler_parquet` com pruning (2 de 6) | **76** | **2,8×** mais rápido que ler tudo |
+| `para_parquet` | 232 | 2,4× mais rápido que escrever CSV |
+| só o rodapé (esquema + contagem) | — | 2,2 ms, sem tocar em byte de dado |
 
-Quando destravar, o desenho continua o mesmo:
+**Column pruning nasceu no design**, não como otimização posterior: os metadados ficam no rodapé justamente para que se saiba onde cada coluna começa antes de ler qualquer dado. `ler_parquet(caminho, ["a", "b"])` nunca toca nos bytes das outras.
+
+Coberto: esquema plano, `PLAIN` e `RLE_DICTIONARY`, níveis de definição em RLE/bit-packed, páginas V1 e V2, sem compressão e Snappy, múltiplos row groups, e os tipos lógicos que importam (`UTF8`, `DATE`, `TIMESTAMP` em milis/micros/nanos, via `ConvertedType` **e** `LogicalType`).
+
+Três camadas novas, todas independentes do resto:
 
 ```
-Parquet → metadata → column pruning → predicate pushdown → Tucano
+tucano/thrift.mojo   protocolo Thrift compact — leitura e escrita
+tucano/codecs.mojo   Snappy cru + RLE/bit-packing híbrido
+tucano/parquet.mojo  metadados, páginas, montagem de coluna
 ```
 
-Pushdown nasce no design, não como afterthought.
+**A verificação é o ponto.** Round-trip próprio não prova nada: um leitor e um escritor com o mesmo mal-entendido concordam entre si. `pixi run -e fixtures interop` lê com outra implementação os arquivos que o Tucano escreveu e compara valor a valor — é isso que autoriza dizer que está pronto.
+
+Foi essa verificação que pegou o único erro de semântica que o round-trip próprio não pegaria: sem emitir `LogicalType`, um carimbo de tempo ingênuo volta marcado como UTC, porque o `ConvertedType` legado não distingue os dois casos.
 
 ### Critério de saída
 
@@ -480,8 +494,9 @@ Pushdown nasce no design, não como afterthought.
 - [x] Schema explícito opcional na leitura
 - [x] `DType.DATAHORA` com parsing ISO-8601 — herdado do M2.5
 - [x] Caminho de streaming por fatias
-- [x] 78 testes verdes
-- [ ] `ler_parquet` / `para_parquet` com pruning — **bloqueado**, ver acima
+- [x] `ler_parquet` / `para_parquet` com column pruning
+- [x] Interoperabilidade verificada contra outra implementação
+- [x] 99 testes verdes
 - [ ] Slab de data em Int32 — adiado para o M6
 
 > O slab de data continua Int64. Adicionar agora um sexto `List` paralelo em `Coluna` iria na direção contrária da reescrita de storage que o M6 precisa fazer para join e groupby. Entra lá, junto.
@@ -709,6 +724,6 @@ E, a partir do M7, a métrica que é nossa: **latência de filtro de painel** e 
 6. ~~**M4**: kernels SIMD sobre os slabs, dictionary encoding~~
 7. ~~**M5**: scanner CSV tipado (bytes → buffers), streaming em fatias, datahora~~
 8. **M6**: groupby e join como operadores; storage em lotes; slab de data em Int32
-9. Decidir sobre `pyarrow` como dependência **de fixture** para destravar Parquet
+9. ~~Decidir sobre `pyarrow` como dependência **de fixture** para destravar Parquet~~
 10. Reavaliar paralelismo quando o stdlib do Mojo expuser primitiva estável
 11. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5

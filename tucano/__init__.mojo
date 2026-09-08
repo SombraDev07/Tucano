@@ -45,4 +45,14 @@ from .expr import (
 from .vetor import Vetor, Unidade
 from .plano import Etapa, TipoEtapa
 from .executor import Tri
+from .parquet import (
+    ler_parquet,
+    para_parquet,
+    esquema_parquet,
+    metadados_parquet,
+    MetadadosParquet,
+    PTipo,
+    PCodificacao,
+    PCompressao,
+)
 from .consulta import Consulta, lazy

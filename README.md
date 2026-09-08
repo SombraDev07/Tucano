@@ -51,6 +51,8 @@ o que for mais conveniente na hora.
   por junção explícita.
 - **Leitura de CSV rápida e correta** — `bytes → scanner → parser tipado → buffers`, sem
   alocar por célula. 715 ns/linha, com aspas RFC 4180 na leitura e na escrita.
+- **Parquet nativo, leitura e escrita** — sem ponte, sem dependência externa. Column pruning
+  de verdade: as colunas que você não pediu nunca são lidas.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
 
 ## Instalação
@@ -208,6 +210,11 @@ cada conveniência parecia inofensiva sozinha.
 ## Leitura de arquivos
 
 ```mojo
+ler_parquet("vendas.parquet")               # arquivo inteiro
+ler_parquet("vendas.parquet", ["mes", "valor"])   # só estas duas colunas saem do disco
+esquema_parquet("vendas.parquet")           # esquema, sem tocar nos dados
+para_parquet(tabela, "saida.parquet")
+
 ler_csv("vendas.csv")                       # infere o tipo de cada coluna
 ler_csv_tipado("vendas.csv", meu_schema)    # schema explícito, sem adivinhação
 ler_csv("vendas.csv", nrows=1000, pular=2)  # recorte
@@ -249,6 +256,14 @@ terceiro. A ALU não é o gargalo ali.
 | `ler_csv_tipado` | **304** | 2,35× mais rápido que inferir |
 | `para_csv` | 365 | |
 
+E `pixi run bench-parquet`, sobre as mesmas 200 mil linhas em 6 colunas:
+
+| | ns/linha | |
+|---|---|---|
+| `ler_parquet` | **215** | 3,6× mais rápido que CSV |
+| `ler_parquet` com pruning (2 de 6) | **76** | 2,8× mais rápido que ler tudo |
+| `para_parquet` | 232 | 2,4× mais rápido que escrever CSV |
+
 E `pixi run bench-m3` mostra que o executor escala linear — ns/linha praticamente constante
 de 25 mil a 200 mil linhas.
 
@@ -280,20 +295,22 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Execution engine coluna-a-coluna | ✅ |
 | Kernels SIMD e dictionary encoding | ✅ |
 | I/O tipado: scanner CSV, datahora, leitura em fatias | ✅ |
-| Parquet | bloqueado — sem fixture para verificar |
+| Parquet: leitura, escrita, column pruning | ✅ |
 | Agregação e junção | próximo |
 | Painel de visualização | planejado |
 | Otimizador de consultas | planejado |
 | Execução out-of-core | planejado |
 | Interoperabilidade Arrow | planejado |
 
-78 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+99 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
-Dois itens estão bloqueados por causa externa, e o roadmap explica cada um: **paralelismo
-por thread** (o stdlib do Mojo 1.0 não expõe primitiva de paralelismo de dados) e
-**Parquet** (não há, nesta máquina, como gerar um arquivo real para verificar o leitor
-contra — e um parser de formato binário sem fixture não é código pronto).
+Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do
+Mojo 1.0 não expõe primitiva de paralelismo de dados. O roadmap explica.
+
+A interoperabilidade do Parquet é verificada lendo com outra implementação os arquivos que o
+Tucano escreve — round-trip próprio não prova nada, já que um leitor e um escritor com o
+mesmo mal-entendido concordam entre si.
 
 ## Desenvolvimento
 
@@ -304,6 +321,7 @@ pixi run bench     # benchmarks de fundação
 pixi run bench-m3  # escala do executor
 pixi run bench-m4  # SIMD contra o laço escalar
 pixi run bench-m5  # leitura de CSV
+pixi run bench-parquet  # Parquet e column pruning
 pixi run build     # precompilar o pacote
 ```
 

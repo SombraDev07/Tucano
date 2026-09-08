@@ -3,6 +3,55 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.7.0] — Parquet: leitura, escrita e column pruning
+
+Fecha o unico item que faltava do M5. Interoperabilidade verificada lendo com outra
+implementacao os arquivos escritos pelo Tucano.
+
+| | ns/linha | |
+|---|---|---|
+| `ler_parquet` (6 colunas) | 215 | 3,6x mais rapido que CSV |
+| `ler_parquet` com pruning (2 de 6) | 76 | 2,8x mais rapido que ler tudo |
+| `para_parquet` | 232 | 2,4x mais rapido que escrever CSV |
+| so o rodape (esquema + contagem) | — | 2,2 ms, sem tocar em dado |
+
+### Adicionado
+
+- **`tucano/thrift.mojo`** — protocolo Thrift compact, leitura e escrita. Varint,
+  zigzag, delta de id de campo, booleano codificado no proprio tipo, e `pular_valor`
+  para atravessar os dezenas de campos opcionais que nao interessam.
+- **`tucano/codecs.mojo`** — Snappy cru (o formato das paginas, sem enquadramento de
+  stream) e RLE/bit-packing hibrido, que carrega niveis de definicao e indices de
+  dicionario.
+- **`tucano/parquet.mojo`** — metadados, paginas e montagem de coluna.
+  - `ler_parquet(caminho)` e `ler_parquet(caminho, [nomes])` com **column pruning**:
+    as colunas nao pedidas nunca saem do disco. Nasceu no design, nao como
+    otimizacao posterior — os metadados ficam no rodape justamente para isso.
+  - `para_parquet(tabela, caminho)`.
+  - `esquema_parquet` e `metadados_parquet`: esquema, contagem, codificacoes e
+    compressao **sem tocar em um byte de dado**.
+  - Cobre esquema plano, PLAIN e RLE_DICTIONARY, niveis de definicao RLE/bit-packed,
+    paginas V1 e V2, sem compressao e Snappy, multiplos row groups, e tipos logicos
+    tanto por `ConvertedType` quanto por `LogicalType`.
+- **`tools/verificar_interop_parquet.py`** + `pixi run -e fixtures interop`: le com
+  outra implementacao os arquivos que o Tucano escreveu e compara valor a valor.
+- `bench/bench_parquet.mojo` + `pixi run bench-parquet`.
+
+### Notas
+
+- **Round-trip proprio nao prova nada.** Um leitor e um escritor com o mesmo
+  mal-entendido concordam entre si. Foi a verificacao cruzada que pegou o unico erro
+  de semantica que o round-trip proprio nao pegaria: sem emitir `LogicalType`, um
+  carimbo de tempo ingenuo volta marcado como UTC, porque o `ConvertedType` legado
+  nao distingue os dois casos.
+- Cada tipo de pagina tem seu proprio mapa de campos, e eles nao coincidem: o campo 3
+  e `definition_level_encoding` numa pagina de dados e `is_sorted` numa pagina de
+  dicionario. `is_sorted` e booleano, e no Thrift compact booleano nao gasta byte de
+  valor — le-lo como varint desalinha o cabecalho inteiro e faz o offset dos dados
+  apontar para lixo.
+- A escrita usa um subconjunto deliberado (PLAIN, sem compressao, um row group,
+  colunas opcionais) que qualquer leitor aceita.
+
 ## [0.6.0] — M5: scanner CSV tipado, datahora, leitura em fatias
 
 Leitura de CSV passou de **7226 ns/linha para 715** (10,1x). Com schema explicito,

@@ -35,11 +35,17 @@ from tucano import (
     eh_datahora_iso,
     civil_de_micros,
     micros_desde_epoch,
+    ler_parquet,
+    para_parquet,
+    esquema_parquet,
+    metadados_parquet,
     Vetor,
     Etapa,
     TipoEtapa,
     Consulta,
 )
+from tucano.codecs import decodificar_rle, descomprimir_snappy, largura_de_bits
+from tucano.thrift import LeitorThrift
 from tucano.scanner import escanear, parse_float, parse_int, para_texto, eh_datahora
 from tucano.kernels import (
     add_f64,
@@ -1050,6 +1056,266 @@ def test_m5_datahora_redondo_no_csv() raises:
     assert_equal(de_novo.dtype_de("quando").codigo, DType.DATAHORA)
     assert_equal(de_novo.pegar("quando").texto_em(2), "2024-02-20T23:59:59.500000")
     assert_equal(de_novo.pegar("valor").contar_ausentes(), 1)
+
+
+# ------------------------------------------------------- M5: Parquet
+
+
+def test_pq_thrift_varint_e_zigzag() raises:
+    var b = List[UInt8]()
+    for v in [UInt8(0xAC), UInt8(0x02), UInt8(0x01), UInt8(0x02), UInt8(0x03)]:
+        b.append(v)
+    var l = LeitorThrift()
+    assert_equal(l.varint(b), 300)
+    assert_equal(l.zigzag(b), -1)
+    assert_equal(l.zigzag(b), 1)
+    assert_equal(l.zigzag(b), -2)
+
+
+def test_pq_rle_trecho_repetido() raises:
+    # cabecalho 0x08 = (4 << 1) -> 4 repeticoes de um valor de 1 bit
+    var b = List[UInt8]()
+    b.append(UInt8(0x08))
+    b.append(UInt8(0x01))
+    var r = decodificar_rle(b, 0, len(b), 1, 4)
+    assert_equal(len(r), 4)
+    for v in r:
+        assert_equal(v, 1)
+
+
+def test_pq_rle_trecho_empacotado() raises:
+    # cabecalho 0x03 = (1 << 1) | 1 -> um grupo de 8, largura 1
+    # 0b10110101 lido do bit menos significativo: 1,0,1,0,1,1,0,1
+    var b = List[UInt8]()
+    b.append(UInt8(0x03))
+    b.append(UInt8(0b10110101))
+    var r = decodificar_rle(b, 0, len(b), 1, 8)
+    var esperado = List[Int]()
+    for v in [1, 0, 1, 0, 1, 1, 0, 1]:
+        esperado.append(v)
+    assert_equal(len(r), 8)
+    for i in range(8):
+        assert_equal(r[i], esperado[i])
+
+
+def test_pq_largura_de_bits() raises:
+    assert_equal(largura_de_bits(0), 0)
+    assert_equal(largura_de_bits(1), 1)
+    assert_equal(largura_de_bits(3), 2)
+    assert_equal(largura_de_bits(4), 3)
+    assert_equal(largura_de_bits(255), 8)
+
+
+def test_pq_metadados_sem_ler_dados() raises:
+    var m = metadados_parquet("tests/fixtures/simples.parquet")
+    assert_equal(m.num_linhas, 5)
+    assert_equal(m.num_colunas(), 4)
+    assert_equal(len(m.grupos), 1)
+    assert_equal(m.coluna_do_esquema(0).nome, "id")
+    assert_equal(m.coluna_do_esquema(3).nome, "cidade")
+    assert_true(m.versao >= 1)
+
+
+def test_pq_esquema_do_rodape() raises:
+    var e = esquema_parquet("tests/fixtures/simples.parquet")
+    assert_equal(e.tamanho(), 4)
+    assert_equal(e.dtype_de("id").codigo, DType.INTEIRO)
+    assert_equal(e.dtype_de("valor").codigo, DType.REAL)
+    assert_equal(e.dtype_de("ativo").codigo, DType.LOGICO)
+    assert_equal(e.dtype_de("cidade").codigo, DType.TEXTO)
+
+
+def test_pq_plain_sem_compressao() raises:
+    var t = ler_parquet("tests/fixtures/simples.parquet")
+    assert_equal(t.linhas(), 5)
+    assert_equal(t.colunas(), 4)
+    assert_equal(t.pegar("id").texto_em(0), "1")
+    assert_equal(t.pegar("id").texto_em(4), "5")
+    assert_equal(t.pegar("valor").texto_em(4), "50.125")
+    assert_equal(t.pegar("ativo").texto_em(1), "False")
+    assert_equal(t.pegar("cidade").texto_em(3), "BH")
+    assert_equal(t.soma("id"), 15.0)
+
+
+def test_pq_ausentes_por_niveis_de_definicao() raises:
+    var t = ler_parquet("tests/fixtures/com_na.parquet")
+    assert_equal(t.linhas(), 5)
+    assert_equal(t.pegar("id").contar_ausentes(), 2)
+    assert_true(t.pegar("id").eh_ausente(1))
+    assert_false(t.pegar("id").eh_ausente(2))
+    assert_equal(t.pegar("valor").contar_ausentes(), 2)
+    assert_true(t.pegar("valor").eh_ausente(4))
+    assert_equal(t.pegar("cidade").contar_ausentes(), 2)
+    assert_equal(t.pegar("cidade").texto_em(3), "BH")
+    # soma ignora ausentes, como em qualquer outra fonte
+    assert_equal(t.soma("id"), 9.0)
+
+
+def test_pq_dicionario_rle() raises:
+    var t = ler_parquet("tests/fixtures/dicionario.parquet")
+    assert_equal(t.linhas(), 140)
+    # padrao SP,RJ,SP,BH,SP,RJ,SP repetido
+    assert_equal(t.pegar("cidade").texto_em(0), "SP")
+    assert_equal(t.pegar("cidade").texto_em(1), "RJ")
+    assert_equal(t.pegar("cidade").texto_em(3), "BH")
+    assert_equal(t.pegar("cidade").texto_em(7), "SP")
+    assert_equal(t.pegar("n").texto_em(139), "139")
+    # e ja chega dicionarizada do lado do Tucano
+    assert_true(t.pegar("cidade").eh_dicionarizada())
+    assert_equal(t.pegar("cidade").cardinalidade(), 3)
+
+
+def test_pq_temporais() raises:
+    var t = ler_parquet("tests/fixtures/temporal.parquet")
+    assert_equal(t.dtype_de("quando").codigo, DType.DATA)
+    assert_equal(t.dtype_de("carimbo").codigo, DType.DATAHORA)
+    assert_equal(t.pegar("quando").texto_em(0), "2024-01-15")
+    assert_equal(t.pegar("quando").texto_em(1), "2024-02-29")
+    assert_equal(t.pegar("carimbo").texto_em(0), "2024-01-15T08:30:00")
+    assert_equal(t.pegar("carimbo").texto_em(1), "2024-02-29T23:59:59.500000")
+    # anterior a epoca: o sinal tem de sobreviver a viagem
+    assert_equal(t.pegar("carimbo").texto_em(2), "1969-12-31T23:59:59")
+
+
+def test_pq_snappy() raises:
+    var t = ler_parquet("tests/fixtures/snappy.parquet")
+    var sem = ler_parquet("tests/fixtures/simples.parquet")
+    assert_equal(t.linhas(), sem.linhas())
+    for i in range(t.linhas()):
+        assert_equal(t.pegar("id").texto_em(i), sem.pegar("id").texto_em(i))
+        assert_equal(t.pegar("valor").texto_em(i), sem.pegar("valor").texto_em(i))
+        assert_equal(t.pegar("cidade").texto_em(i), sem.pegar("cidade").texto_em(i))
+
+
+def test_pq_multiplos_row_groups() raises:
+    var m = metadados_parquet("tests/fixtures/grupos.parquet")
+    assert_equal(len(m.grupos), 3)
+    var t = ler_parquet("tests/fixtures/grupos.parquet")
+    assert_equal(t.linhas(), 3000)
+    # as fronteiras entre grupos sao onde a montagem costuma errar
+    assert_equal(t.pegar("id").texto_em(999), "999")
+    assert_equal(t.pegar("id").texto_em(1000), "1000")
+    assert_equal(t.pegar("id").texto_em(2999), "2999")
+    assert_equal(t.pegar("grupo").texto_em(0), "a")
+    assert_equal(t.pegar("grupo").texto_em(1000), "b")
+    assert_equal(t.pegar("valor").texto_em(2), "1.0")
+
+
+def test_pq_column_pruning() raises:
+    var so_id = List[String]()
+    so_id.append("valor")
+    so_id.append("id")
+    var t = ler_parquet("tests/fixtures/simples.parquet", so_id)
+    assert_equal(t.colunas(), 2)
+    # a ordem pedida e respeitada
+    assert_equal(t.nomes()[0], "valor")
+    assert_equal(t.nomes()[1], "id")
+    assert_equal(t.linhas(), 5)
+    assert_equal(t.soma("id"), 15.0)
+
+
+def test_pq_coluna_inexistente_sugere() raises:
+    var nomes = List[String]()
+    nomes.append("cidadee")
+    var pegou = False
+    try:
+        _ = ler_parquet("tests/fixtures/simples.parquet", nomes)
+    except e:
+        pegou = True
+        assert_true("Voce quis dizer 'cidade'" in String(e))
+    assert_true(pegou)
+
+
+def test_pq_arquivo_invalido_erra() raises:
+    var pegou = False
+    try:
+        _ = ler_parquet("tests/fixtures/pessoas.csv")
+    except e:
+        pegou = True
+        assert_true("PAR1" in String(e))
+    assert_true(pegou)
+
+
+def test_pq_alimenta_o_executor() raises:
+    """Parquet e so mais uma fonte: o plano nao sabe de onde vieram os dados."""
+    var t = ler_parquet("tests/fixtures/grupos.parquet")
+    var q = (
+        t.com_coluna("dobro", coluna("valor").vezes(lit(2.0)))
+        .onde(coluna("grupo").eq(lit_texto("a")))
+        .selecionar(["id", "grupo", "dobro"])
+    )
+    assert_equal(q.linhas(), 1000)
+    assert_equal(q.esquema_previsto().dtype_de("dobro").codigo, DType.REAL)
+
+
+def test_pq_escrita_ida_e_volta() raises:
+    var original = ler_parquet("tests/fixtures/simples.parquet")
+    var saida = "tests/fixtures/_saida_simples.parquet"
+    para_parquet(original, saida)
+    var volta = ler_parquet(saida)
+    assert_equal(volta.linhas(), 5)
+    assert_equal(volta.colunas(), 4)
+    assert_equal(volta.nomes(), original.nomes())
+    for i in range(5):
+        assert_equal(volta.pegar("id").texto_em(i), original.pegar("id").texto_em(i))
+        assert_equal(
+            volta.pegar("valor").texto_em(i), original.pegar("valor").texto_em(i)
+        )
+        assert_equal(
+            volta.pegar("ativo").texto_em(i), original.pegar("ativo").texto_em(i)
+        )
+        assert_equal(
+            volta.pegar("cidade").texto_em(i), original.pegar("cidade").texto_em(i)
+        )
+
+
+def test_pq_escrita_preserva_ausentes() raises:
+    var original = ler_parquet("tests/fixtures/com_na.parquet")
+    var saida = "tests/fixtures/_saida_com_na.parquet"
+    para_parquet(original, saida)
+    var volta = ler_parquet(saida)
+    assert_equal(volta.pegar("id").contar_ausentes(), 2)
+    assert_true(volta.pegar("id").eh_ausente(1))
+    assert_true(volta.pegar("id").eh_ausente(3))
+    assert_equal(volta.pegar("cidade").texto_em(0), "SP")
+    assert_true(volta.pegar("cidade").eh_ausente(4))
+    assert_equal(volta.soma("id"), 9.0)
+
+
+def test_pq_escrita_preserva_temporais() raises:
+    var original = ler_parquet("tests/fixtures/temporal.parquet")
+    var saida = "tests/fixtures/_saida_temporal.parquet"
+    para_parquet(original, saida)
+    var volta = ler_parquet(saida)
+    assert_equal(volta.dtype_de("quando").codigo, DType.DATA)
+    assert_equal(volta.dtype_de("carimbo").codigo, DType.DATAHORA)
+    assert_equal(volta.pegar("quando").texto_em(1), "2024-02-29")
+    assert_equal(volta.pegar("carimbo").texto_em(1), "2024-02-29T23:59:59.500000")
+    assert_equal(volta.pegar("carimbo").texto_em(2), "1969-12-31T23:59:59")
+
+
+def test_pq_escrita_de_tabela_csv() raises:
+    """CSV entra, Parquet sai: o formato e detalhe do operador de leitura."""
+    var t = ler_csv("tests/fixtures/eventos.csv")
+    var saida = "tests/fixtures/_saida_eventos.parquet"
+    para_parquet(t, saida)
+    var volta = ler_parquet(saida)
+    assert_equal(volta.linhas(), 4)
+    assert_equal(volta.dtype_de("quando").codigo, DType.DATAHORA)
+    assert_equal(volta.pegar("quando").texto_em(0), "2024-01-15T08:30:00")
+    assert_equal(volta.pegar("tipo").texto_em(1), "compra")
+    assert_equal(volta.pegar("valor").contar_ausentes(), 1)
+
+
+def test_pq_escrita_volume() raises:
+    var original = ler_parquet("tests/fixtures/grupos.parquet")
+    var saida = "tests/fixtures/_saida_grupos.parquet"
+    para_parquet(original, saida)
+    var volta = ler_parquet(saida)
+    assert_equal(volta.linhas(), 3000)
+    assert_equal(volta.pegar("id").texto_em(2999), "2999")
+    assert_equal(volta.pegar("grupo").texto_em(1000), "b")
+    assert_equal(volta.soma("id"), original.soma("id"))
 
 
 def main() raises:
