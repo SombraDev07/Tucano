@@ -1473,16 +1473,98 @@ def _chaves_de_juncao(
     return ChavesJuncao(List[Int](), comp^, ausente^, False)
 
 
+def _custo_hash_juncao(cols: List[Coluna], pos: List[Int]) raises -> Int:
+    """Custo de construir a tabela hash deste lado.
+
+    Uma chave de texto dicionarizada custa a cardinalidade, nao o numero de
+    linhas: o hash so tem tantos baldes quanto valores distintos. Sem isso,
+    `pequena.unir(grande)` hashearia o lado grande so porque veio a direita.
+    """
+    var n = n_linhas(cols)
+    if n <= 0:
+        return 0
+    if len(pos) != 1:
+        return n
+    ref col = cols[pos[0]]
+    if col.tipo == DType.TEXTO and col.eh_dicionarizada():
+        var d = col.cardinalidade()
+        if d > 0 and d < n:
+            return d
+    return n
+
+
+def _sondar_juncao(
+    var ch_build: ChavesJuncao,
+    var ch_probe: ChavesJuncao,
+    n_build: Int,
+    n_probe: Int,
+    manter_sem_par: Bool,
+    mut idx_probe: List[Int],
+    mut idx_build: List[Int],
+) raises:
+    """Hash em `build`, sonda com `probe`. Preenche indices (probe, build)."""
+    if ch_build.usa_inteiro:
+        var balde = Dict[Int, List[Int]]()
+        for i in range(n_build):
+            if ch_build.ausente[i]:
+                continue
+            var k = ch_build.inteiras[i]
+            if k in balde:
+                balde[k].append(i)
+            else:
+                var lista = List[Int]()
+                lista.append(i)
+                balde[k] = lista^
+        for i in range(n_probe):
+            var casou = False
+            if not ch_probe.ausente[i]:
+                var k = ch_probe.inteiras[i]
+                if k in balde:
+                    casou = True
+                    for j in balde[k]:
+                        idx_probe.append(i)
+                        idx_build.append(j)
+            if not casou and manter_sem_par:
+                idx_probe.append(i)
+                idx_build.append(-1)
+        return
+    var balde = Dict[String, List[Int]]()
+    for i in range(n_build):
+        if ch_build.ausente[i]:
+            continue
+        var k = ch_build.textos[i]
+        if k in balde:
+            balde[k].append(i)
+        else:
+            var lista = List[Int]()
+            lista.append(i)
+            balde[k] = lista^
+    for i in range(n_probe):
+        var casou = False
+        if not ch_probe.ausente[i]:
+            var k = ch_probe.textos[i]
+            if k in balde:
+                casou = True
+                for j in balde[k]:
+                    idx_probe.append(i)
+                    idx_build.append(j)
+        if not casou and manter_sem_par:
+            idx_probe.append(i)
+            idx_build.append(-1)
+
+
 def op_unir(
     esquerda: List[Coluna],
     direita: List[Coluna],
     chaves: List[String],
     tipo: Int,
 ) raises -> List[Coluna]:
-    """HashJoin: constroi a tabela hash sobre a direita, sonda com a esquerda.
+    """HashJoin: constroi a tabela hash no lado mais barato.
 
-    O lado direito e o construido porque e o que sai por completo do resultado
-    quando nao ha par — na juncao a esquerda, toda linha da esquerda sobrevive.
+    Na juncao a esquerda a hash fica na direita: toda linha da esquerda precisa
+    ser sondada para sobreviver sem par. Na interna, os dois lados so entram
+    quando casam — entao hasheamos o de menor custo (cardinalidade da chave
+    dicionarizada, ou numero de linhas).
 
     Linha com chave ausente nao casa com nada, nem com outra ausente: ausente
     nao e um valor, e Desconhecido. Mesma regra do filtro.
@@ -1518,58 +1600,25 @@ def op_unir(
     var chaves_esq = _chaves_de_juncao(esquerda, pos_esq)
     var n_dir = n_linhas(direita)
     var n_esq = n_linhas(esquerda)
+    var custo_esq = _custo_hash_juncao(esquerda, pos_esq)
+    var custo_dir = _custo_hash_juncao(direita, pos_dir)
+    var hash_na_esquerda = (
+        tipo == TipoJuncao.INTERNO
+        and custo_esq < custo_dir
+        and chaves_esq.usa_inteiro == chaves_dir.usa_inteiro
+    )
 
     var idx_esq = List[Int]()
     var idx_dir = List[Int]()
-
-    if chaves_dir.usa_inteiro:
-        var balde = Dict[Int, List[Int]]()
-        for i in range(n_dir):
-            if chaves_dir.ausente[i]:
-                continue
-            var k = chaves_dir.inteiras[i]
-            if k in balde:
-                balde[k].append(i)
-            else:
-                var lista = List[Int]()
-                lista.append(i)
-                balde[k] = lista^
-        for i in range(n_esq):
-            var casou = False
-            if not chaves_esq.ausente[i]:
-                var k = chaves_esq.inteiras[i]
-                if k in balde:
-                    casou = True
-                    for j in balde[k]:
-                        idx_esq.append(i)
-                        idx_dir.append(j)
-            if not casou and tipo == TipoJuncao.ESQUERDA:
-                idx_esq.append(i)
-                idx_dir.append(-1)
+    if hash_na_esquerda:
+        _sondar_juncao(
+            chaves_esq^, chaves_dir^, n_esq, n_dir, False, idx_dir, idx_esq
+        )
     else:
-        var balde = Dict[String, List[Int]]()
-        for i in range(n_dir):
-            if chaves_dir.ausente[i]:
-                continue
-            var k = chaves_dir.textos[i]
-            if k in balde:
-                balde[k].append(i)
-            else:
-                var lista = List[Int]()
-                lista.append(i)
-                balde[k] = lista^
-        for i in range(n_esq):
-            var casou = False
-            if not chaves_esq.ausente[i]:
-                var k = chaves_esq.textos[i]
-                if k in balde:
-                    casou = True
-                    for j in balde[k]:
-                        idx_esq.append(i)
-                        idx_dir.append(j)
-            if not casou and tipo == TipoJuncao.ESQUERDA:
-                idx_esq.append(i)
-                idx_dir.append(-1)
+        var manter = tipo == TipoJuncao.ESQUERDA
+        _sondar_juncao(
+            chaves_dir^, chaves_esq^, n_dir, n_esq, manter, idx_esq, idx_dir
+        )
 
     var saida = List[Coluna]()
     for c in esquerda:

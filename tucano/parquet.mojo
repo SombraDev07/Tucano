@@ -157,6 +157,7 @@ struct ColunaMeta(Copyable, Movable):
     var tem_min_max: Bool
     var min_bits: Int
     var max_bits: Int
+    var n_distintos: Int
 
     def tem_dicionario(self) -> Bool:
         """Ausencia e -1, nao 0. Deslocar o pedaco leva um dicionario no comeco
@@ -181,14 +182,24 @@ struct ColunaMeta(Copyable, Movable):
     def max_int(self) -> Int:
         return _stats_como_int(self.tipo, self.max_bits)
 
+    def tem_distintos(self) -> Bool:
+        """`distinct_count` no rodape. `-1` e ausencia, nao zero distintos."""
+        return self.n_distintos >= 0
+
 
 @fieldwise_init
 struct StatsFaixa(Copyable, Movable, ImplicitlyCopyable):
-    """min/max de uma coluna num row group, no encoding PLAIN do tipo fisico."""
+    """min/max e `distinct_count` de uma coluna num row group.
+
+    `n_distintos` e `-1` quando o escritor nao informou. Texto dicionarizado
+    emite o NDV do pedaco — os codigos presentes, nao o dicionario herdado da
+    fatia, que pode ter valores que este row group nao usa.
+    """
 
     var tem: Bool
     var min_bits: Int
     var max_bits: Int
+    var n_distintos: Int
 
 
 def _stats_como_int(tipo: Int, bits: Int) -> Int:
@@ -226,17 +237,22 @@ def _ler_le_stats(bytes: List[UInt8], ini: Int, n: Int) -> Int:
 def _ler_estatisticas(
     mut l: LeitorThrift, bytes: List[UInt8]
 ) raises -> StatsFaixa:
-    """Campo 12 de ColumnMetaData: min_value/max_value em PLAIN."""
+    """Campo 12 de ColumnMetaData: distinct_count e min_value/max_value em PLAIN."""
     var tem_min = False
     var tem_max = False
     var min_bits = 0
     var max_bits = 0
+    var n_distintos = -1
     l.entrar()
     while True:
         var d = l.campo(bytes)
         if d.tipo == TTipo.STOP:
             break
-        if (
+        if d.id == 4 and (
+            d.tipo == TTipo.I64 or d.tipo == TTipo.I32 or d.tipo == TTipo.I16
+        ):
+            n_distintos = l.zigzag(bytes)
+        elif (
             (d.id == 1 or d.id == 2 or d.id == 5 or d.id == 6)
             and d.tipo == TTipo.BINARIO
         ):
@@ -252,7 +268,7 @@ def _ler_estatisticas(
         else:
             l.pular_valor(bytes, d.tipo)
     l.sair()
-    return StatsFaixa(tem_min and tem_max, min_bits, max_bits)
+    return StatsFaixa(tem_min and tem_max, min_bits, max_bits, n_distintos)
 
 
 @fieldwise_init
@@ -568,6 +584,7 @@ def _ler_coluna_meta(mut l: LeitorThrift, bytes: List[UInt8]) raises -> ColunaMe
     var tem_min_max = False
     var min_bits = 0
     var max_bits = 0
+    var n_distintos = -1
 
     l.entrar()
     while True:
@@ -605,6 +622,7 @@ def _ler_coluna_meta(mut l: LeitorThrift, bytes: List[UInt8]) raises -> ColunaMe
                 tem_min_max = st.tem
                 min_bits = st.min_bits
                 max_bits = st.max_bits
+                n_distintos = st.n_distintos
         else:
             l.pular_valor(bytes, c.tipo)
     l.sair()
@@ -621,12 +639,13 @@ def _ler_coluna_meta(mut l: LeitorThrift, bytes: List[UInt8]) raises -> ColunaMe
         tem_min_max,
         min_bits,
         max_bits,
+        n_distintos,
     )
 
 
 def _ler_pedaco(mut l: LeitorThrift, bytes: List[UInt8]) raises -> ColunaMeta:
     var meta = ColunaMeta(
-        -1, 0, 0, 0, -1, 0, "", List[Int](), False, 0, 0
+        -1, 0, 0, 0, -1, 0, "", List[Int](), False, 0, 0, -1
     )
     var achou = False
     l.entrar()
@@ -778,7 +797,7 @@ def _deslocar(meta: ColunaMeta, base: Int) -> ColunaMeta:
     return ColunaMeta(
         meta.tipo, meta.codec, meta.num_valores, meta.offset_dados - base, dic,
         meta.tamanho_comprimido, meta.caminho, meta.codificacoes.copy(),
-        meta.tem_min_max, meta.min_bits, meta.max_bits,
+        meta.tem_min_max, meta.min_bits, meta.max_bits, meta.n_distintos,
     )
 
 
@@ -2237,8 +2256,32 @@ def _cabecalho_de_dicionario(num_valores: Int, tamanho: Int) raises -> List[UInt
     return w.finalizar()
 
 
+def _n_distintos_de(col: Coluna) raises -> Int:
+    """NDV do pedaco. `-1` se a coluna nao e dicionarizada."""
+    if not col.eh_dicionarizada():
+        return -1
+    var card = col.cardinalidade()
+    if card <= 0:
+        return 0
+    var visto = List[Bool](capacity=card)
+    visto.resize(card, False)
+    var nd = 0
+    var n = col.tamanho()
+    for i in range(n):
+        if col.eh_ausente(i):
+            continue
+        var c = Int(col.codigos[i])
+        if c < 0 or c >= card:
+            continue
+        if not visto[c]:
+            visto[c] = True
+            nd += 1
+    return nd
+
+
 def _stats_de_coluna(col: Coluna) raises -> StatsFaixa:
     """min/max dos valores presentes. Texto e logico nao entram: sem PLAIN util."""
+    var nd = _n_distintos_de(col)
     var n = col.tamanho()
     if col.tipo == DType.REAL:
         var tem = False
@@ -2258,8 +2301,8 @@ def _stats_de_coluna(col: Coluna) raises -> StatsFaixa:
                 if v > mx:
                     mx = v
         if not tem:
-            return StatsFaixa(False, 0, 0)
-        return StatsFaixa(True, real64_para_bits(mn), real64_para_bits(mx))
+            return StatsFaixa(False, 0, 0, nd)
+        return StatsFaixa(True, real64_para_bits(mn), real64_para_bits(mx), nd)
     if (
         col.tipo == DType.INTEIRO
         or col.tipo == DType.DATA
@@ -2282,9 +2325,9 @@ def _stats_de_coluna(col: Coluna) raises -> StatsFaixa:
                 if v > mx:
                     mx = v
         if not tem:
-            return StatsFaixa(False, 0, 0)
-        return StatsFaixa(True, Int(mn), Int(mx))
-    return StatsFaixa(False, 0, 0)
+            return StatsFaixa(False, 0, 0, nd)
+        return StatsFaixa(True, Int(mn), Int(mx), nd)
+    return StatsFaixa(False, 0, 0, nd)
 
 
 def _bytes_stats(tipo: Int, bits: Int) -> List[UInt8]:
@@ -2440,11 +2483,14 @@ def para_parquet_lote(
             w.campo_i64(9, offset_dados[k])
             if offset_dic[k] >= 0:
                 w.campo_i64(11, offset_dic[k])
-            if stats[k].tem:
-                var tipo_p = _tipo_parquet(colunas[c].tipo)
+            if stats[k].tem or stats[k].n_distintos >= 0:
                 w.campo_struct(12)
-                w.campo_bytes(5, _bytes_stats(tipo_p, stats[k].max_bits))
-                w.campo_bytes(6, _bytes_stats(tipo_p, stats[k].min_bits))
+                if stats[k].n_distintos >= 0:
+                    w.campo_i64(4, stats[k].n_distintos)
+                if stats[k].tem:
+                    var tipo_p = _tipo_parquet(colunas[c].tipo)
+                    w.campo_bytes(5, _bytes_stats(tipo_p, stats[k].max_bits))
+                    w.campo_bytes(6, _bytes_stats(tipo_p, stats[k].min_bits))
                 w.sair()
             w.sair()  # ColumnMetaData
             w.sair()  # ColumnChunk

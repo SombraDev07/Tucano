@@ -3,6 +3,21 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.16.0] — distinct_count e reordenacao de juncao
+
+O escritor passa a gravar `distinct_count` (campo 4 de `Statistics`) em coluna
+de texto dicionarizada: o NDV **do row group**, nao o tamanho do dicionario
+que a fatia herdou. O hash join interno hasheia o lado mais barato — cardinalidade
+da chave dicionarizada, ou numero de linhas. Juncao a esquerda continua sondando
+a esquerda, senao a linha sem par desaparece.
+
+### Adicionado
+
+- **`distinct_count` no rodape Parquet** de coluna dicionarizada. Leitor aceita
+  o campo em arquivo nosso ou de terceiro. `ColunaMeta.n_distintos` / `.tem_distintos()`.
+- **Hash join interno escolhe o lado da hash.** `pequena.unir(grande)` deixa de
+  hashear o lado grande so porque veio a direita.
+
 ## [0.15.0] — Predicate pushdown por min/max
 
 O escritor passa a gravar min/max de cada row group numerico no rodape. O

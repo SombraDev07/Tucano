@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.15.0 — M0 → M10.7 fechados; leitura e pipeline acima do pandas (paralelismo por thread à parte).
+Versão 0.16.0 — M0 → M10.8 fechados; leitura e pipeline acima do pandas (paralelismo por thread à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -192,7 +192,7 @@ sem executar.
 | exibir | `primeiras(n)` / `mostrar()` |
 | filtrar (lazy) | `onde(expr)` → `Consulta` |
 | agrupar | `agrupar([chaves])` → `.agregar([...])` |
-| juntar | `unir(outra, [chaves], "interno" \| "esquerda")` |
+| juntar | `unir(outra, [chaves], "interno" \| "esquerda")` — interno hasheia o lado mais barato |
 | ordenar | `ordenar([chaves], descendente)` — estável, ausente por último |
 | empilhar | `concatenar(outra)` — exige mesmo esquema |
 | ausentes | `remover_na([nomes])` · `preencher_na(nome, valor)` |
@@ -331,7 +331,8 @@ pela qual não flui:
 
 Sobre Parquet a fatia é o row group, e o arquivo **nunca é carregado inteiro**:
 `tucano.arquivo` lê por faixa via `pread`, e `VarreduraParquet` lê cada pedaço de coluna na
-sua própria faixa de bytes. O escritor grava min/max numérico no rodapé; `coletar()` e
+sua própria faixa de bytes. O escritor grava min/max numérico e `distinct_count` de texto dicionarizado no
+rodapé; `coletar()` e
 `coletar_em_fluxo()` não leem o row group cujo intervalo não pode satisfazer um
 `coluna op literal`. Sem estatística, o grupo é lido. O filtro do plano continua
 rodando — pular grupo é I/O, não substitui a seleção.
@@ -452,10 +453,15 @@ páginas V1 e V2, sem compressão e Snappy, múltiplos row groups, tipos lógico
 `ConvertedType` e `LogicalType`.
 
 Escrita: `PLAIN` para numéricas e texto de alta cardinalidade; `RLE_DICTIONARY` para
-texto já dicionarizado. Sem compressão, colunas opcionais, um ou mais row groups.
+texto já dicionarizado. O rodapé leva min/max numérico e `distinct_count` no texto
+dicionarizado (NDV do row group). Sem compressão, colunas opcionais, um ou mais row groups.
 A interoperabilidade é verificada lendo os arquivos gerados com outra implementação
 (`pixi run -e fixtures interop`), não com o próprio leitor: um leitor e um escritor
 com o mesmo mal-entendido concordam entre si.
+
+`unir` interno hasheia o lado de menor custo (cardinalidade da chave dicionarizada,
+ou número de linhas). Junção à esquerda continua sondando a esquerda: linha sem par
+precisa sobreviver.
 
 ---
 

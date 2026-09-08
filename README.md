@@ -55,6 +55,7 @@ o que for mais conveniente na hora.
   e predicate pushdown de verdade: coluna não pedida e row group impossível não saem do disco.
 - **Agrupamento e junção como operadores** — não funções soltas. Chave de texto repetida
   agrupa por indexação direta de array, sem hash: 14,7× mais rápido que chave composta.
+  Junção interna hasheia o lado de menor custo (NDV ou número de linhas).
 - **Painel embutido** — KPIs, gráficos e filtros servidos pela própria biblioteca. Cada
   widget guarda uma *consulta*, não uma tabela: o filtro reexecuta e só o agregado atravessa.
 - **Otimizador de consultas** — o filtro sobe no plano, constantes dobram, a coluna que

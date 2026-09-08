@@ -1438,6 +1438,44 @@ def test_pq_escrita_emite_min_max() raises:
         assert_equal(m.grupos[g].colunas[c_valor].max_f64(), Float64(base + 99))
 
 
+def test_pq_escrita_emite_distinct_count() raises:
+    """Texto dicionarizado grava o NDV do row group, nao o do dicionario herdado."""
+    var grupos = List[String](capacity=300)
+    var ids = List[Int64](capacity=300)
+    for i in range(300):
+        if i < 100:
+            grupos.append("a")
+        elif i < 200:
+            grupos.append("b")
+        else:
+            grupos.append("c")
+        ids.append(Int64(i))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("grupo", grupos^))
+    cols.append(Coluna.de_inteiros("id", ids^))
+    var t = Tabela(cols^)
+    assert_true(t.pegar("grupo").eh_dicionarizada())
+    assert_equal(t.pegar("grupo").cardinalidade(), 3)
+    var saida = "tests/fixtures/_saida_ndv.parquet"
+    para_parquet(t, saida, 100)
+
+    var m = metadados_parquet(saida)
+    assert_equal(len(m.grupos), 3)
+    var c_grupo = 0
+    var c_id = 1
+    for g in range(3):
+        assert_true(m.grupos[g].colunas[c_grupo].tem_distintos())
+        assert_equal(m.grupos[g].colunas[c_grupo].n_distintos, 1)
+        assert_false(m.grupos[g].colunas[c_id].tem_distintos())
+        assert_equal(m.grupos[g].colunas[c_id].n_distintos, -1)
+
+    var um = "tests/fixtures/_saida_ndv_um.parquet"
+    para_parquet(t, um)
+    var m1 = metadados_parquet(um)
+    assert_equal(len(m1.grupos), 1)
+    assert_equal(m1.grupos[0].colunas[c_grupo].n_distintos, 3)
+
+
 def test_pq_predicate_pushdown_pula_grupo() raises:
     """Filtro que nenhum valor do grupo pode satisfazer nao le o grupo."""
     var ids = List[Int64](capacity=300)
@@ -1662,6 +1700,122 @@ def test_m6_juncao_a_esquerda() raises:
     assert_equal(r.pegar("cidade").texto_em(3), "BH")
     assert_true(r.pegar("estado").eh_ausente(3))
     assert_true(r.pegar("populacao").eh_ausente(3))
+
+
+def test_m8_juncao_interna_hasheia_o_menor() raises:
+    """Interna hasheia o lado mais barato; o conjunto do resultado nao muda."""
+    var esq_k = List[String]()
+    var esq_x = List[Int64]()
+    esq_k.append("a")
+    esq_k.append("b")
+    esq_x.append(Int64(1))
+    esq_x.append(Int64(2))
+    var cols_e = List[Coluna]()
+    cols_e.append(Coluna.de_textos("k", esq_k^))
+    cols_e.append(Coluna.de_inteiros("x", esq_x^))
+    var pequena = Tabela(cols_e^)
+
+    var dir_k = List[String]()
+    var dir_y = List[Int64]()
+    for i in range(20):
+        if i % 3 == 0:
+            dir_k.append("a")
+        elif i % 3 == 1:
+            dir_k.append("b")
+        else:
+            dir_k.append("c")
+        dir_y.append(Int64(i))
+    var cols_d = List[Coluna]()
+    cols_d.append(Coluna.de_textos("k", dir_k^))
+    cols_d.append(Coluna.de_inteiros("y", dir_y^))
+    var grande = Tabela(cols_d^)
+
+    var por = List[String]()
+    por.append("k")
+    var ord_ky = List[String]()
+    ord_ky.append("k")
+    ord_ky.append("y")
+    var r1 = pequena.unir(grande, por).ordenar(ord_ky).coletar()
+    var r2 = grande.unir(pequena, por).ordenar(ord_ky).coletar()
+    assert_equal(r1.linhas(), 14)
+    assert_equal(r2.linhas(), 14)
+    assert_equal(r1.pegar("k").texto_em(0), "a")
+    assert_equal(r1.pegar("x").texto_em(0), "1")
+    assert_equal(r1.pegar("y").texto_em(0), "0")
+    for i in range(r1.linhas()):
+        assert_equal(r1.pegar("k").texto_em(i), r2.pegar("k").texto_em(i))
+        assert_equal(r1.pegar("x").texto_em(i), r2.pegar("x").texto_em(i))
+        assert_equal(r1.pegar("y").texto_em(i), r2.pegar("y").texto_em(i))
+
+    # muitas linhas, pouca cardinalidade: o custo e o NDV, nao o n
+    var fat_k = List[String](capacity=80)
+    var fat_x = List[Int64](capacity=80)
+    for i in range(80):
+        if i % 2 == 0:
+            fat_k.append("SP")
+        else:
+            fat_k.append("RJ")
+        fat_x.append(Int64(i))
+    var cols_f = List[Coluna]()
+    cols_f.append(Coluna.de_textos("k", fat_k^))
+    cols_f.append(Coluna.de_inteiros("x", fat_x^))
+    var fatia = Tabela(cols_f^)
+    assert_true(fatia.pegar("k").eh_dicionarizada())
+    assert_equal(fatia.pegar("k").cardinalidade(), 2)
+
+    var dim_k = List[String]()
+    var dim_y = List[Int64]()
+    dim_k.append("SP")
+    dim_k.append("RJ")
+    dim_k.append("BH")
+    dim_y.append(Int64(10))
+    dim_y.append(Int64(20))
+    dim_y.append(Int64(30))
+    var cols_dim = List[Coluna]()
+    cols_dim.append(Coluna.de_textos("k", dim_k^))
+    cols_dim.append(Coluna.de_inteiros("y", dim_y^))
+    var dim = Tabela(cols_dim^)
+    var r3 = fatia.unir(dim, por).coletar()
+    assert_equal(r3.linhas(), 80)
+
+
+def test_m8_juncao_esquerda_nao_inverte() raises:
+    """Juncao a esquerda sonda a esquerda: linha sem par sobrevive."""
+    var esq_k = List[String]()
+    var esq_x = List[Int64]()
+    esq_k.append("a")
+    esq_k.append("z")
+    esq_x.append(Int64(1))
+    esq_x.append(Int64(2))
+    var cols_e = List[Coluna]()
+    cols_e.append(Coluna.de_textos("k", esq_k^))
+    cols_e.append(Coluna.de_inteiros("x", esq_x^))
+    var pequena = Tabela(cols_e^)
+
+    var dir_k = List[String]()
+    var dir_y = List[Int64]()
+    for i in range(12):
+        dir_k.append("a")
+        dir_y.append(Int64(i))
+    var cols_d = List[Coluna]()
+    cols_d.append(Coluna.de_textos("k", dir_k^))
+    cols_d.append(Coluna.de_inteiros("y", dir_y^))
+    var grande = Tabela(cols_d^)
+
+    var por = List[String]()
+    por.append("k")
+    var r = pequena.unir(grande, por, "esquerda").coletar()
+    assert_equal(r.linhas(), 13)
+    var viu_z = False
+    var ausentes = 0
+    for i in range(r.linhas()):
+        if r.pegar("k").texto_em(i) == "z":
+            viu_z = True
+            assert_true(r.pegar("y").eh_ausente(i))
+            assert_equal(r.pegar("x").texto_em(i), "2")
+            ausentes += 1
+    assert_true(viu_z)
+    assert_equal(ausentes, 1)
 
 
 def test_m6_juncao_chave_ausente_nao_casa() raises:
