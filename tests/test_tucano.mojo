@@ -1708,9 +1708,76 @@ def test_m6_grupos_por_inteiro() raises:
     var chaves = List[String]()
     chaves.append("k")
     var g = calcular_grupos(t.lote(), chaves)
-    assert_equal(g.caminho, "hash de inteiros")
+    # 1..3 e faixa estreita: o grupo e o proprio valor deslocado, sem hash
+    assert_equal(g.caminho, "indexacao direta inteira")
     assert_equal(g.n_grupos, 3)
     assert_equal(g.ids[0], g.ids[2])
+
+
+def test_grupos_inteiros_esparsos_e_ausentes() raises:
+    """Valores distantes nao cabem no vetor; a tabela guarda a chave e confere.
+
+    Endereco aberto sem guardar a chave juntaria dois valores diferentes que
+    caissem no mesmo balde — grupo errado que nao denuncia. Aqui o hash so diz
+    **onde procurar**; quem responde e a comparacao da chave.
+
+    Ausente forma um grupo unico, o que e o oposto de comparar: `NA = NA` e
+    DESCONHECIDO, mas `NA` agrupa com `NA`.
+    """
+    var v = List[Int64]()
+    var aus = List[Bool]()
+    var brutos = List[Int]()
+    for x in [0, 1, 2, 0, 3, 1, 2]:
+        brutos.append(x)
+    for i in range(len(brutos)):
+        if brutos[i] == 3:
+            v.append(Int64(0))
+            aus.append(True)
+        else:
+            # bem espalhados: a faixa passa do teto do vetor
+            v.append(Int64(brutos[i]) * 3_000_000_000)
+            aus.append(False)
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("k", v^, aus^))
+    var chaves = List[String]()
+    chaves.append("k")
+
+    var g = calcular_grupos(cols, chaves)
+    assert_equal(g.caminho, "hash de inteiros")
+    # 0, 1, 2 e o grupo dos ausentes
+    assert_equal(g.n_grupos, 4)
+    assert_equal(g.ids[0], g.ids[3])   # os dois zeros
+    assert_equal(g.ids[1], g.ids[5])   # os dois uns
+    assert_equal(g.ids[2], g.ids[6])   # os dois dois
+    assert_true(g.ids[4] != g.ids[0])
+    assert_true(g.ids[4] != g.ids[1])
+    assert_true(g.ids[4] != g.ids[2])
+    # id atribuido na ordem de aparicao
+    assert_equal(g.ids[0], 0)
+    assert_equal(g.ids[1], 1)
+    assert_equal(g.ids[2], 2)
+    assert_equal(g.ids[4], 3)
+
+
+def test_grupos_inteiros_muitos_distintos() raises:
+    """Muitos grupos e faixa larga: a tabela precisa crescer sem errar.
+
+    Vinte mil valores distintos espalhados, cada um o seu grupo. Um erro de
+    sondagem aqui aparece como grupos a menos.
+    """
+    var n = 20_000
+    var v = List[Int64](capacity=n)
+    for i in range(n):
+        v.append(Int64(i) * 1_000_003 + Int64(i % 7))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("k", v^))
+    var chaves = List[String]()
+    chaves.append("k")
+    var g = calcular_grupos(cols, chaves)
+    assert_equal(g.caminho, "hash de inteiros")
+    assert_equal(g.n_grupos, n)
+    for i in range(n):
+        assert_equal(g.ids[i], i)
 
 
 def test_m6_grupos_por_chave_composta() raises:

@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.25.0 — M0 → M17; leitura multithread; HTTP do painel fora do caminho crítico.
+Versão 0.26.0 — M0 → M18; leitura multithread; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 

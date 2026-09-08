@@ -3,6 +3,37 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.26.0] — Chave de grupo inteira
+
+Ultimo operador acima do piso: 22 -> **11 ns/linha**, empatando com a chave
+dicionarizada. Nenhuma das tres causas era o algoritmo — `eh_ausente` por linha,
+o teste de tipo dentro do laco, e duas buscas no `Dict` por linha.
+
+| 1M linhas | antes | depois |
+|---|---|---|
+| 50 valores em 0..49 | 10 ms | **3 ms** |
+| 200 mil valores em 0..199.999 | 23 ms | **3 ms** |
+| 50 valores espalhados por bilhoes | 10 ms | **5 ms** |
+
+### Alterado
+
+- **Faixa estreita nao usa hash.** Uma passada acha o menor e o maior; se a
+  faixa couber num vetor, o grupo e o proprio valor deslocado — o mesmo que a
+  coluna dicionarizada ja fazia.
+- **Faixa larga usa enderecamento aberto com a chave guardada e conferida.** O
+  hash diz onde procurar; quem responde e a comparacao da chave. Sem isso, dois
+  valores diferentes no mesmo balde virariam um grupo so.
+- Valor e mascara de ausencia lidos uma vez, fora do laco.
+- `Grupos.caminho` passa a reportar `"indexacao direta inteira"` quando a faixa
+  cabe; `"hash de inteiros"` segue sendo o nome do caminho esparso.
+
+### Adicionado
+
+- `test_grupos_inteiros_esparsos_e_ausentes` — o caminho esparso nao era
+  exercitado por teste nenhum, e e onde uma sondagem errada juntaria grupos.
+- `test_grupos_inteiros_muitos_distintos` — 20 mil distintos espalhados, cada um
+  o seu grupo.
+
 ## [0.25.0] — Chave de grupo composta
 
 O ultimo lugar onde a `String` por linha ainda morava. Para coluna real,

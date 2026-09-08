@@ -1166,29 +1166,111 @@ def calcular_grupos(cols: List[Coluna], chaves: List[String]) raises -> Grupos:
             or col.tipo == DType.DATAHORA
             or col.tipo == DType.LOGICO
         ):
-            var mapa = Dict[Int, Int]()
-            var ausente_id = -1
-            var n_grupos = 0
+            # o valor de cada linha, uma vez, sem decidir o tipo por linha
+            var valores = List[Int](capacity=linhas)
+            if col.tipo == DType.LOGICO:
+                for i in range(linhas):
+                    valores.append(Int(col.logics[i]))
+            else:
+                var pv = col.ints.unsafe_ptr()
+                for i in range(linhas):
+                    valores.append(Int(pv.unsafe_load(i)))
+            var na = col.validity_bits.para_bytes()
+
+            # faixa dos valores presentes: se for estreita, o grupo e o proprio
+            # valor deslocado, e nao ha hash nenhum
+            var menor = 0
+            var maior = 0
+            var vazio = True
+            var pval = valores.unsafe_ptr()
+            var pna = na.unsafe_ptr()
             for i in range(linhas):
-                if col.eh_ausente(i):
+                if pna.unsafe_load(i) != 0:
+                    continue
+                var v = pval.unsafe_load(i)
+                if vazio:
+                    menor = v
+                    maior = v
+                    vazio = False
+                elif v < menor:
+                    menor = v
+                elif v > maior:
+                    maior = v
+
+            var n_grupos = 0
+            var ausente_id = -1
+            ids.resize(linhas, 0)
+            var pids = ids.unsafe_ptr()
+
+            var faixa = 0
+            var cabe = not vazio
+            if cabe:
+                if maior - menor >= _LIMITE_INDEXACAO_DIRETA:
+                    cabe = False
+                else:
+                    faixa = maior - menor + 1
+
+            if cabe:
+                var slot = List[Int]()
+                slot.resize(faixa, -1)
+                var ps = slot.unsafe_ptr()
+                for i in range(linhas):
+                    if pna.unsafe_load(i) != 0:
+                        if ausente_id < 0:
+                            ausente_id = n_grupos
+                            representantes.append(i)
+                            n_grupos += 1
+                        pids.unsafe_store(i, ausente_id)
+                        continue
+                    var s = pval.unsafe_load(i) - menor
+                    var g = ps.unsafe_load(s)
+                    if g < 0:
+                        g = n_grupos
+                        ps.unsafe_store(s, g)
+                        representantes.append(i)
+                        n_grupos += 1
+                    pids.unsafe_store(i, g)
+                return Grupos(
+                    ids^, n_grupos, representantes^, "indexacao direta inteira"
+                )
+
+            # faixa larga demais para um vetor: tabela de enderecamento aberto,
+            # com a chave guardada e conferida — hash aqui e so onde procurar,
+            # nunca a resposta
+            var tam = 1024
+            while tam < linhas * 2:
+                tam *= 2
+            var chaves_tab = List[Int]()
+            chaves_tab.resize(tam, 0)
+            var grupo_tab = List[Int]()
+            grupo_tab.resize(tam, -1)
+            var mascara = tam - 1
+            var pct = chaves_tab.unsafe_ptr()
+            var pgt = grupo_tab.unsafe_ptr()
+            for i in range(linhas):
+                if pna.unsafe_load(i) != 0:
                     if ausente_id < 0:
                         ausente_id = n_grupos
                         representantes.append(i)
                         n_grupos += 1
-                    ids.append(ausente_id)
+                    pids.unsafe_store(i, ausente_id)
                     continue
-                var chave: Int
-                if col.tipo == DType.LOGICO:
-                    chave = Int(col.logics[i])
-                else:
-                    chave = Int(col.ints[i])
-                if chave in mapa:
-                    ids.append(mapa[chave])
-                else:
-                    mapa[chave] = n_grupos
-                    representantes.append(i)
-                    ids.append(n_grupos)
-                    n_grupos += 1
+                var chave = pval.unsafe_load(i)
+                var h = (chave * -7046029254386353131) & 0x7FFFFFFFFFFFFFFF
+                var idx = h & mascara
+                while True:
+                    var g = pgt.unsafe_load(idx)
+                    if g < 0:
+                        pct.unsafe_store(idx, chave)
+                        pgt.unsafe_store(idx, n_grupos)
+                        pids.unsafe_store(i, n_grupos)
+                        representantes.append(i)
+                        n_grupos += 1
+                        break
+                    if pct.unsafe_load(idx) == chave:
+                        pids.unsafe_store(i, g)
+                        break
+                    idx = (idx + 1) & mascara
             return Grupos(ids^, n_grupos, representantes^, "hash de inteiros")
 
     var posicoes = List[Int]()

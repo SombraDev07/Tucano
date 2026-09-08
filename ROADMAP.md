@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13 e M15 → M17 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13 e M15 → M18 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -239,7 +239,8 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M13 | Paralelismo por thread | crítica | ✅ feito | leitura 105 → 69 ms |
 | M15 | Operadores | crítica | ✅ feito | filtro 47 → 16 ms; paralelizar operador medido e recusado |
 | M16 | Junção e ordenação | crítica | ✅ feito | 470 → 66 e 335 → 98 ns/linha |
-| M17 | Chave de grupo composta | crítica | ✅ feito | 221 → 34 ns/linha |
+| M17 | Chave de grupo composta | crítica | ✅ feito | 221 → 30 ns/linha |
+| M18 | Chave de grupo inteira | crítica | ✅ feito | 22 → 11 ns/linha |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -1765,6 +1766,65 @@ E o quadro dos operadores, fechado o ciclo:
 - [x] conferido contra implementação própria do teste, e o caminho de muitas
       combinações tem teste que o alcança
 - [x] 234 testes verdes, interoperabilidade nos dois formatos
+
+---
+
+## M18 — Chave inteira: o hash diz onde procurar, não a resposta ✅
+
+Último operador acima do piso. `grupos por chave inteira` fazia 22 ns/linha
+contra 11 da chave dicionarizada — pela mesma pergunta, com uma coluna mais
+simples.
+
+Três coisas, e nenhuma é o algoritmo:
+
+- `col.eh_ausente(i)` por linha, que lança e extrai bit
+- o teste de tipo (`é LÓGICO?`) **dentro** do laço
+- `chave in mapa` e depois `mapa[chave]` — **duas buscas** no `Dict` por linha
+
+### Faixa estreita não precisa de hash
+
+O valor é lido uma vez, a máscara de ausência de uma vez, e uma passada acha o
+menor e o maior. Se a faixa couber num vetor, o grupo é o próprio valor
+deslocado — indexação direta, o mesmo que a coluna dicionarizada já fazia.
+
+| 1M linhas | antes | depois |
+|---|---|---|
+| 50 valores em 0..49 | 10 ms | **3 ms** |
+| 200 mil valores em 0..199.999 | 23 ms | **3 ms** |
+| 50 valores espalhados por bilhões | 10 ms | **5 ms** |
+
+O caso de 200 mil grupos é o que mostra o ponto: não é a quantidade de grupos
+que pesava, era o `Dict`.
+
+### E quando a faixa é larga
+
+Tabela de endereçamento aberto com a chave **guardada e conferida**. Vale
+insistir no porquê, porque é o mesmo erro que quase entrou no M17: um hash sem a
+chave ao lado juntaria dois valores diferentes que caíssem no mesmo balde, e o
+resultado não denuncia — a soma sai errada e parece plausível.
+
+**O hash diz onde procurar. Quem responde é a comparação da chave.**
+
+### Resultado, e o ciclo dos operadores fechado
+
+| ns/linha, 1M linhas | início do ciclo | agora |
+|---|---|---|
+| grupos por chave dicionarizada | 11 | 11 |
+| grupos por chave inteira | 16 | **11** |
+| grupos por chave composta | 221 | **30** |
+| `agrupar` + 3 agregações | 43 | **13** |
+| junção à esquerda | 470 | **67** |
+| ordenação estável | 335 | **91** |
+
+Nenhum operador acima de 100 ns/linha. O que era 470 e 335 hoje são 67 e 91, e
+o que era 221 são 30.
+
+### Critério de saída
+
+- [x] chave inteira sem `Dict` no caminho comum e sem decidir tipo por linha
+- [x] endereçamento aberto guarda a chave e confere — nunca agrupa por hash
+- [x] os dois caminhos cobertos por teste, inclusive o esparso, que não existia
+- [x] 236 testes verdes, interoperabilidade nos dois formatos
 
 ---
 
