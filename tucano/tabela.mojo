@@ -18,7 +18,14 @@ from .dtype import DType
 from .erros import erro_coluna
 from .expr import Expr
 from .plano import Etapa, TipoEtapa, descrever_logico, descrever_fisico
-from .executor import executar, avisos_plano, esquema_apos, esquema_do_lote
+from .agregacao import Agregacao, contar
+from .executor import (
+    executar,
+    avisos_plano,
+    esquema_apos,
+    esquema_do_lote,
+    TipoJuncao,
+)
 
 
 # ---------------------------------------------------------------- Consulta
@@ -35,10 +42,12 @@ struct Consulta(Copyable, Movable):
 
     var fonte: List[Coluna]
     var etapas: List[Etapa]
+    var chaves_pendentes: List[String]
 
     def __init__(out self, var fonte: List[Coluna]):
         self.fonte = fonte^
         self.etapas = List[Etapa]()
+        self.chaves_pendentes = List[String]()
 
     @staticmethod
     def de(tab: Tabela) -> Self:
@@ -62,6 +71,83 @@ struct Consulta(Copyable, Movable):
     def com_coluna(var self, nome: String, var expr: Expr) -> Self:
         """Coluna derivada. Substitui a coluna se o nome ja existir."""
         self.etapas.append(Etapa.com_coluna(nome, expr^))
+        return self^
+
+    def unir(
+        var self, outra: Tabela, por: List[String], tipo: String = "interno"
+    ) raises -> Self:
+        """Junta com outra tabela pelas chaves dadas.
+
+        `tipo` e "interno" ou "esquerda". As colunas de chave aparecem uma unica
+        vez no resultado; nomes que colidem fora das chaves sao recusados, nao
+        renomeados em silencio.
+        """
+        if len(por) == 0:
+            raise Error("unir exige pelo menos uma chave")
+        var chaves = List[String]()
+        for c in por:
+            chaves.append(c)
+        self.etapas.append(
+            Etapa.juncao(outra.lote(), chaves^, TipoJuncao.de_texto(tipo))
+        )
+        return self^
+
+    def ordenar(
+        var self, chaves: List[String], descendente: Bool = False
+    ) raises -> Self:
+        """Ordena pelas colunas dadas. Ausente vai sempre para o fim.
+
+        A ordenacao e **estavel**, entao direcoes mistas saem de dois passos:
+        `ordenar(["b"], True).ordenar(["a"])` da `a` crescente e, dentro de cada
+        `a`, `b` decrescente. Por isso nao ha uma segunda forma de ordenar.
+        """
+        if len(chaves) == 0:
+            raise Error("ordenar exige pelo menos uma coluna")
+        var copia = List[String]()
+        var desc = List[Bool]()
+        for c in chaves:
+            copia.append(c)
+            desc.append(descendente)
+        self.etapas.append(Etapa.ordenacao(copia^, desc^))
+        return self^
+
+    def concatenar(var self, outra: Tabela) raises -> Self:
+        """Empilha outra tabela. Exige mesmo esquema, na mesma ordem."""
+        self.etapas.append(Etapa.concatenacao(outra.lote()))
+        return self^
+
+    def remover_na(var self, nomes: List[String] = List[String]()) raises -> Self:
+        """Descarta linhas com ausente. Sem argumento, olha todas as colunas."""
+        var copia = List[String]()
+        for c in nomes:
+            copia.append(c)
+        self.etapas.append(Etapa.remover_na(copia^))
+        return self^
+
+    def preencher_na(var self, nome: String, var valor: Expr) raises -> Self:
+        """Substitui os ausentes de uma coluna. Sem conversao implicita."""
+        self.etapas.append(Etapa.preencher_na(nome, valor^))
+        return self^
+
+    def agrupar(var self, chaves: List[String]) raises -> Self:
+        """Define as chaves de grupo. Encadeie `.agregar([...])` em seguida."""
+        if len(chaves) == 0:
+            raise Error("agrupar exige pelo menos uma chave")
+        var copia = List[String]()
+        for c in chaves:
+            copia.append(c)
+        self.chaves_pendentes = copia^
+        return self^
+
+    def agregar(var self, var agregacoes: List[Agregacao]) raises -> Self:
+        """Reduz cada grupo. Exige um `agrupar` antes."""
+        if len(self.chaves_pendentes) == 0:
+            raise Error("agregar exige um agrupar antes")
+        if len(agregacoes) == 0:
+            raise Error("agregar exige pelo menos uma agregacao")
+        var chaves = self.chaves_pendentes^
+        self.chaves_pendentes = List[String]()
+        self.etapas.append(Etapa.agregacao(chaves^, agregacoes^))
         return self^
 
     # ---------------------------------------------------------- inspecao
@@ -100,6 +186,11 @@ struct Consulta(Copyable, Movable):
 
     def coletar(self) raises -> Tabela:
         """Executa o plano e devolve a Tabela."""
+        if len(self.chaves_pendentes) > 0:
+            raise Error(
+                "agrupar sem agregar: encadeie `.agregar([...])` depois de"
+                " `.agrupar([...])`"
+            )
         return Tabela(executar(self.fonte, self.etapas))
 
     def mostrar(self) raises:
@@ -266,6 +357,114 @@ struct Tabela(Copyable, Movable):
         """Projecao lazy. `selecionar()` continua eager por compatibilidade."""
         var q = Consulta(self.lote())
         return q^.selecionar(nomes)
+
+    def agrupar(self, chaves: List[String]) raises -> Consulta:
+        """Agrupa. Encadeie `.agregar([...])` em seguida."""
+        var q = Consulta(self.lote())
+        return q^.agrupar(chaves)
+
+    def unir(
+        self, outra: Tabela, por: List[String], tipo: String = "interno"
+    ) raises -> Consulta:
+        """Junta com outra tabela. Devolve `Consulta`."""
+        var q = Consulta(self.lote())
+        return q^.unir(outra, por, tipo)
+
+    def ordenar(self, chaves: List[String], descendente: Bool = False) raises -> Consulta:
+        """Ordena. Devolve `Consulta`."""
+        var q = Consulta(self.lote())
+        return q^.ordenar(chaves, descendente)
+
+    def concatenar(self, outra: Tabela) raises -> Consulta:
+        """Empilha outra tabela. Devolve `Consulta`."""
+        var q = Consulta(self.lote())
+        return q^.concatenar(outra)
+
+    def remover_na(self, nomes: List[String] = List[String]()) raises -> Consulta:
+        """Descarta linhas com ausente. Devolve `Consulta`."""
+        var q = Consulta(self.lote())
+        return q^.remover_na(nomes)
+
+    def preencher_na(self, nome: String, var valor: Expr) raises -> Consulta:
+        """Substitui ausentes de uma coluna. Devolve `Consulta`."""
+        var q = Consulta(self.lote())
+        return q^.preencher_na(nome, valor^)
+
+    def contar_valores(self, nome: String) raises -> Tabela:
+        """Quantas vezes cada valor aparece, do mais frequente ao menos."""
+        var aggs = List[Agregacao]()
+        aggs.append(contar())
+        var chaves = List[String]()
+        chaves.append(nome)
+        var ordem = List[String]()
+        ordem.append("contagem")
+        return (
+            Consulta(self.lote())
+            .agrupar(chaves)
+            .agregar(aggs^)
+            .ordenar(ordem, True)
+            .coletar()
+        )
+
+    def unicos(self, nome: String) raises -> Tabela:
+        """Valores distintos da coluna, na ordem em que aparecem."""
+        var chaves = List[String]()
+        chaves.append(nome)
+        var aggs = List[Agregacao]()
+        aggs.append(contar())
+        var so_chave = List[String]()
+        so_chave.append(nome)
+        return (
+            Consulta(self.lote())
+            .agrupar(chaves)
+            .agregar(aggs^)
+            .selecionar(so_chave)
+            .coletar()
+        )
+
+    def resumo(self) raises -> Tabela:
+        """Uma linha por coluna: tipo, contagens e estatisticas quando cabem.
+
+        Colunas nao numericas trazem contagens; media, minimo e maximo ficam
+        ausentes nelas, em vez de virar zero ou texto.
+        """
+        var nomes_col = List[String]()
+        var tipos = List[String]()
+        var linhas_col = List[Int64]()
+        var validos = List[Int64]()
+        var ausentes = List[Int64]()
+        var medias = List[Float64]()
+        var minimos = List[Float64]()
+        var maximos = List[Float64]()
+        var sem_stat = List[Bool]()
+
+        for c in self._colunas:
+            nomes_col.append(c.nome)
+            tipos.append(c.tipo_nome())
+            linhas_col.append(Int64(c.tamanho()))
+            validos.append(Int64(c.contar_validos()))
+            ausentes.append(Int64(c.contar_ausentes()))
+            if c.dtype().eh_numerico() and c.contar_validos() > 0:
+                medias.append(c.media())
+                minimos.append(c.minimo())
+                maximos.append(c.maximo())
+                sem_stat.append(False)
+            else:
+                medias.append(0.0)
+                minimos.append(0.0)
+                maximos.append(0.0)
+                sem_stat.append(True)
+
+        var cols = List[Coluna]()
+        cols.append(Coluna.de_textos("coluna", nomes_col^))
+        cols.append(Coluna.de_textos("tipo", tipos^))
+        cols.append(Coluna.de_inteiros("linhas", linhas_col^))
+        cols.append(Coluna.de_inteiros("validos", validos^))
+        cols.append(Coluna.de_inteiros("ausentes", ausentes^))
+        cols.append(Coluna.de_reais("media", medias^, sem_stat.copy()))
+        cols.append(Coluna.de_reais("minimo", minimos^, sem_stat.copy()))
+        cols.append(Coluna.de_reais("maximo", maximos^, sem_stat^))
+        return Tabela(cols^)
 
     def com_coluna(self, nome: String, var expr: Expr) -> Consulta:
         """Coluna derivada: atribui uma coluna calculada.

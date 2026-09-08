@@ -107,7 +107,7 @@ São três provas, em ordem de honestidade:
 
 ## Estado atual do código (honestidade)
 
-**M0 → M5 fechados.** Próximo: **M6 — Aggregation + Join**. 99 testes verdes.
+**M0 → M6 fechados.** Próximo: **M7 — Painel**. 124 testes verdes.
 
 Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo por thread**, sem primitiva no stdlib do Mojo 1.0. O Parquet, que estava bloqueado por falta de fixture, foi destravado e entregue — leitura e escrita, com interoperabilidade verificada contra outra implementação.
 
@@ -137,8 +137,12 @@ Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo p
 | `DType.DATAHORA` + `hora`/`minuto`/`segundo` | ✅ M5 |
 | `ler_parquet` com column pruning | ✅ M5 — 3,6× mais rápido que CSV |
 | `para_parquet` com interop verificada | ✅ M5 |
+| `agrupar` / `agregar` como operador | ✅ M6 — chave dicionarizada 14,7× |
+| `unir` (hash join interno e à esquerda) | ✅ M6 |
+| `ordenar` / `concatenar` / `resumo` / `contar_valores` | ✅ M6 |
+| `remover_na` / `preencher_na` / `unicos` | ✅ M6 |
 | Paralelismo por chunk | ❌ **bloqueado** — sem primitiva no Mojo 1.0 |
-| Slab de data em Int32 | ❌ adiado para M6 |
+| Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
 | `DType.DATAHORA` | ❌ adiado para M5 |
 | Coluna derivada (`com_coluna`) | ❌ M3 |
@@ -153,6 +157,10 @@ Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo p
 
 **3. ~~Lógica de NA sob negação.~~** ✅ Corrigido em M2.5 — ver Decisão 2. Regressão coberta por `test_na_tres_valores_negacao`.
 
+**4. Slab de data em Int32 — dívida rastreada.** Já foi adiada duas vezes, então deixa de ser "herdada do marco anterior" e passa a ter gatilho explícito. Datas e datahoras vivem hoje no slab `Int64` da `Coluna`. O motivo original — velocidade de cálculo — foi resolvido no M4: o kernel de calendário converte para Int32 justamente porque Int64 não vetoriza divisão no AVX2. O que resta é memória: 4 bytes contra 8 por linha de data.
+
+Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de melhorá-la. **Gatilho:** entra junto do redesenho de `Coluna` para um buffer de bytes tipado (largura + tipo lógico, em vez de um `List` por tipo) — que é a forma certa e a que o M9 vai precisar para spill em disco.
+
 ---
 
 ## Linha do tempo
@@ -166,8 +174,8 @@ Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo p
 | M3 | Execution Engine | crítica | ✅ feito | executor coluna-a-coluna |
 | M4 | SIMD (+ Parallel) | crítica | ✅ SIMD / ⛔ paralelo | kernels vetorizados |
 | M5 | I/O + Streaming | crítica | ✅ feito | scanner CSV, Parquet, fatias, datahora |
-| **M6** | **Aggregation + Join** | **crítica** | **próximo** | group/join como operadores |
-| M7 | Painel | alta | não iniciado | dashboard nativo |
+| M6 | Aggregation + Join | crítica | ✅ feito | group/join como operadores |
+| **M7** | **Painel** | **alta** | **próximo** | dashboard nativo |
 | M8 | Optimizer | crítica | não iniciado | pushdown + folding + reorder |
 | M9 | Out-of-Core | alta | não iniciado | datasets > RAM |
 | M10 | Interop | alta | não iniciado | Arrow (sem Python) + SQL |
@@ -503,37 +511,78 @@ Foi essa verificação que pegou o único erro de semântica que o round-trip pr
 
 ---
 
-## M6 — Aggregation + Join
+## M6 — Aggregation + Join ✅
 
-Operadores do engine, não funções soltas: `HashAggregate`, `HashJoin`, `Sort`, `Projection`, `Filter`, `Scan`.
+Operadores do engine, não funções soltas: `HashAggregateExec`, `HashJoinExec`, `SortExec`, `UnionExec`, `DropNullExec`, `FillNullExec` — todos visíveis em `descrever_fisico()`.
 
-### API
+### O dictionary encoding se paga aqui
+
+`pixi run bench-m6`, 1 milhão de linhas, chave de 50 valores distintos:
+
+| Formação de grupos | ns/linha | |
+|---|---|---|
+| chave de texto **dicionarizada** | **11** | indexação direta de array, sem hash |
+| chave inteira | 16 | hash de inteiros |
+| chave composta | 161 | chave textual concatenada |
+
+**14,7× entre o caminho dicionarizado e o composto.** A estrutura criada no M4 para acelerar `cidade == "SP"` acelera `agrupar(["cidade"])` pelo mesmo motivo: o código `Int32` já *é* o identificador do grupo, então não há o que hashear.
+
+| Operação (1M linhas) | ns/linha |
+|---|---|
+| `agrupar` + 3 agregações | 43 |
+| `unir` à esquerda | 316 |
+| `ordenar` (mesclagem estável) | 382 |
+
+O join também ganhou caminho tipado: chave única inteira usa `Dict[Int, …]`, chave única de texto usa a própria `String`, e só combinações de colunas pagam a chave composta.
+
+### Agregações
 
 ```mojo
-tabela.agrupar(["cidade"]).agregar([soma("valor"), media("idade"), contar()])
-tabela.unir(outra, por="id", tipo="esquerda")
+tabela.agrupar(["cidade"]).agregar([soma("valor"), media("valor"), contar()])
 ```
 
-Uma única forma de agregar. Nada de `agg`/`transform`/`apply` como sinônimos, e nada de `groupby.apply` com shape imprevisível.
+`soma`, `media`, `contar`, `contar_de`, `minimo`, `maximo`, `primeiro`, `distintos`, com `.como("apelido")` para renomear a saída. Um jeito só de agregar — sem `apply` que devolve qualquer coisa, sem retorno cuja forma dependa do que a função fez. O tipo de saída é conhecido **antes** de executar, e `esquema_previsto()` mostra.
 
-### Algoritmos
+`minimo`/`maximo` preservam o tipo de entrada: o máximo de uma coluna `data` é uma `data`, não um número.
 
-- **groupby**: hash agregado particionado por radix, paralelo; chave dicionarizada usa indexação direta
-- **join**: hash join particionado, paralelo, com pré-filtro tipo Bloom no lado de sondagem
-- **sort**: radix paralelo para inteiros e chaves dicionarizadas
+### Somar nada não dá zero
+
+Decisão que estava pendente desde o M1, fechada aqui: **grupo sem nenhum valor válido sai como ausente**, não como `0`. E `Coluna.soma()` passou a levantar erro nesse caso, em vez de devolver `0.0` — a mesma regra que `media`, `minimo` e `maximo` já seguiam.
+
+Zero é uma afirmação sobre a soma. Quando não há o que somar, a resposta honesta é Desconhecido.
+
+### Junção
+
+```mojo
+vendas.unir(cidades, ["cidade"], "esquerda")
+```
+
+Interna e à esquerda, com hash na tabela direita e sondagem pela esquerda — o lado direito é o construído porque é o que desaparece do resultado quando não há par.
+
+**Chave ausente não casa com nada**, nem com outra ausente: ausente não é um valor, é Desconhecido. Mesma regra do filtro.
+
+**Nome repetido fora das chaves é recusado**, não renomeado em silêncio com um sufixo. O erro diz o que fazer.
+
+### Ordenação
+
+`ordenar(chaves, descendente)` é **estável**, e ausente vai sempre para o fim nas duas direções. Direções mistas saem de dois passos — `ordenar(["b"], True).ordenar(["a"])` dá `a` crescente com `b` decrescente dentro de cada `a` — e é por isso que não existe uma segunda forma de ordenar.
 
 ### Também neste marco
 
-`ordenar`, `concatenar`, `resumo()`, `contar_valores()`, `unicos()`, `preencher_na()`, `remover_na()`.
+`concatenar` (exige mesmo esquema, sem alinhamento por posição), `remover_na`, `preencher_na` (sem conversão implícita), `contar_valores`, `unicos`, `resumo`.
 
-Herdado do M5: **slab de data em Int32**, junto da reescrita de storage para lotes.
+O `resumo()` não inventa estatística: coluna não numérica traz contagens, e média/mínimo/máximo saem **ausentes** em vez de zero.
 
 ### Critério de saída
 
-- [ ] GroupBy + agregações (soma, média, contagem, min, max)
-- [ ] Join hash inner/left
-- [ ] Verbos de análise acima cobertos por teste
-- [ ] Benchmarks vs. Polars/DuckDB em workloads médios
+- [x] GroupBy + agregações (soma, média, contagem, min, max, primeiro, distintos)
+- [x] Join hash interno e à esquerda
+- [x] Verbos de análise: ordenar, concatenar, resumo, contar_valores, únicos, preencher_na, remover_na
+- [x] Operadores físicos visíveis no plano
+- [x] 124 testes verdes
+- [ ] Benchmarks contra engines de referência — **exige instalá-los**
+
+> A comparação externa precisa de Polars e DuckDB na máquina. Adicioná-los como dependência **de benchmark** (ambiente separado, como já foi feito para as fixtures de Parquet) é decisão de projeto, não técnica — e é o próximo passo natural para a suíte pública.
 
 ---
 
@@ -723,7 +772,7 @@ E, a partir do M7, a métrica que é nossa: **latência de filtro de painel** e 
 5. ~~**M3**: executor coluna-a-coluna, `com_coluna()`, lazy por padrão~~
 6. ~~**M4**: kernels SIMD sobre os slabs, dictionary encoding~~
 7. ~~**M5**: scanner CSV tipado (bytes → buffers), streaming em fatias, datahora~~
-8. **M6**: groupby e join como operadores; storage em lotes; slab de data em Int32
+8. ~~**M6**: groupby e join como operadores~~
 9. ~~Decidir sobre `pyarrow` como dependência **de fixture** para destravar Parquet~~
 10. Reavaliar paralelismo quando o stdlib do Mojo expuser primitiva estável
 11. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5

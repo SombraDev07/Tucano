@@ -318,8 +318,15 @@ struct Coluna(Copyable, Movable):
         return Int(self.ints[i])
 
     def soma(self) raises -> Float64:
-        """Soma ignorando ausentes, por kernel SIMD (M4)."""
+        """Soma ignorando ausentes, por kernel SIMD.
+
+        Coluna sem nenhum valor valido levanta erro em vez de devolver zero:
+        somar nada nao da zero, da desconhecido. E a mesma regra que `agrupar`
+        aplica a um grupo inteiramente ausente, que sai como NA.
+        """
         self._exige_numerico()
+        if self.contar_validos() == 0:
+            raise Error("coluna sem valores validos: " + self.nome)
         if not self.validity_bits.tem_ausentes():
             if self.tipo == DType.INTEIRO:
                 return soma_i64_densa(self.ints, self.n)

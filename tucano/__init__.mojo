@@ -55,4 +55,16 @@ from .parquet import (
     PCodificacao,
     PCompressao,
 )
+from .agregacao import (
+    Agregacao,
+    TipoAgregacao,
+    soma,
+    media,
+    contar,
+    contar_de,
+    minimo,
+    maximo,
+    primeiro,
+    distintos,
+)
 from .consulta import Consulta, lazy

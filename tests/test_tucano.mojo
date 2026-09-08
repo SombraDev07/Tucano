@@ -37,6 +37,15 @@ from tucano import (
     micros_desde_epoch,
     ler_parquet,
     para_parquet,
+    soma,
+    media,
+    contar,
+    contar_de,
+    minimo,
+    maximo,
+    primeiro,
+    distintos,
+    Agregacao,
     esquema_parquet,
     metadados_parquet,
     Vetor,
@@ -60,6 +69,8 @@ from tucano.kernels import (
     largura_f64,
 )
 from tucano.executor import (
+    calcular_grupos,
+    TipoJuncao,
     extrair_coluna,
     avaliar,
     avaliar_tri,
@@ -1316,6 +1327,354 @@ def test_pq_escrita_volume() raises:
     assert_equal(volta.pegar("id").texto_em(2999), "2999")
     assert_equal(volta.pegar("grupo").texto_em(1000), "b")
     assert_equal(volta.soma("id"), original.soma("id"))
+
+
+# ------------------------------------------------------------------ M6
+
+
+def _tabela_cidades() raises -> Tabela:
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("cidade", ["SP", "RJ", "POA"]))
+    cols.append(Coluna.de_textos("estado", ["SP", "RJ", "RS"]))
+    cols.append(Coluna.de_inteiros("populacao", [Int64(12), Int64(6), Int64(1)]))
+    return Tabela(cols^)
+
+
+def test_m6_grupos_por_dicionario_sem_hash() raises:
+    """Chave de texto dicionarizada vira indexacao direta — o retorno do M4."""
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var chaves = List[String]()
+    chaves.append("cidade")
+    var g = calcular_grupos(t.lote(), chaves)
+    assert_equal(g.caminho, "indexacao direta")
+    assert_equal(g.n_grupos, 3)
+    assert_equal(len(g.ids), 5)
+    assert_equal(g.ids[0], g.ids[2])  # SP e SP
+    assert_true(g.ids[0] != g.ids[1])
+
+
+def test_m6_grupos_por_inteiro() raises:
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("k", [Int64(1), Int64(2), Int64(1), Int64(3)]))
+    var t = Tabela(cols^)
+    var chaves = List[String]()
+    chaves.append("k")
+    var g = calcular_grupos(t.lote(), chaves)
+    assert_equal(g.caminho, "hash de inteiros")
+    assert_equal(g.n_grupos, 3)
+    assert_equal(g.ids[0], g.ids[2])
+
+
+def test_m6_grupos_por_chave_composta() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var chaves = List[String]()
+    chaves.append("cidade")
+    chaves.append("data")
+    var g = calcular_grupos(t.lote(), chaves)
+    assert_equal(g.caminho, "hash de chave composta")
+    assert_equal(g.n_grupos, 5)
+
+
+def test_m6_agrupar_soma_media_contagem() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    aggs.append(media("valor"))
+    aggs.append(contar())
+    var chaves = List[String]()
+    chaves.append("cidade")
+    var r = t.agrupar(chaves).agregar(aggs^).coletar()
+
+    assert_equal(r.linhas(), 3)
+    assert_equal(r.colunas(), 4)
+    assert_equal(r.nomes()[1], "soma_valor")
+    assert_equal(r.pegar("cidade").texto_em(0), "SP")
+    assert_equal(r.pegar("soma_valor").texto_em(0), "4700.0")
+    assert_equal(r.pegar("contagem").texto_em(0), "3")
+    assert_equal(r.pegar("soma_valor").texto_em(1), "800.0")
+
+
+def test_m6_grupo_sem_valor_valido_e_ausente() raises:
+    """Somar nada nao da zero: da desconhecido."""
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    aggs.append(media("valor"))
+    aggs.append(contar())
+    aggs.append(contar_de("valor"))
+    var chaves = List[String]()
+    chaves.append("cidade")
+    var r = t.agrupar(chaves).agregar(aggs^).coletar()
+    # BH so tem a linha com valor ausente
+    assert_equal(r.pegar("cidade").texto_em(2), "BH")
+    assert_true(r.pegar("soma_valor").eh_ausente(2))
+    assert_true(r.pegar("media_valor").eh_ausente(2))
+    assert_equal(r.pegar("contagem").texto_em(2), "1")  # linhas
+    assert_equal(r.pegar("contagem_valor").texto_em(2), "0")  # valores presentes
+
+
+def test_m6_coluna_sem_valores_validos_erra_na_soma() raises:
+    var c = Coluna.de_reais("x", [1.0, 2.0], [True, True])
+    var pegou = False
+    try:
+        _ = c.soma()
+    except e:
+        pegou = True
+        assert_true("sem valores validos" in String(e))
+    assert_true(pegou)
+
+
+def test_m6_agregacoes_preservam_tipo() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var aggs = List[Agregacao]()
+    aggs.append(maximo("data"))
+    aggs.append(minimo("data"))
+    aggs.append(primeiro("cidade"))
+    aggs.append(distintos("cidade"))
+    var chaves = List[String]()
+    chaves.append("cidade")
+    var q = t.agrupar(chaves).agregar(aggs^)
+    var esperado = q.esquema_previsto()
+    assert_equal(esperado.dtype_de("maximo_data").codigo, DType.DATA)
+    assert_equal(esperado.dtype_de("primeiro_cidade").codigo, DType.TEXTO)
+    assert_equal(esperado.dtype_de("distintos_cidade").codigo, DType.INTEIRO)
+
+    var r = q.coletar()
+    assert_equal(r.dtype_de("maximo_data").codigo, DType.DATA)
+    assert_equal(r.pegar("maximo_data").texto_em(0), "2024-03-10")
+    assert_equal(r.pegar("minimo_data").texto_em(0), "2024-01-15")
+    assert_equal(r.pegar("distintos_cidade").texto_em(0), "1")
+
+
+def test_m6_agregacao_renomeada() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor").como("faturamento"))
+    var chaves = List[String]()
+    chaves.append("cidade")
+    var r = t.agrupar(chaves).agregar(aggs^).coletar()
+    assert_true(r.schema().contem("faturamento"))
+    assert_equal(r.pegar("faturamento").texto_em(0), "4700.0")
+
+
+def test_m6_agrupar_sem_agregar_erra() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var chaves = List[String]()
+    chaves.append("cidade")
+    var pegou = False
+    try:
+        _ = t.agrupar(chaves).coletar()
+    except e:
+        pegou = True
+        assert_true("agrupar sem agregar" in String(e))
+    assert_true(pegou)
+
+
+def test_m6_juncao_interna() raises:
+    var v = ler_csv("tests/fixtures/vendas.csv")
+    var c = _tabela_cidades()
+    var por = List[String]()
+    por.append("cidade")
+    var r = v.unir(c, por).coletar()
+    # BH nao existe na direita e sai; POA nao existe na esquerda e nao entra
+    assert_equal(r.linhas(), 4)
+    assert_equal(r.colunas(), 5)
+    assert_equal(r.pegar("estado").texto_em(0), "SP")
+    assert_equal(r.pegar("populacao").texto_em(1), "6")
+
+
+def test_m6_juncao_a_esquerda() raises:
+    var v = ler_csv("tests/fixtures/vendas.csv")
+    var c = _tabela_cidades()
+    var por = List[String]()
+    por.append("cidade")
+    var r = v.unir(c, por, "esquerda").coletar()
+    assert_equal(r.linhas(), 5)
+    assert_equal(r.pegar("cidade").texto_em(3), "BH")
+    assert_true(r.pegar("estado").eh_ausente(3))
+    assert_true(r.pegar("populacao").eh_ausente(3))
+
+
+def test_m6_juncao_chave_ausente_nao_casa() raises:
+    """Ausente nao e um valor: nao casa nem com outro ausente."""
+    var esq = List[Coluna]()
+    esq.append(Coluna.de_textos("k", ["a", ""], [False, True]))
+    esq.append(Coluna.de_inteiros("x", [Int64(1), Int64(2)]))
+    var dir = List[Coluna]()
+    dir.append(Coluna.de_textos("k", ["a", ""], [False, True]))
+    dir.append(Coluna.de_inteiros("y", [Int64(10), Int64(20)]))
+    var por = List[String]()
+    por.append("k")
+    var r = Tabela(esq^).unir(Tabela(dir^), por).coletar()
+    assert_equal(r.linhas(), 1)
+    assert_equal(r.pegar("k").texto_em(0), "a")
+
+
+def test_m6_juncao_nome_repetido_erra() raises:
+    var v = ler_csv("tests/fixtures/vendas.csv")
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("cidade", ["SP"]))
+    cols.append(Coluna.de_reais("valor", [1.0]))
+    var por = List[String]()
+    por.append("cidade")
+    var pegou = False
+    try:
+        _ = v.unir(Tabela(cols^), por).coletar()
+    except e:
+        pegou = True
+        assert_true("existe nos dois lados" in String(e))
+    assert_true(pegou)
+
+
+def test_m6_tipo_de_juncao_invalido_erra() raises:
+    var pegou = False
+    try:
+        _ = TipoJuncao.de_texto("cruzada")
+    except e:
+        pegou = True
+        assert_true("interno" in String(e))
+    assert_true(pegou)
+
+
+def test_m6_ordenar() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var por = List[String]()
+    por.append("valor")
+    var asc = t.ordenar(por).coletar()
+    assert_equal(asc.pegar("valor").texto_em(0), "800.0")
+    # ausente vai para o fim nas duas direcoes
+    assert_true(asc.pegar("valor").eh_ausente(4))
+    var desc = t.ordenar(por, True).coletar()
+    assert_equal(desc.pegar("valor").texto_em(0), "2000.0")
+    assert_true(desc.pegar("valor").eh_ausente(4))
+
+
+def test_m6_ordenacao_estavel_permite_direcoes_mistas() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var por_valor = List[String]()
+    por_valor.append("valor")
+    var por_cidade = List[String]()
+    por_cidade.append("cidade")
+    var r = t.ordenar(por_valor, True).ordenar(por_cidade).coletar()
+    assert_equal(r.pegar("cidade").texto_em(0), "BH")
+    assert_equal(r.pegar("cidade").texto_em(2), "SP")
+    # dentro de SP, valor decrescente
+    assert_equal(r.pegar("valor").texto_em(2), "2000.0")
+    assert_equal(r.pegar("valor").texto_em(3), "1500.0")
+    assert_equal(r.pegar("valor").texto_em(4), "1200.0")
+
+
+def test_m6_concatenar() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var r = t.concatenar(t).coletar()
+    assert_equal(r.linhas(), 10)
+    assert_equal(r.pegar("cidade").texto_em(5), "SP")
+    assert_equal(r.pegar("valor").contar_ausentes(), 2)
+
+
+def test_m6_concatenar_esquema_diferente_erra() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var outro = ler_csv("tests/fixtures/pessoas.csv")
+    var pegou = False
+    try:
+        _ = t.concatenar(outro).coletar()
+    except e:
+        pegou = True
+        assert_true("concatenar" in String(e))
+    assert_true(pegou)
+
+
+def test_m6_remover_na() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    assert_equal(t.remover_na().linhas(), 4)
+    var so_cidade = List[String]()
+    so_cidade.append("cidade")
+    assert_equal(t.remover_na(so_cidade).linhas(), 5)
+
+
+def test_m6_preencher_na() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var r = t.preencher_na("valor", lit(0.0)).coletar()
+    assert_equal(r.pegar("valor").contar_ausentes(), 0)
+    assert_equal(r.pegar("valor").texto_em(3), "0.0")
+    assert_equal(r.soma("valor"), 5500.0)
+
+
+def test_m6_preencher_na_sem_conversao_implicita() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var pegou = False
+    try:
+        _ = t.preencher_na("valor", lit_texto("zero")).coletar()
+    except e:
+        pegou = True
+        assert_true("texto" in String(e))
+    assert_true(pegou)
+
+
+def test_m6_contar_valores() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var r = t.contar_valores("cidade")
+    assert_equal(r.linhas(), 3)
+    assert_equal(r.colunas(), 2)
+    assert_equal(r.pegar("cidade").texto_em(0), "SP")
+    assert_equal(r.pegar("contagem").texto_em(0), "3")
+
+
+def test_m6_unicos() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var r = t.unicos("cidade")
+    assert_equal(r.linhas(), 3)
+    assert_equal(r.colunas(), 1)
+    assert_equal(r.pegar("cidade").texto_em(0), "SP")
+
+
+def test_m6_resumo() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var r = t.resumo()
+    assert_equal(r.linhas(), 3)
+    assert_equal(r.pegar("coluna").texto_em(2), "valor")
+    assert_equal(r.pegar("tipo").texto_em(2), "real")
+    assert_equal(r.pegar("validos").texto_em(2), "4")
+    assert_equal(r.pegar("ausentes").texto_em(2), "1")
+    assert_equal(r.pegar("media").texto_em(2), "1375.0")
+    # colunas nao numericas nao ganham estatistica inventada
+    assert_true(r.pegar("media").eh_ausente(0))
+    assert_true(r.pegar("maximo").eh_ausente(1))
+
+
+def test_m6_plano_completo() raises:
+    var v = ler_csv("tests/fixtures/vendas.csv")
+    var c = _tabela_cidades()
+    var por = List[String]()
+    por.append("cidade")
+    var chaves = List[String]()
+    chaves.append("estado")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    var ordem = List[String]()
+    ordem.append("soma_valor")
+
+    var q = (
+        v.unir(c, por, "esquerda")
+        .remover_na(por)
+        .agrupar(chaves)
+        .agregar(aggs^)
+        .ordenar(ordem, True)
+    )
+    var plano = q.descrever()
+    assert_true("JOIN esquerda por [cidade]" in plano)
+    assert_true("DROP NULLS" in plano)
+    assert_true("AGGREGATE [estado]" in plano)
+    assert_true("SORT [soma_valor desc]" in plano)
+
+    var fisico = q.descrever_fisico()
+    assert_true("HashJoinExec" in fisico)
+    assert_true("HashAggregateExec" in fisico)
+    assert_true("SortExec" in fisico)
+
+    var r = q.coletar()
+    assert_equal(r.pegar("estado").texto_em(0), "SP")
+    assert_equal(r.pegar("soma_valor").texto_em(0), "4700.0")
 
 
 def main() raises:

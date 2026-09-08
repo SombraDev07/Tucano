@@ -137,6 +137,11 @@ def esquema_apos(esq: List[Campo], etapas: List[Etapa]) raises -> List[Campo]:
             atual = com_coluna_esquema(
                 atual, e.nome, tipo_resultado(e.expr, e.expr.root, atual)
             )
+        elif e.tipo == TipoEtapa.AGREGACAO:
+            atual = esquema_agrupado(atual, e.nomes, e.agregacoes)
+        elif e.tipo == TipoEtapa.JUNCAO:
+            atual = esquema_unido(atual, esquema_do_lote(e.lote_direito), e.nomes)
+        # ordenacao, concatenacao, remocao e preenchimento nao mudam o esquema
     return atual^
 
 
@@ -708,6 +713,18 @@ def executar(cols: List[Coluna], etapas: List[Etapa]) raises -> List[Coluna]:
             atual = op_projecao(atual, e.nomes)
         elif e.tipo == TipoEtapa.COM_COLUNA:
             atual = op_com_coluna(atual, e.nome, e.expr)
+        elif e.tipo == TipoEtapa.AGREGACAO:
+            atual = op_agrupar(atual, e.nomes, e.agregacoes)
+        elif e.tipo == TipoEtapa.JUNCAO:
+            atual = op_unir(atual, e.lote_direito, e.nomes, e.tipo_juncao)
+        elif e.tipo == TipoEtapa.ORDENACAO:
+            atual = op_ordenar(atual, e.nomes, e.descendente)
+        elif e.tipo == TipoEtapa.CONCATENACAO:
+            atual = op_concatenar(atual, e.lote_direito)
+        elif e.tipo == TipoEtapa.REMOVER_NA:
+            atual = op_remover_na(atual, e.nomes)
+        elif e.tipo == TipoEtapa.PREENCHER_NA:
+            atual = op_preencher_na(atual, e.nome, e.expr)
         else:
             raise Error("etapa desconhecida no plano: " + String(e.tipo))
     return atual^
@@ -788,6 +805,16 @@ def avisos_plano(cols: List[Coluna], etapas: List[Etapa]) raises -> List[String]
     for e in etapas:
         if e.tipo == TipoEtapa.PROJECAO:
             esq = projetar_esquema(esq, e.nomes)
+        elif e.tipo == TipoEtapa.AGREGACAO:
+            esq = esquema_agrupado(esq, e.nomes, e.agregacoes)
+        elif e.tipo == TipoEtapa.JUNCAO:
+            esq = esquema_unido(esq, esquema_do_lote(e.lote_direito), e.nomes)
+        elif (
+            e.tipo == TipoEtapa.ORDENACAO
+            or e.tipo == TipoEtapa.CONCATENACAO
+            or e.tipo == TipoEtapa.REMOVER_NA
+        ):
+            pass
         else:
             avisos_expr(e.expr, e.expr.root, esq, cols, saida)
             if e.tipo == TipoEtapa.COM_COLUNA:
@@ -795,3 +822,883 @@ def avisos_plano(cols: List[Coluna], etapas: List[Etapa]) raises -> List[String]
                     esq, e.nome, tipo_resultado(e.expr, e.expr.root, esq)
                 )
     return saida^
+
+
+# ------------------------------------------------------------- agregacao
+
+from std.collections import Dict
+from .agregacao import Agregacao, TipoAgregacao
+
+
+struct Grupos(Copyable, Movable):
+    """A que grupo pertence cada linha, e qual linha representa cada grupo."""
+
+    var ids: List[Int]
+    var n_grupos: Int
+    var representantes: List[Int]
+    var caminho: String
+    """Como os grupos foram formados — aparece no plano fisico."""
+
+    def __init__(
+        out self,
+        var ids: List[Int],
+        n_grupos: Int,
+        var representantes: List[Int],
+        caminho: String,
+    ):
+        self.ids = ids^
+        self.n_grupos = n_grupos
+        self.representantes = representantes^
+        self.caminho = caminho
+
+
+def _chave_texto(col: Coluna, i: Int) raises -> String:
+    """Representacao textual de uma celula, para compor chave de grupo."""
+    if col.eh_ausente(i):
+        return "\x00NA"
+    if col.tipo == DType.TEXTO:
+        return "s" + col.texto_bruto(i)
+    if col.tipo == DType.REAL:
+        return "r" + String(col.reals[i])
+    if col.tipo == DType.LOGICO:
+        return "b" + String(Int(col.logics[i]))
+    return "i" + String(col.ints[i])
+
+
+def calcular_grupos(cols: List[Coluna], chaves: List[String]) raises -> Grupos:
+    """Atribui um id de grupo a cada linha, preservando a ordem de aparicao.
+
+    Tres caminhos, do mais rapido ao mais geral:
+
+    1. **uma chave de texto dicionarizada** — o codigo Int32 ja E o grupo. Vira
+       indexacao direta de array, sem hash nenhum. E o retorno do dictionary
+       encoding: a estrutura criada para acelerar filtro tambem acelera groupby.
+    2. **uma chave inteira ou temporal** — tabela hash de inteiros.
+    3. **qualquer outra combinacao** — chave composta em texto.
+    """
+    var linhas = n_linhas(cols)
+    var ids = List[Int](capacity=linhas)
+    var representantes = List[Int]()
+
+    if len(chaves) == 1:
+        var pos = posicao_no_lote(cols, chaves[0])
+        ref col = cols[pos]
+
+        if col.tipo == DType.TEXTO and col.eh_dicionarizada():
+            # cardinalidade + 1 posicoes: a ultima recebe os ausentes
+            var cardinalidade = col.cardinalidade()
+            var mapa = List[Int](capacity=cardinalidade + 1)
+            for _ in range(cardinalidade + 1):
+                mapa.append(-1)
+            var n_grupos = 0
+            for i in range(linhas):
+                var slot = cardinalidade
+                if not col.eh_ausente(i):
+                    slot = Int(col.codigos[i])
+                if mapa[slot] < 0:
+                    mapa[slot] = n_grupos
+                    representantes.append(i)
+                    n_grupos += 1
+                ids.append(mapa[slot])
+            return Grupos(ids^, n_grupos, representantes^, "indexacao direta")
+
+        if (
+            col.tipo == DType.INTEIRO
+            or col.tipo == DType.DATA
+            or col.tipo == DType.DATAHORA
+            or col.tipo == DType.LOGICO
+        ):
+            var mapa = Dict[Int, Int]()
+            var ausente_id = -1
+            var n_grupos = 0
+            for i in range(linhas):
+                if col.eh_ausente(i):
+                    if ausente_id < 0:
+                        ausente_id = n_grupos
+                        representantes.append(i)
+                        n_grupos += 1
+                    ids.append(ausente_id)
+                    continue
+                var chave: Int
+                if col.tipo == DType.LOGICO:
+                    chave = Int(col.logics[i])
+                else:
+                    chave = Int(col.ints[i])
+                if chave in mapa:
+                    ids.append(mapa[chave])
+                else:
+                    mapa[chave] = n_grupos
+                    representantes.append(i)
+                    ids.append(n_grupos)
+                    n_grupos += 1
+            return Grupos(ids^, n_grupos, representantes^, "hash de inteiros")
+
+    var mapa = Dict[String, Int]()
+    var n_grupos = 0
+    var posicoes = List[Int]()
+    for chave in chaves:
+        posicoes.append(posicao_no_lote(cols, chave))
+    for i in range(linhas):
+        var composta = String("")
+        for p in posicoes:
+            composta += _chave_texto(cols[p], i) + "\x01"
+        if composta in mapa:
+            ids.append(mapa[composta])
+        else:
+            mapa[composta] = n_grupos
+            representantes.append(i)
+            ids.append(n_grupos)
+            n_grupos += 1
+    return Grupos(ids^, n_grupos, representantes^, "hash de chave composta")
+
+
+def coletar_linhas(col: Coluna, indices: List[Int]) raises -> Coluna:
+    """Nova coluna com as linhas indicadas, na ordem dada."""
+    var n = len(indices)
+    var aus = List[Bool](capacity=n)
+    for i in indices:
+        aus.append(col.eh_ausente(i))
+
+    if col.tipo == DType.TEXTO:
+        var vals = List[String](capacity=n)
+        for i in indices:
+            if col.eh_ausente(i):
+                vals.append("")
+            else:
+                vals.append(col.texto_bruto(i))
+        return Coluna.de_textos(col.nome, vals^, aus^)
+    if col.tipo == DType.REAL:
+        var vals = List[Float64](capacity=n)
+        for i in indices:
+            vals.append(col.reals[i])
+        return Coluna.de_reais(col.nome, vals^, aus^)
+    if col.tipo == DType.LOGICO:
+        var vals = List[Bool](capacity=n)
+        for i in indices:
+            vals.append(Int(col.logics[i]) != 0)
+        return Coluna.de_logicos(col.nome, vals^, aus^)
+    var vals = List[Int64](capacity=n)
+    for i in indices:
+        vals.append(col.ints[i])
+    if col.tipo == DType.DATA:
+        return Coluna.de_datas(col.nome, vals^, aus^)
+    if col.tipo == DType.DATAHORA:
+        return Coluna.de_datahoras(col.nome, vals^, aus^)
+    return Coluna.de_inteiros(col.nome, vals^, aus^)
+
+
+def tipo_da_agregacao(a: Agregacao, esq: List[Campo]) raises -> Int:
+    """Tipo de saida, calculado sobre o esquema — sem executar."""
+    if a.tipo == TipoAgregacao.CONTAGEM or a.tipo == TipoAgregacao.DISTINTOS:
+        return DType.INTEIRO
+    if a.tipo == TipoAgregacao.MEDIA:
+        return DType.REAL
+    var entrada = tipo_no_esquema(esq, a.coluna)
+    if a.tipo == TipoAgregacao.SOMA:
+        # soma de temporal nao faz sentido; soma de inteiro continua inteira
+        if entrada == DType.INTEIRO:
+            return DType.INTEIRO
+        return DType.REAL
+    return entrada  # minimo, maximo e primeiro preservam o tipo
+
+
+def _agregar_uma(
+    cols: List[Coluna], a: Agregacao, grupos: Grupos, esq: List[Campo]
+) raises -> Coluna:
+    var linhas = n_linhas(cols)
+    var g = grupos.n_grupos
+    var nome = a.nome_saida()
+    var tipo_saida = tipo_da_agregacao(a, esq)
+
+    # contagem de linhas: nao olha valor nenhum
+    if a.tipo == TipoAgregacao.CONTAGEM and a.coluna == "":
+        var vals = List[Int64](capacity=g)
+        for _ in range(g):
+            vals.append(Int64(0))
+        for i in range(linhas):
+            vals[grupos.ids[i]] += 1
+        return Coluna.de_inteiros(nome, vals^, List[Bool]())
+
+    var pos = posicao_no_lote(cols, a.coluna)
+    ref col = cols[pos]
+
+    if a.tipo == TipoAgregacao.PRIMEIRO:
+        var c = coletar_linhas(col, grupos.representantes)
+        return Coluna(
+            nome, c.tipo, c.n, c.validity_bits.copy(), c.ints.copy(),
+            c.reals.copy(), c.logics.copy(), c.textos.copy(), c.codigos.copy(),
+        )
+
+    if a.tipo == TipoAgregacao.CONTAGEM:
+        var vals = List[Int64](capacity=g)
+        for _ in range(g):
+            vals.append(Int64(0))
+        for i in range(linhas):
+            if not col.eh_ausente(i):
+                vals[grupos.ids[i]] += 1
+        return Coluna.de_inteiros(nome, vals^, List[Bool]())
+
+    if a.tipo == TipoAgregacao.DISTINTOS:
+        var vistos = Dict[String, Bool]()
+        var vals = List[Int64](capacity=g)
+        for _ in range(g):
+            vals.append(Int64(0))
+        for i in range(linhas):
+            if col.eh_ausente(i):
+                continue
+            var k = String(grupos.ids[i]) + "\x01" + _chave_texto(col, i)
+            if k not in vistos:
+                vistos[k] = True
+                vals[grupos.ids[i]] += 1
+        return Coluna.de_inteiros(nome, vals^, List[Bool]())
+
+    # minimo / maximo sobre texto: comparacao lexicografica
+    if col.tipo == DType.TEXTO:
+        if a.tipo != TipoAgregacao.MINIMO and a.tipo != TipoAgregacao.MAXIMO:
+            raise Error(
+                "agregacao " + TipoAgregacao.nome(a.tipo)
+                + " nao se aplica a coluna de texto: " + a.coluna
+            )
+        var textos = List[String](capacity=g)
+        var vazio = List[Bool](capacity=g)
+        for _ in range(g):
+            textos.append("")
+            vazio.append(True)
+        for i in range(linhas):
+            if col.eh_ausente(i):
+                continue
+            var gid = grupos.ids[i]
+            var v = col.texto_bruto(i)
+            if vazio[gid]:
+                textos[gid] = v
+                vazio[gid] = False
+            elif a.tipo == TipoAgregacao.MINIMO:
+                if v < textos[gid]:
+                    textos[gid] = v
+            else:
+                if v > textos[gid]:
+                    textos[gid] = v
+        return Coluna.de_textos(nome, textos^, vazio^)
+
+    # numericas e temporais passam pelo Vetor
+    var v = extrair_coluna(cols, a.coluna)
+    var acumulado = List[Float64](capacity=g)
+    var contagem = List[Int](capacity=g)
+    for _ in range(g):
+        acumulado.append(0.0)
+        contagem.append(0)
+
+    for i in range(linhas):
+        if v.na[i] != 0:
+            continue
+        var gid = grupos.ids[i]
+        var x = v.reais[i]
+        if contagem[gid] == 0:
+            acumulado[gid] = x
+        elif a.tipo == TipoAgregacao.SOMA or a.tipo == TipoAgregacao.MEDIA:
+            acumulado[gid] += x
+        elif a.tipo == TipoAgregacao.MINIMO:
+            if x < acumulado[gid]:
+                acumulado[gid] = x
+        else:
+            if x > acumulado[gid]:
+                acumulado[gid] = x
+        contagem[gid] += 1
+
+    var saida = Vetor.numerico(g)
+    for gi in range(g):
+        if contagem[gi] == 0:
+            # grupo sem valor valido nao vira zero: vira ausente
+            saida.na[gi] = UInt8(1)
+            continue
+        if a.tipo == TipoAgregacao.MEDIA:
+            saida.reais[gi] = acumulado[gi] / Float64(contagem[gi])
+        else:
+            saida.reais[gi] = acumulado[gi]
+    return vetor_para_coluna(nome, saida, tipo_saida)
+
+
+def op_agrupar(
+    cols: List[Coluna], chaves: List[String], agregacoes: List[Agregacao]
+) raises -> List[Coluna]:
+    """HashAggregate: agrupa por chave e reduz cada grupo."""
+    if len(chaves) == 0:
+        raise Error("agrupar exige pelo menos uma chave")
+    if len(agregacoes) == 0:
+        raise Error("agregar exige pelo menos uma agregacao")
+
+    var grupos = calcular_grupos(cols, chaves)
+    var esq = esquema_do_lote(cols)
+    var saida = List[Coluna]()
+    for chave in chaves:
+        saida.append(
+            coletar_linhas(cols[posicao_no_lote(cols, chave)], grupos.representantes)
+        )
+    for a in agregacoes:
+        saida.append(_agregar_uma(cols, a, grupos, esq))
+    return saida^
+
+
+def esquema_agrupado(
+    esq: List[Campo], chaves: List[String], agregacoes: List[Agregacao]
+) raises -> List[Campo]:
+    var out = List[Campo]()
+    for chave in chaves:
+        out.append(Campo(chave, DType(tipo_no_esquema(esq, chave))))
+    for a in agregacoes:
+        out.append(Campo(a.nome_saida(), DType(tipo_da_agregacao(a, esq))))
+    return out^
+
+
+# ---------------------------------------------------------------- juncao
+
+
+struct TipoJuncao:
+    comptime INTERNO = 0
+    comptime ESQUERDA = 1
+
+    @staticmethod
+    def de_texto(t: String) raises -> Int:
+        var v = String(t.lower())
+        if v == "interno" or v == "inner":
+            return Self.INTERNO
+        if v == "esquerda" or v == "left":
+            return Self.ESQUERDA
+        raise Error(
+            "tipo de juncao desconhecido: '" + t + "' (use 'interno' ou 'esquerda')"
+        )
+
+    @staticmethod
+    def nome(t: Int) raises -> String:
+        if t == Self.INTERNO:
+            return "interno"
+        if t == Self.ESQUERDA:
+            return "esquerda"
+        raise Error("tipo de juncao desconhecido: " + String(t))
+
+
+def coletar_linhas_opcional(
+    col: Coluna, indices: List[Int], nome: String
+) raises -> Coluna:
+    """Como `coletar_linhas`, mas indice -1 vira ausente.
+
+    E o que permite a juncao a esquerda: linha sem par do outro lado nao some,
+    fica com os campos daquele lado ausentes.
+    """
+    var n = len(indices)
+    var aus = List[Bool](capacity=n)
+    for i in indices:
+        if i < 0:
+            aus.append(True)
+        else:
+            aus.append(col.eh_ausente(i))
+
+    if col.tipo == DType.TEXTO:
+        var vals = List[String](capacity=n)
+        for i in indices:
+            if i < 0 or col.eh_ausente(i):
+                vals.append("")
+            else:
+                vals.append(col.texto_bruto(i))
+        return Coluna.de_textos(nome, vals^, aus^)
+    if col.tipo == DType.REAL:
+        var vals = List[Float64](capacity=n)
+        for i in indices:
+            if i < 0:
+                vals.append(0.0)
+            else:
+                vals.append(col.reals[i])
+        return Coluna.de_reais(nome, vals^, aus^)
+    if col.tipo == DType.LOGICO:
+        var vals = List[Bool](capacity=n)
+        for i in indices:
+            if i < 0:
+                vals.append(False)
+            else:
+                vals.append(Int(col.logics[i]) != 0)
+        return Coluna.de_logicos(nome, vals^, aus^)
+    var vals = List[Int64](capacity=n)
+    for i in indices:
+        if i < 0:
+            vals.append(Int64(0))
+        else:
+            vals.append(col.ints[i])
+    if col.tipo == DType.DATA:
+        return Coluna.de_datas(nome, vals^, aus^)
+    if col.tipo == DType.DATAHORA:
+        return Coluna.de_datahoras(nome, vals^, aus^)
+    return Coluna.de_inteiros(nome, vals^, aus^)
+
+
+def _chave_composta(cols: List[Coluna], posicoes: List[Int], i: Int) raises -> String:
+    var s = String("")
+    for p in posicoes:
+        s += _chave_texto(cols[p], i) + "\x01"
+    return s
+
+
+struct ChavesJuncao(Copyable, Movable):
+    """Chaves de um lado da juncao, ja no formato mais barato possivel.
+
+    Chave unica inteira vira `Int`; chave unica de texto vira a propria `String`,
+    sem prefixo nem separador. So combinacoes de colunas pagam a chave composta —
+    que o bench mostra custar uma ordem de grandeza a mais.
+    """
+
+    var inteiras: List[Int]
+    var textos: List[String]
+    var ausente: List[Bool]
+    var usa_inteiro: Bool
+
+    def __init__(
+        out self,
+        var inteiras: List[Int],
+        var textos: List[String],
+        var ausente: List[Bool],
+        usa_inteiro: Bool,
+    ):
+        self.inteiras = inteiras^
+        self.textos = textos^
+        self.ausente = ausente^
+        self.usa_inteiro = usa_inteiro
+
+
+def _chaves_de_juncao(
+    cols: List[Coluna], posicoes: List[Int]
+) raises -> ChavesJuncao:
+    var n = n_linhas(cols)
+    var ausente = List[Bool](capacity=n)
+    for i in range(n):
+        var na = False
+        for p in posicoes:
+            if cols[p].eh_ausente(i):
+                na = True
+        ausente.append(na)
+
+    if len(posicoes) == 1:
+        ref col = cols[posicoes[0]]
+        if (
+            col.tipo == DType.INTEIRO
+            or col.tipo == DType.DATA
+            or col.tipo == DType.DATAHORA
+            or col.tipo == DType.LOGICO
+        ):
+            var ints = List[Int](capacity=n)
+            for i in range(n):
+                if col.tipo == DType.LOGICO:
+                    ints.append(Int(col.logics[i]))
+                else:
+                    ints.append(Int(col.ints[i]))
+            return ChavesJuncao(ints^, List[String](), ausente^, True)
+        if col.tipo == DType.TEXTO:
+            var txt = List[String](capacity=n)
+            for i in range(n):
+                if ausente[i]:
+                    txt.append("")
+                else:
+                    txt.append(col.texto_bruto(i))
+            return ChavesJuncao(List[Int](), txt^, ausente^, False)
+
+    var comp = List[String](capacity=n)
+    for i in range(n):
+        comp.append(_chave_composta(cols, posicoes, i))
+    return ChavesJuncao(List[Int](), comp^, ausente^, False)
+
+
+def op_unir(
+    esquerda: List[Coluna],
+    direita: List[Coluna],
+    chaves: List[String],
+    tipo: Int,
+) raises -> List[Coluna]:
+    """HashJoin: constroi a tabela hash sobre a direita, sonda com a esquerda.
+
+    O lado direito e o construido porque e o que sai por completo do resultado
+    quando nao ha par — na juncao a esquerda, toda linha da esquerda sobrevive.
+
+    Linha com chave ausente nao casa com nada, nem com outra ausente: ausente
+    nao e um valor, e Desconhecido. Mesma regra do filtro.
+    """
+    if len(chaves) == 0:
+        raise Error("unir exige pelo menos uma chave")
+
+    var pos_esq = List[Int]()
+    var pos_dir = List[Int]()
+    for c in chaves:
+        pos_esq.append(posicao_no_lote(esquerda, c))
+        pos_dir.append(posicao_no_lote(direita, c))
+
+    # nomes que colidem fora das chaves: recusar em vez de renomear em silencio
+    var nomes_chave = List[String]()
+    for c in chaves:
+        nomes_chave.append(c)
+    for cd in direita:
+        var eh_chave = False
+        for c in nomes_chave:
+            if c == cd.nome:
+                eh_chave = True
+        if eh_chave:
+            continue
+        for ce in esquerda:
+            if ce.nome == cd.nome:
+                raise Error(
+                    "unir: a coluna '" + cd.nome + "' existe nos dois lados."
+                    + " Renomeie antes com `com_coluna`, ou inclua-a nas chaves"
+                )
+
+    var chaves_dir = _chaves_de_juncao(direita, pos_dir)
+    var chaves_esq = _chaves_de_juncao(esquerda, pos_esq)
+    var n_dir = n_linhas(direita)
+    var n_esq = n_linhas(esquerda)
+
+    var idx_esq = List[Int]()
+    var idx_dir = List[Int]()
+
+    if chaves_dir.usa_inteiro:
+        var balde = Dict[Int, List[Int]]()
+        for i in range(n_dir):
+            if chaves_dir.ausente[i]:
+                continue
+            var k = chaves_dir.inteiras[i]
+            if k in balde:
+                balde[k].append(i)
+            else:
+                var lista = List[Int]()
+                lista.append(i)
+                balde[k] = lista^
+        for i in range(n_esq):
+            var casou = False
+            if not chaves_esq.ausente[i]:
+                var k = chaves_esq.inteiras[i]
+                if k in balde:
+                    casou = True
+                    for j in balde[k]:
+                        idx_esq.append(i)
+                        idx_dir.append(j)
+            if not casou and tipo == TipoJuncao.ESQUERDA:
+                idx_esq.append(i)
+                idx_dir.append(-1)
+    else:
+        var balde = Dict[String, List[Int]]()
+        for i in range(n_dir):
+            if chaves_dir.ausente[i]:
+                continue
+            var k = chaves_dir.textos[i]
+            if k in balde:
+                balde[k].append(i)
+            else:
+                var lista = List[Int]()
+                lista.append(i)
+                balde[k] = lista^
+        for i in range(n_esq):
+            var casou = False
+            if not chaves_esq.ausente[i]:
+                var k = chaves_esq.textos[i]
+                if k in balde:
+                    casou = True
+                    for j in balde[k]:
+                        idx_esq.append(i)
+                        idx_dir.append(j)
+            if not casou and tipo == TipoJuncao.ESQUERDA:
+                idx_esq.append(i)
+                idx_dir.append(-1)
+
+    var saida = List[Coluna]()
+    for c in esquerda:
+        saida.append(coletar_linhas_opcional(c, idx_esq, c.nome))
+    for cd in direita:
+        var eh_chave = False
+        for c in nomes_chave:
+            if c == cd.nome:
+                eh_chave = True
+        if eh_chave:
+            continue
+        saida.append(coletar_linhas_opcional(cd, idx_dir, cd.nome))
+    return saida^
+
+
+def esquema_unido(
+    esq: List[Campo], dir_esq: List[Campo], chaves: List[String]
+) raises -> List[Campo]:
+    var out = List[Campo]()
+    for c in esq:
+        out.append(c.copy())
+    for c in dir_esq:
+        var eh_chave = False
+        for k in chaves:
+            if k == c.nome:
+                eh_chave = True
+        if not eh_chave:
+            out.append(c.copy())
+    return out^
+
+
+# ------------------------------------------------- ordenacao e transformacoes
+
+
+def _comparar_linhas(
+    cols: List[Coluna], posicoes: List[Int], desc: List[Bool], a: Int, b: Int
+) raises -> Int:
+    """-1, 0 ou 1. Ausente vai sempre para o fim, nas duas direcoes."""
+    for k in range(len(posicoes)):
+        ref col = cols[posicoes[k]]
+        var na_a = col.eh_ausente(a)
+        var na_b = col.eh_ausente(b)
+        if na_a and na_b:
+            continue
+        if na_a:
+            return 1
+        if na_b:
+            return -1
+
+        var ordem = 0
+        if col.tipo == DType.TEXTO:
+            var x = col.texto_bruto(a)
+            var y = col.texto_bruto(b)
+            if x < y:
+                ordem = -1
+            elif x > y:
+                ordem = 1
+        elif col.tipo == DType.REAL:
+            if col.reals[a] < col.reals[b]:
+                ordem = -1
+            elif col.reals[a] > col.reals[b]:
+                ordem = 1
+        elif col.tipo == DType.LOGICO:
+            var x = Int(col.logics[a])
+            var y = Int(col.logics[b])
+            if x < y:
+                ordem = -1
+            elif x > y:
+                ordem = 1
+        else:
+            if col.ints[a] < col.ints[b]:
+                ordem = -1
+            elif col.ints[a] > col.ints[b]:
+                ordem = 1
+
+        if ordem != 0:
+            if desc[k]:
+                return -ordem
+            return ordem
+    return 0
+
+
+def _mesclar(
+    cols: List[Coluna],
+    posicoes: List[Int],
+    desc: List[Bool],
+    origem: List[Int],
+    mut destino: List[Int],
+    ini: Int,
+    meio: Int,
+    fim: Int,
+) raises:
+    var i = ini
+    var j = meio
+    var k = ini
+    while i < meio and j < fim:
+        # `<= 0` mantem a ordenacao estavel
+        if _comparar_linhas(cols, posicoes, desc, origem[i], origem[j]) <= 0:
+            destino[k] = origem[i]
+            i += 1
+        else:
+            destino[k] = origem[j]
+            j += 1
+        k += 1
+    while i < meio:
+        destino[k] = origem[i]
+        i += 1
+        k += 1
+    while j < fim:
+        destino[k] = origem[j]
+        j += 1
+        k += 1
+
+
+def ordem_das_linhas(
+    cols: List[Coluna], chaves: List[String], desc: List[Bool]
+) raises -> List[Int]:
+    """Ordenacao por mesclagem, estavel: linhas equivalentes mantem a ordem."""
+    var n = linhas_do_lote(cols)
+    var posicoes = List[Int]()
+    for c in chaves:
+        posicoes.append(posicao_no_lote(cols, c))
+
+    var a = List[Int](capacity=n)
+    var b = List[Int](capacity=n)
+    for i in range(n):
+        a.append(i)
+        b.append(0)
+
+    var largura = 1
+    while largura < n:
+        var i = 0
+        while i < n:
+            var meio = i + largura
+            if meio > n:
+                meio = n
+            var fim = i + 2 * largura
+            if fim > n:
+                fim = n
+            _mesclar(cols, posicoes, desc, a, b, i, meio, fim)
+            i += 2 * largura
+        var t = a^
+        a = b^
+        b = t^
+        largura *= 2
+    return a^
+
+
+def linhas_do_lote(cols: List[Coluna]) -> Int:
+    return n_linhas(cols)
+
+
+def op_ordenar(
+    cols: List[Coluna], chaves: List[String], desc: List[Bool]
+) raises -> List[Coluna]:
+    """SortExec."""
+    if len(chaves) == 0:
+        raise Error("ordenar exige pelo menos uma coluna")
+    var ordem = ordem_das_linhas(cols, chaves, desc)
+    var out = List[Coluna]()
+    for c in cols:
+        out.append(coletar_linhas(c, ordem))
+    return out^
+
+
+def op_concatenar(
+    cols: List[Coluna], outros: List[Coluna]
+) raises -> List[Coluna]:
+    """Empilha duas tabelas. Exige mesmo esquema — sem alinhamento por posicao."""
+    if len(cols) != len(outros):
+        raise Error(
+            "concatenar: " + String(len(cols)) + " colunas contra "
+            + String(len(outros))
+        )
+    var out = List[Coluna]()
+    for i in range(len(cols)):
+        ref a = cols[i]
+        ref b = outros[i]
+        if a.nome != b.nome:
+            raise Error(
+                "concatenar: coluna " + String(i) + " e '" + a.nome
+                + "' de um lado e '" + b.nome + "' do outro"
+            )
+        if a.tipo != b.tipo:
+            raise Error(
+                "concatenar: coluna '" + a.nome + "' tem tipos diferentes nos"
+                + " dois lados — converta explicitamente"
+            )
+        var na = a.tamanho() + b.tamanho()
+        var aus = List[Bool](capacity=na)
+        for k in range(a.tamanho()):
+            aus.append(a.eh_ausente(k))
+        for k in range(b.tamanho()):
+            aus.append(b.eh_ausente(k))
+
+        if a.tipo == DType.TEXTO:
+            var vals = List[String](capacity=na)
+            for k in range(a.tamanho()):
+                vals.append("" if a.eh_ausente(k) else a.texto_bruto(k))
+            for k in range(b.tamanho()):
+                vals.append("" if b.eh_ausente(k) else b.texto_bruto(k))
+            out.append(Coluna.de_textos(a.nome, vals^, aus^))
+        elif a.tipo == DType.REAL:
+            var vals = List[Float64](capacity=na)
+            for k in range(a.tamanho()):
+                vals.append(a.reals[k])
+            for k in range(b.tamanho()):
+                vals.append(b.reals[k])
+            out.append(Coluna.de_reais(a.nome, vals^, aus^))
+        elif a.tipo == DType.LOGICO:
+            var vals = List[Bool](capacity=na)
+            for k in range(a.tamanho()):
+                vals.append(Int(a.logics[k]) != 0)
+            for k in range(b.tamanho()):
+                vals.append(Int(b.logics[k]) != 0)
+            out.append(Coluna.de_logicos(a.nome, vals^, aus^))
+        else:
+            var vals = List[Int64](capacity=na)
+            for k in range(a.tamanho()):
+                vals.append(a.ints[k])
+            for k in range(b.tamanho()):
+                vals.append(b.ints[k])
+            if a.tipo == DType.DATA:
+                out.append(Coluna.de_datas(a.nome, vals^, aus^))
+            elif a.tipo == DType.DATAHORA:
+                out.append(Coluna.de_datahoras(a.nome, vals^, aus^))
+            else:
+                out.append(Coluna.de_inteiros(a.nome, vals^, aus^))
+    return out^
+
+
+def op_remover_na(cols: List[Coluna], nomes: List[String]) raises -> List[Coluna]:
+    """Descarta linhas com ausente nas colunas dadas (ou em qualquer uma)."""
+    var n = n_linhas(cols)
+    var posicoes = List[Int]()
+    if len(nomes) == 0:
+        for i in range(len(cols)):
+            posicoes.append(i)
+    else:
+        for nome in nomes:
+            posicoes.append(posicao_no_lote(cols, nome))
+
+    var keep = _zeros_u8(n)
+    for i in range(n):
+        var ok = True
+        for p in posicoes:
+            if cols[p].eh_ausente(i):
+                ok = False
+        if ok:
+            keep[i] = UInt8(1)
+
+    var out = List[Coluna]()
+    for c in cols:
+        out.append(filtrar_coluna(c, keep))
+    return out^
+
+
+def op_preencher_na(
+    cols: List[Coluna], nome: String, expr: Expr
+) raises -> List[Coluna]:
+    """Substitui ausentes de uma coluna pelo valor da expressao."""
+    var pos = posicao_no_lote(cols, nome)
+    ref col = cols[pos]
+    var n = col.tamanho()
+
+    if col.tipo == DType.TEXTO:
+        var v = avaliar(expr, cols)
+        if not v.eh_texto:
+            raise Error(
+                "preencher_na: coluna '" + nome + "' e de texto, mas o valor"
+                + " nao e — sem conversao implicita"
+            )
+        var vals = List[String](capacity=n)
+        for i in range(n):
+            if col.eh_ausente(i):
+                vals.append(v.textos[i])
+            else:
+                vals.append(col.texto_bruto(i))
+        var nova = Coluna.de_textos(nome, vals^, List[Bool]())
+        var out = List[Coluna]()
+        for c in cols:
+            out.append(nova.copy() if c.nome == nome else c.copy())
+        return out^
+
+    var v = avaliar(expr, cols)
+    if v.eh_texto:
+        raise Error(
+            "preencher_na: coluna '" + nome + "' e numerica, mas o valor e texto"
+        )
+    var vetor = Vetor.numerico(n)
+    for i in range(n):
+        if col.eh_ausente(i):
+            vetor.reais[i] = v.reais[i]
+        else:
+            vetor.reais[i] = col._como_real(i)
+    var nova = vetor_para_coluna(nome, vetor, col.tipo)
+    var out = List[Coluna]()
+    for c in cols:
+        out.append(nova.copy() if c.nome == nome else c.copy())
+    return out^

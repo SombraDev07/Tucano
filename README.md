@@ -53,6 +53,8 @@ o que for mais conveniente na hora.
   alocar por célula. 715 ns/linha, com aspas RFC 4180 na leitura e na escrita.
 - **Parquet nativo, leitura e escrita** — sem ponte, sem dependência externa. Column pruning
   de verdade: as colunas que você não pediu nunca são lidas.
+- **Agrupamento e junção como operadores** — não funções soltas. Chave de texto repetida
+  agrupa por indexação direta de array, sem hash: 14,7× mais rápido que chave composta.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
 
 ## Instalação
@@ -126,6 +128,12 @@ Fuso horário não é suportado: um `Z` final é aceito e ignorado, deslocamento
 | projetar | `selecionar([nomes])` |
 | filtrar | `onde(expr)` |
 | coluna derivada | `com_coluna(nome, expr)` |
+| agrupar | `agrupar([chaves]).agregar([...])` |
+| juntar | `unir(outra, [chaves], "interno" \| "esquerda")` |
+| ordenar | `ordenar([chaves], descendente)` |
+| empilhar | `concatenar(outra)` |
+| ausentes | `remover_na([nomes])` · `preencher_na(nome, valor)` |
+| descrever | `resumo()` · `contar_valores(nome)` · `unicos(nome)` |
 | metadados | `shape()` · `schema()` · `nomes()` · `linhas()` · `colunas()` · `dtype_de(nome)` |
 | agregar | `soma(nome)` · `media(nome)` |
 | exibir | `primeiras(n)` · `mostrar()` |
@@ -179,6 +187,28 @@ q.mostrar()                    # materializa aqui
 Materializam sozinhos: `mostrar`, `primeiras`, `linhas`, `colunas`, `shape`, `schema`,
 `pegar`, `soma`, `media`. `coletar()` existe para quem quer o controle explícito.
 
+### Agrupamento e junção
+
+```mojo
+vendas
+    .unir(cidades, ["cidade"], "esquerda")
+    .agrupar(["estado"])
+    .agregar([soma("valor"), media("valor"), contar()])
+    .ordenar(["soma_valor"], True)
+    .mostrar()
+```
+
+`soma` · `media` · `contar` · `contar_de` · `minimo` · `maximo` · `primeiro` · `distintos`,
+com `.como("apelido")` para renomear a saída. `minimo`/`maximo` preservam o tipo: o máximo de
+uma coluna `data` é uma `data`.
+
+Na junção, **chave ausente não casa com nada**, nem com outra ausente. E nome que colide fora
+das chaves é recusado com erro, não renomeado em silêncio com um sufixo.
+
+A ordenação é **estável**, com ausente sempre por último. Direções mistas saem de dois
+passos: `ordenar(["b"], True).ordenar(["a"])` — por isso não existe uma segunda forma de
+ordenar.
+
 ## Semântica
 
 Três regras que não se renegociam. Elas decidem qualquer dúvida de implementação.
@@ -194,6 +224,12 @@ Nas duas. Uma linha ausente não reaparece só porque alguém inverteu o predica
 estados são numerados na ordem do reticulado de Kleene — `FALSO < DESCONHECIDO < VERDADEIRO`
 — de modo que `E` é `min`, `OU` é `max` e `NÃO` é `2 - x`: cada conectivo é uma instrução
 SIMD.
+
+### Somar nada não dá zero
+
+Um grupo sem nenhum valor válido sai **ausente**, não `0`. Zero é uma afirmação sobre a soma;
+quando não há o que somar, a resposta honesta é Desconhecido. `Coluna.soma()` levanta erro no
+mesmo caso, como `media`, `minimo` e `maximo` já faziam.
 
 ### Nenhuma coerção implícita
 
@@ -264,6 +300,17 @@ E `pixi run bench-parquet`, sobre as mesmas 200 mil linhas em 6 colunas:
 | `ler_parquet` com pruning (2 de 6) | **76** | 2,8× mais rápido que ler tudo |
 | `para_parquet` | 232 | 2,4× mais rápido que escrever CSV |
 
+E `pixi run bench-m6`, sobre 1 milhão de linhas com chave de 50 valores distintos:
+
+| | ns/linha | |
+|---|---|---|
+| formar grupos por chave **dicionarizada** | **11** | indexação direta, sem hash |
+| formar grupos por chave inteira | 16 | |
+| formar grupos por chave composta | 161 | 14,7× mais lento |
+| `agrupar` + 3 agregações | 43 | |
+| `unir` à esquerda | 316 | |
+| `ordenar` | 382 | |
+
 E `pixi run bench-m3` mostra que o executor escala linear — ns/linha praticamente constante
 de 25 mil a 200 mil linhas.
 
@@ -296,13 +343,14 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Kernels SIMD e dictionary encoding | ✅ |
 | I/O tipado: scanner CSV, datahora, leitura em fatias | ✅ |
 | Parquet: leitura, escrita, column pruning | ✅ |
-| Agregação e junção | próximo |
+| Agregação, junção, ordenação e verbos de análise | ✅ |
+| Painel de visualização | próximo |
 | Painel de visualização | planejado |
 | Otimizador de consultas | planejado |
 | Execução out-of-core | planejado |
 | Interoperabilidade Arrow | planejado |
 
-99 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+124 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do
@@ -321,6 +369,7 @@ pixi run bench     # benchmarks de fundação
 pixi run bench-m3  # escala do executor
 pixi run bench-m4  # SIMD contra o laço escalar
 pixi run bench-m5  # leitura de CSV
+pixi run bench-m6  # agregação, junção e ordenação
 pixi run bench-parquet  # Parquet e column pruning
 pixi run build     # precompilar o pacote
 ```

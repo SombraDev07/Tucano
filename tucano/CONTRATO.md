@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.7.0 — M0 → M5 fechados (paralelismo por thread à parte).
+Versão 0.8.0 — M0 → M6 fechados (paralelismo por thread à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -59,14 +59,16 @@ de validade, separado do valor — não há upcast para real, não há sentinela
 Tipos incompatíveis levantam erro. Nunca coerção silenciosa, nunca tipo genérico de
 fallback.
 
-### 5. Agregações ignoram NA
+### 5. Agregações ignoram NA, e somar nada não dá zero
 
 `soma`, `media`, `minimo`, `maximo` operam sobre os valores presentes. `media` divide pela
 contagem de válidos, não pelo total de linhas.
 
-Coluna sem nenhum valor válido: `media`, `minimo` e `maximo` levantam erro em vez de
-devolver `NaN`. `soma` devolve `0.0` — divergência conhecida em relação ao SQL, onde
-`SUM` de tudo nulo é `NULL`. A decidir em M6, junto com as agregações de `agrupar`.
+Sem nenhum valor válido, todas levantam erro — inclusive `soma`. Em `agrupar`, o grupo
+equivalente sai **ausente**, não `0`.
+
+Zero é uma afirmação sobre a soma. Quando não há o que somar, a resposta honesta é
+Desconhecido.
 
 ### 6. Uma forma por operação
 
@@ -185,6 +187,12 @@ sem executar.
 | agregar | `soma(nome)` / `media(nome)` |
 | exibir | `primeiras(n)` / `mostrar()` |
 | filtrar (lazy) | `onde(expr)` → `Consulta` |
+| agrupar | `agrupar([chaves])` → `.agregar([...])` |
+| juntar | `unir(outra, [chaves], "interno" \| "esquerda")` |
+| ordenar | `ordenar([chaves], descendente)` — estável, ausente por último |
+| empilhar | `concatenar(outra)` — exige mesmo esquema |
+| ausentes | `remover_na([nomes])` · `preencher_na(nome, valor)` |
+| descrever | `resumo()` · `contar_valores(nome)` · `unicos(nome)` |
 | coluna derivada (lazy) | `com_coluna(nome, expr)` → `Consulta` |
 | entrar no plano | `consultar()` → `Consulta` |
 | lote para o executor | `lote()` → `List[Coluna]` |
@@ -254,6 +262,29 @@ sendo uma data.
 | comparação / booleano | `logico` |
 
 Comparar texto com número levanta erro — nunca converte em silêncio.
+
+### Agregações
+
+```mojo
+tabela.agrupar(["cidade"]).agregar([soma("valor"), media("valor"), contar()])
+```
+
+`soma` · `media` · `contar` · `contar_de` · `minimo` · `maximo` · `primeiro` · `distintos`,
+com `.como("apelido")` para renomear a saída.
+
+Há **um** jeito de agregar. O tipo de saída é conhecido antes de executar e aparece em
+`esquema_previsto()`. `minimo`/`maximo` preservam o tipo de entrada: o máximo de uma coluna
+`data` é uma `data`.
+
+### Junção
+
+Chave ausente **não casa com nada**, nem com outra ausente — ausente é Desconhecido, não um
+valor. Nome que colide fora das chaves é recusado com erro, não renomeado em silêncio.
+
+### Ordenação
+
+Estável, com ausente sempre por último nas duas direções. Direções mistas saem de dois
+passos: `ordenar(["b"], True).ordenar(["a"])`.
 
 ### Avisos
 
