@@ -3,6 +3,43 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.29.0] — Leitura de poucas colunas
+
+Alvo: fechar a distancia para o Polars na leitura pura. **Nao fechou** — e o que
+apareceu no caminho vale mais que a tentativa.
+
+| ler `id` sozinha, 5M linhas | antes | depois |
+|---|---|---|
+| | 29-36 ms | **16-17 ms** |
+
+### Corrigido
+
+- **A decisao de usar thread contava colunas, nao tarefas.** Desde o [0.28.0]
+  uma coluna pode virar varias faixas, mas a decisao era tomada antes das faixas
+  existirem — e para uma coluna so ela sempre dizia "sequencial". Ler uma coluna
+  dividida em dezesseis faixas mandava as dezesseis para o caminho de uma
+  thread. Column pruning e a razao de o Parquet existir, e estava sem
+  paralelismo nenhum.
+- Mais duas copias de coluna inteira no caminho de coleta, irmas da que o
+  [0.28.0] achou.
+
+### Alterado
+
+- **As faixas escrevem no slab final, em paralelo.** Juntar depois do `join`
+  custava 18-20 ms: alocar e escrever quarenta MiB em serie, com a falha de
+  pagina inteira num nucleo so. As faixas sao trechos de linha contiguos e
+  disjuntos, dados pelo rodape.
+- Uma funcao so decide o trabalho da tarefa, dentro ou fora de thread — separar
+  os dois foi como o caminho sequencial esqueceu de escrever no destino.
+
+### O que nao cedeu
+
+Ler as cinco colunas continua em 48-49 ms, e dividi-las mais piora (63-64 ms com
+15 threads). Lida sozinha, `id` leva 16 ms; junto das outras quatro, o conjunto
+leva 48. O limite ali e banda de memoria, nao nucleo ocioso — o mesmo teto que
+recusou o paralelismo dos operadores no [0.23.0]. A distancia para o Polars e
+maturidade de decodificacao.
+
 ## [0.28.0] — Leitura em faixas de row group
 
 Ultimo numero desfavoravel publicado: a leitura fazia 75 ms contra 54 do pyarrow.

@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13 e M15 → M20 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13 e M15 → M21 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -243,6 +243,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M18 | Chave de grupo inteira | crítica | ✅ feito | 22 → 11 ns/linha |
 | M19 | Execução em fluxo | crítica | ✅ feito | 900 → 93 ms, mesmo pico de memória |
 | M20 | Leitura em faixas | crítica | ✅ feito | 75 → 50 ms; pipeline 88 → 69 |
+| M21 | Leitura de poucas colunas | crítica | ✅ feito | uma coluna 33 → 16 ms |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -1955,6 +1956,70 @@ DuckDB em dezesseis núcleos é paralelismo além do que a leitura já usa.
 - [x] nenhuma cópia de coluna inteira no caminho de leitura
 - [x] o caminho dividido é exercitado por teste — antes nenhuma fixture chegava
       ao limiar — e conferido contra a fórmula que gerou os dados
+- [x] 237 testes verdes, interoperabilidade nos dois formatos
+
+---
+
+## M21 — Leitura: a decisão de paralelizar olhava a coisa errada ✅
+
+Alvo: fechar a distância para o Polars na leitura pura, 50 ms contra 32.
+**Não fechou.** O que se achou no caminho vale mais que a tentativa.
+
+### A decisão contava colunas, não tarefas
+
+Desde o M20 uma coluna pode virar várias faixas de row group. Mas a decisão de
+usar thread continuou sendo tomada **antes das faixas existirem**, pelo número
+de colunas — e `threads_para(1, ...)` devolve 1 por definição. Ler **uma** coluna
+dividida em dezesseis faixas mandava as dezesseis para o caminho sequencial.
+
+| ler `id` sozinha, 5M linhas | antes | depois |
+|---|---|---|
+| | 29–36 ms | **16–17 ms** |
+
+Column pruning é a razão de o Parquet existir, e ler poucas colunas é o caso
+comum de verdade. Ele estava sem paralelismo nenhum.
+
+### O `join` em série virou escrita em paralelo
+
+Juntar as faixas depois do `join` custava 18–20 ms: alocar e escrever os quarenta
+MiB do slab em série, com a falha de página inteira num núcleo só. Agora o pai
+aloca o slab uma vez e **cada faixa escreve na sua parte** — trechos de linha
+contíguos e disjuntos, dados pelo rodapé. A falha de página se divide junto.
+
+E mais duas cópias de coluna inteira saíram do caminho de coleta, irmãs da que o
+M20 achou. Elas continuam aparecendo pelo mesmo motivo: `copy()` é curto de
+escrever e não parece custar nada.
+
+### O que não cedeu, e por quê
+
+Ler as cinco colunas continua em 48–49 ms. Dividi-las mais **piora**:
+
+| 5 colunas, 5M linhas | |
+|---|---|
+| sem dividir (5 threads) | **48 ms** |
+| 3 faixas por coluna (15 threads) | 63–64 ms |
+
+Lida sozinha, `id` leva 16 ms; junto das outras quatro, o conjunto leva 48. O
+limite aqui é banda de memória, não núcleo ocioso — cinco threads expandindo
+Snappy ao mesmo tempo já saturam o que a máquina entrega. É o mesmo teto que
+recusou o paralelismo dos operadores no M15.
+
+### Onde ficou
+
+| 5M linhas, uma thread | Tucano | pandas | pyarrow | Polars |
+|---|---|---|---|---|
+| ler 5 colunas | 49 ms | 93 ms | 49 ms | 31 ms |
+| ler 2 de 5 | 30 ms | 35 ms | 23 ms | 13 ms |
+
+Empatado com o pyarrow, 1,9× à frente do pandas. A distância para o Polars é
+maturidade de decodificação — não é uma cópia esquecida nem um núcleo parado, e
+dizer isso exige ter procurado as duas coisas.
+
+### Critério de saída
+
+- [x] a decisão de paralelizar olha o número de tarefas
+- [x] faixas escrevem no slab final; não há junção em série
+- [x] nenhuma cópia de coluna inteira sobrou no caminho de leitura
 - [x] 237 testes verdes, interoperabilidade nos dois formatos
 
 ---
