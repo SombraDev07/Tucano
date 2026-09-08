@@ -3,6 +3,41 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.30.0] — O que "maturidade de decodificacao" escondia
+
+Sem mudanca de codigo. O [0.29.0] fechou dizendo que a distancia para o Polars era
+"maturidade de decodificacao" — frase confortavel, do mesmo tipo de "a linguagem
+proibe", que ja esteve errada aqui por varios marcos. Este marco mede o que ela
+escondia e recusa duas tentativas.
+
+| mesma coluna, 5M inteiros | tamanho | ler |
+|---|---|---|
+| `compressao="nenhuma"` | 38 MiB | **5 ms** |
+| `compressao="snappy"` (padrao) | 19 MiB | 28 ms |
+
+Descomprimir custa 23 ms para 38 MiB — 1,6 GB/s. No arquivo de cinco colunas: 43
+MiB em Snappy leem em 48 ms; os mesmos dados sem compressao, 124 MiB, leem em 35.
+Com o arquivo em cache de pagina, o Snappy custa mais do que a E/S que poupa; em
+disco lento a conta se inverte. **O padrao continua Snappy** — otimizar para cache
+quente seria otimizar para o benchmark, nao para quem usa.
+
+O fluxo Snappy de uma coluna de inteiros sequenciais: 87% da saida vem de copias,
+com sete bytes em media, e 99,99% delas com distancia menor que 16. Sao 4,7
+milhoes de copias, a ~12 ciclos cada. O custo e a QUANTIDADE de elementos.
+
+### Recusado
+
+- **Dobrar o padrao** para copiar em bloco com distancia curta: estava errado — o
+  dobramento nao muda a distancia de leitura. Os testes pegaram, e ficou mais
+  lento (37 ms contra 28).
+- **Bloco do tamanho da distancia**, com folga no fim do buffer: correto, testes
+  verdes, e mais lento — 59-66 ms contra 50 no arquivo completo.
+
+Fechar a distancia exige o que as implementacoes maduras fazem: tag e
+deslocamento numa carga de 64 bits, despacho por tabela em vez de desvio, laco
+sem dependencia entre iteracoes. E trabalho de verdade — agora dito com o numero
+ao lado, em vez de como adjetivo.
+
 ## [0.29.0] — Leitura de poucas colunas
 
 Alvo: fechar a distancia para o Polars na leitura pura. **Nao fechou** — e o que

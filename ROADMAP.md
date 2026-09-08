@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13 e M15 → M21 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13 e M15 → M22 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -244,6 +244,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M19 | Execução em fluxo | crítica | ✅ feito | 900 → 93 ms, mesmo pico de memória |
 | M20 | Leitura em faixas | crítica | ✅ feito | 75 → 50 ms; pipeline 88 → 69 |
 | M21 | Leitura de poucas colunas | crítica | ✅ feito | uma coluna 33 → 16 ms |
+| M22 | Medir a distância para o Polars | crítica | ✅ feito | Snappy é 23 dos 28 ms; duas tentativas recusadas |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -2021,6 +2022,78 @@ dizer isso exige ter procurado as duas coisas.
 - [x] faixas escrevem no slab final; não há junção em série
 - [x] nenhuma cópia de coluna inteira sobrou no caminho de leitura
 - [x] 237 testes verdes, interoperabilidade nos dois formatos
+
+---
+
+## M22 — "Maturidade de decodificação": o que essa frase escondia ✅
+
+O M21 fechou dizendo que a distância para o Polars era *maturidade de
+decodificação*. Frase confortável — e do mesmo tipo de "a linguagem proíbe", que
+já esteve errada aqui por vários marcos. Este marco não otimizou nada: **mediu o
+que a frase escondia e recusou duas tentativas.** É o resultado.
+
+### Onde o tempo está, com número
+
+A mesma coluna de 5 milhões de inteiros, escrita das duas formas:
+
+| | tamanho | ler |
+|---|---|---|
+| `compressao="nenhuma"` | 38 MiB | **5 ms** |
+| `compressao="snappy"` (padrão) | 19 MiB | 28 ms |
+
+Descomprimir custa **23 ms para 38 MiB — 1,6 GB/s**. E no arquivo inteiro de
+cinco colunas: 43 MiB em Snappy lêem em 48 ms; os mesmos dados sem compressão,
+124 MiB, lêem em **35**.
+
+Ou seja: com o arquivo em cache de página, o nosso Snappy custa mais do que a
+E/S que ele poupa. Em disco lento a conta se inverte — 3× menos bytes para ler.
+O padrão continua Snappy porque otimizar para cache quente seria otimizar para o
+benchmark, não para quem usa.
+
+### O que o fluxo Snappy tem dentro
+
+Instrumentado sobre uma coluna de inteiros sequenciais, que é o que o Snappy mais
+comprime:
+
+| | |
+|---|---|
+| saída vinda de literais | 13% |
+| saída vinda de **cópias** | 87% |
+| comprimento médio da cópia | **7 bytes** |
+| cópias com distância < 16 | **99,99%** |
+
+Quatro milhões e setecentas mil cópias de sete bytes. A 23 ms, são ~12 ciclos por
+elemento — o custo é a **quantidade de elementos**, não o laço de bytes dentro de
+cada uma.
+
+### Duas tentativas, as duas recusadas pela medição
+
+**Dobrar o padrão** para copiar em bloco quando a distância é curta: implementado,
+e estava **errado** — o dobramento não muda a distância de leitura, só reorganiza
+o mesmo laço. Os testes pegaram, e ainda ficou mais lento (37 ms contra 28).
+
+**Bloco do tamanho da distância** — com distância 8 e comprimento 7 não há
+sobreposição, então cabe um `store` de 8 bytes, com folga no fim do buffer para o
+excesso. Correto desta vez, e os testes passaram. Também **mais lento**: 59–66 ms
+contra 50 no arquivo completo.
+
+As duas confirmam o mesmo: o gargalo é decodificar seis milhões de elementos, e
+mexer no que cada elemento faz com sete bytes não move o número.
+
+### O que a frase realmente quer dizer
+
+Fechar a distância exige o que as implementações maduras de Snappy fazem: leitura
+do tag e do deslocamento numa carga de 64 bits só, despacho por tabela em vez de
+desvio, e o laço escrito para não ter dependência entre iterações. É trabalho de
+verdade, não uma cópia esquecida nem um núcleo parado — e agora está dito com o
+número ao lado, em vez de como adjetivo.
+
+### Critério de saída
+
+- [x] o custo da descompressão medido e separado do resto da leitura
+- [x] a composição do fluxo Snappy medida, não suposta
+- [x] as duas otimizações construídas, medidas e recusadas
+- [x] nenhuma linha de código pior entrou; 237 testes verdes
 
 ---
 
