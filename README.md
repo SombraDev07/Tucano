@@ -249,6 +249,9 @@ consultar_sql("SELECT DISTINCT cidade, uf FROM 'vendas.parquet'").mostrar()
 consultar_sql("SELECT DISTINCT * FROM 'vendas.parquet'").mostrar()
 ```
 
+`SELECT ALL` também é aceito: é o padrão dito por extenso, e não muda nada. As duas juntas
+são recusadas, porque pedem o contrário uma da outra.
+
 `FROM` aceita `'arquivo.parquet'`, `'arquivo.csv'` ou um nome registrado num `Catalogo`.
 Erros apontam a posição no texto.
 
@@ -523,7 +526,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Excel `.xlsx`: leitura | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-220 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+223 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do

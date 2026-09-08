@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.21.0 — M0 → M10.13 + leitura .xlsx; HTTP do painel fora do caminho crítico.
+Versão 0.21.1 — M0 → M10.13 + leitura .xlsx; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -357,6 +357,7 @@ dá para chamar `explicar()` nela.
 |---|---|
 | `SELECT` | colunas, `SUM`/`AVG`/`COUNT`/`COUNT(DISTINCT)`/`MIN`/`MAX`, `AS` |
 | `SELECT DISTINCT` | linhas distintas da projeção, inclusive `DISTINCT *` |
+| `SELECT ALL` / `COUNT(ALL c)` | o padrão dito por extenso; não muda nada |
 | `FROM` | `'arquivo.parquet'`, `'arquivo.csv'`, ou nome num `Catalogo` |
 | `JOIN` / `LEFT JOIN` | `USING (colunas)` — as chaves existem nos dois lados com o mesmo nome. Vira `unir`. |
 | `WHERE` | comparações, `AND`/`OR`/`NOT`, parênteses, literais |
@@ -375,6 +376,13 @@ antes de destilar ordenaria linhas que vão sumir, e depois a coluna já não ex
 
 `AS` em coluna simples cria a coluna com o nome novo; um apelido igual ao nome de uma
 coluna existente é recusado, em vez de sobrescrevê-la.
+
+`ALL` é o oposto explícito de `DISTINCT` e não acrescenta operação: repetir já é o padrão.
+Aceitá-lo é o mesmo que já se faz com o `OUTER` de `LEFT OUTER JOIN` — palavra que o SQL
+padrão permite escrever, não uma segunda forma de pedir a mesma coisa. `ALL` junto com
+`DISTINCT` é recusado nas duas ordens. E `ALL` só é palavra reservada quando vem um alvo
+depois dele: como o dialeto não tem identificador entre aspas, `SELECT all FROM v` continua
+sendo a forma de pedir uma coluna chamada `all`.
 
 ### Arrow
 

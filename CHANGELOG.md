@@ -3,6 +3,30 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.21.1] — SELECT ALL
+
+Fecha o outro lado do `DISTINCT`. `ALL` era engolido como nome de coluna e o erro
+apontava tres tokens adiante: "esperava 'FROM', achei 'cidade'".
+
+### Adicionado
+
+- **`SELECT ALL`** e **`COUNT(ALL coluna)`** — o padrao dito por extenso. Nao
+  muda nada, porque repetir ja e o padrao.
+- `ALL` junto com `DISTINCT` e recusado nas duas ordens, e dentro de `COUNT`
+  tambem: as duas palavras pedem o contrario uma da outra.
+
+### Nota sobre "uma forma por operacao"
+
+A decisao travada manda recusar sinonimo, e a primeira leitura foi que `ALL` era
+um. Nao e: sinonimo e um segundo verbo **nosso** para a mesma operacao. `ALL` e a
+mesma unica forma escrita como o SQL padrao permite escrever — o dialeto ja fazia
+isso com o `OUTER` de `LEFT OUTER JOIN`. A regra vale para a API do Tucano, nao
+para o vocabulario de um formato que existe para receber consulta escrita fora.
+
+`ALL` so e palavra reservada quando vem um alvo depois dele. O dialeto nao tem
+identificador entre aspas, entao `SELECT all FROM v` e a unica forma de pedir uma
+coluna com esse nome, e aceitar `ALL` sem olhar adiante a tornaria inalcancavel.
+
 ## [0.21.0] — SELECT DISTINCT
 
 O operador ja existia (`unicos` e `agrupar` + `contar` + so a chave); o dialeto

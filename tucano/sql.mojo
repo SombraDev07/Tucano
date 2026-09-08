@@ -223,6 +223,31 @@ struct Analisador(Movable):
     def atual(self) -> Token:
         return self.tokens[self.pos].copy()
 
+    def proximo(self) -> Token:
+        """O token depois do atual, sem consumir."""
+        var i = self.pos + 1
+        if i >= len(self.tokens):
+            i = len(self.tokens) - 1
+        return self.tokens[i].copy()
+
+    def eh_all_modificador(self) -> Bool:
+        """`ALL` e o oposto explicito de `DISTINCT`: devolve tudo, com repeticao.
+
+        So conta como modificador quando vem depois dele algo que possa ser um
+        alvo — um nome de coluna ou `*`. Sem essa checagem, uma coluna chamada
+        `all` deixaria de ser acessivel: o dialeto nao tem identificador entre
+        aspas, entao `SELECT all FROM v` e a unica forma de pedi-la, e ali o
+        `ALL` e nome, nao palavra reservada.
+        """
+        if not self.eh_palavra("ALL"):
+            return False
+        var p = self.proximo()
+        if p.tipo == TipoToken.SIMBOLO:
+            return p.texto == "*"
+        if p.tipo != TipoToken.NOME:
+            return False
+        return _maiusculo(p.texto) != "FROM"
+
     def avancar(mut self) -> Token:
         var t = self.tokens[self.pos].copy()
         if self.pos < len(self.tokens) - 1:
@@ -283,6 +308,12 @@ struct Analisador(Movable):
         """Nome ja lido; o token atual e `(`. COUNT(DISTINCT coluna) e `distintos`."""
         self.consumir_simbolo("(")
         var distinto = self.aceitar_palavra("DISTINCT")
+        if self.eh_all_modificador():
+            if distinto:
+                raise Error(
+                    "SQL: DISTINCT e ALL dizem o contrario um do outro — use um"
+                )
+            _ = self.avancar()
         var alvo: String
         if self.aceitar_simbolo("*"):
             if distinto:
@@ -446,8 +477,29 @@ def analisar(texto: String) raises -> ConsultaSQL:
     # `DISTINCT` aqui e o modificador da selecao. O `DISTINCT` de dentro de
     # `COUNT(DISTINCT coluna)` e outro token, consumido pela chamada de
     # agregacao — nao ha ambiguidade porque este so vale colado no SELECT.
+    #
+    # `ALL` e o outro lado da mesma escolha e nao muda nada: repetir e o padrao.
+    # Aceita-lo e o mesmo que ja se faz com o `OUTER` de `LEFT OUTER JOIN` —
+    # palavra que o SQL padrao permite escrever e que nao acrescenta operacao.
+    # Nao e sinonimo de um verbo nosso: e a mesma unica forma, dita por extenso.
+    var pediu_all = a.eh_all_modificador()
+    if pediu_all:
+        _ = a.avancar()
+
     if a.aceitar_palavra("DISTINCT"):
+        if pediu_all:
+            var erro = Error(
+                "SQL: ALL e DISTINCT dizem o contrario um do outro — use um deles"
+                + " na posicao " + String(a.atual().posicao)
+            )
+            raise erro^
         c.distinto = True
+        if a.eh_all_modificador():
+            var erro = Error(
+                "SQL: DISTINCT e ALL dizem o contrario um do outro — use um deles"
+                + " na posicao " + String(a.atual().posicao)
+            )
+            raise erro^
 
     if a.aceitar_simbolo("*"):
         c.tudo = True

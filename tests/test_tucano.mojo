@@ -3128,6 +3128,87 @@ def test_sql_distinct_ordenar_fora_do_select_erra() raises:
     assert_true(ok.linhas() > 0)
 
 
+def test_sql_all_e_o_padrao_dito_por_extenso() raises:
+    """`ALL` e o oposto explicito de `DISTINCT`, e nao muda nada.
+
+    Nao e um sinonimo acrescentado por conveniencia: e a mesma unica forma,
+    escrita como o SQL padrao permite. Mesmo caso do `OUTER` em `LEFT OUTER
+    JOIN`, que o dialeto ja aceitava.
+    """
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var sem = consultar_sql_em("SELECT cidade FROM v", cat)
+    var com = consultar_sql_em("SELECT ALL cidade FROM v", cat)
+    assert_equal(com.linhas(), sem.linhas())
+    assert_equal(com.colunas(), sem.colunas())
+    for i in range(sem.linhas()):
+        assert_equal(com.pegar("cidade").texto_em(i), sem.pegar("cidade").texto_em(i))
+
+    var tudo = consultar_sql_em("SELECT ALL * FROM v", cat)
+    assert_equal(tudo.colunas(), 3)
+
+    # e dentro da agregacao, onde ele e o par de COUNT(DISTINCT coluna)
+    var n = consultar_sql_em("SELECT COUNT(ALL cidade) AS n FROM v", cat)
+    var n2 = consultar_sql_em("SELECT COUNT(cidade) AS n FROM v", cat)
+    assert_equal(n.pegar("n").texto_em(0), n2.pegar("n").texto_em(0))
+
+
+def test_sql_all_com_distinct_erra() raises:
+    """As duas palavras pedem coisas opostas — nao ha como atender as duas."""
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var casos = List[String]()
+    casos.append("SELECT ALL DISTINCT cidade FROM v")
+    casos.append("SELECT DISTINCT ALL cidade FROM v")
+    casos.append("SELECT COUNT(DISTINCT ALL cidade) AS n FROM v")
+    for sql in casos:
+        var pegou = False
+        try:
+            _ = consultar_sql_em(sql, cat)
+        except e:
+            pegou = True
+            assert_true("contrario" in String(e))
+        assert_true(pegou)
+
+
+def test_sql_coluna_chamada_all() raises:
+    """`ALL` so e palavra reservada quando vem alvo depois dele.
+
+    O dialeto nao tem identificador entre aspas, entao `SELECT all FROM v` e a
+    unica forma de pedir uma coluna com esse nome. Sem a espiada adiante, aceitar
+    `ALL` como modificador tornaria a coluna inalcancavel.
+    """
+    var a = List[Int64]()
+    a.append(Int64(1))
+    a.append(Int64(2))
+    a.append(Int64(1))
+    var b = List[String]()
+    for x in ["p", "q", "p"]:
+        b.append(String(x))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("all", a^))
+    cols.append(Coluna.de_textos("cidade", b^))
+    var cat = Catalogo()
+    cat.registrar("v", Tabela(cols^))
+
+    var r = consultar_sql_em("SELECT all FROM v", cat)
+    assert_equal(r.colunas(), 1)
+    assert_equal(r.linhas(), 3)
+    assert_equal(r.pegar("all").texto_em(1), "2")
+
+    # na lista, dentro da agregacao, e destilada
+    assert_equal(consultar_sql_em("SELECT all, cidade FROM v", cat).colunas(), 2)
+    assert_equal(
+        consultar_sql_em("SELECT COUNT(all) AS n FROM v", cat)
+        .pegar("n").texto_em(0),
+        "3",
+    )
+    assert_equal(consultar_sql_em("SELECT DISTINCT all FROM v", cat).linhas(), 2)
+
+    # e as duas coisas juntas: modificador e coluna com o mesmo nome
+    assert_equal(consultar_sql_em("SELECT ALL all FROM v", cat).linhas(), 3)
+
+
 def test_sql_apelido_de_coluna_simples() raises:
     """Regressao: `AS` em coluna simples era lido e nunca aplicado.
 
