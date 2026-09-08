@@ -51,8 +51,9 @@ o que for mais conveniente na hora.
   por junção explícita.
 - **Leitura de CSV rápida e correta** — `bytes → scanner → parser tipado → buffers`, sem
   alocar por célula. 715 ns/linha, com aspas RFC 4180 na leitura e na escrita.
-- **Parquet nativo, leitura e escrita** — sem ponte, sem dependência externa. Column pruning
-  e predicate pushdown de verdade: coluna não pedida e row group impossível não saem do disco.
+- **Parquet nativo, leitura e escrita** — sem ponte, sem dependência externa. Column pruning,
+  predicate pushdown e Snappy de verdade: coluna não pedida e row group impossível não saem
+  do disco; o que sai vai comprimido.
 - **Agrupamento e junção como operadores** — não funções soltas. Chave de texto repetida
   agrupa por indexação direta de array, sem hash: 14,7× mais rápido que chave composta.
   Junção interna hasheia o lado de menor custo (NDV ou número de linhas).
@@ -496,7 +497,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Execution engine coluna-a-coluna | ✅ |
 | Kernels SIMD e dictionary encoding | ✅ |
 | I/O tipado: scanner CSV, datahora, leitura em fatias | ✅ |
-| Parquet: leitura, escrita, column pruning, predicate pushdown | ✅ |
+| Parquet: leitura, escrita, column pruning, predicate pushdown, Snappy | ✅ |
 | Agregação, junção, ordenação e verbos de análise | ✅ |
 | Otimizador: dobra, fusão, empurrão, poda de colunas | ✅ |
 | Execução em fluxo com memória limitada | ✅ |
@@ -504,7 +505,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Arrow IPC: leitura e escrita, interop verificada | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-197 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+199 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do

@@ -865,6 +865,7 @@ struct VarreduraParquet(Movable):
 
 from .codecs import (
     descomprimir_snappy,
+    comprimir_snappy,
     decodificar_rle,
     decodificar_rle_i32,
     preencher_rle_i32,
@@ -2224,14 +2225,31 @@ def _pagina_de_dados(col: Coluna, dicionarizada: Bool) raises -> List[UInt8]:
     return pagina^
 
 
+def _codec_de_nome(nome: String) raises -> Int:
+    var v = String(nome.lower())
+    if v == "" or v == "nenhuma" or v == "none" or v == "uncompressed":
+        return PCompressao.NENHUMA
+    if v == "snappy":
+        return PCompressao.SNAPPY
+    raise Error(
+        "parquet: compressao '" + nome + "' desconhecida (use 'snappy' ou 'nenhuma')"
+    )
+
+
+def _aplicar_codec(var corpo: List[UInt8], codec: Int) raises -> List[UInt8]:
+    if codec == PCompressao.SNAPPY:
+        return comprimir_snappy(corpo)
+    return corpo^
+
+
 def _cabecalho_de_dados(
-    num_valores: Int, tamanho: Int, encoding: Int
+    num_valores: Int, descomprimido: Int, comprimido: Int, encoding: Int
 ) raises -> List[UInt8]:
     var w = EscritorThrift()
     w.entrar()
     w.campo_i32(1, PTipoPagina.DADOS)
-    w.campo_i32(2, tamanho)
-    w.campo_i32(3, tamanho)
+    w.campo_i32(2, descomprimido)
+    w.campo_i32(3, comprimido)
     w.campo_struct(5)
     w.campo_i32(1, num_valores)
     w.campo_i32(2, encoding)
@@ -2242,12 +2260,14 @@ def _cabecalho_de_dados(
     return w.finalizar()
 
 
-def _cabecalho_de_dicionario(num_valores: Int, tamanho: Int) raises -> List[UInt8]:
+def _cabecalho_de_dicionario(
+    num_valores: Int, descomprimido: Int, comprimido: Int
+) raises -> List[UInt8]:
     var w = EscritorThrift()
     w.entrar()
     w.campo_i32(1, PTipoPagina.DICIONARIO)
-    w.campo_i32(2, tamanho)
-    w.campo_i32(3, tamanho)
+    w.campo_i32(2, descomprimido)
+    w.campo_i32(3, comprimido)
     w.campo_struct(7)
     w.campo_i32(1, num_valores)
     w.campo_i32(2, PCodificacao.PLAIN)
@@ -2344,14 +2364,15 @@ def para_parquet_lote(
     nomes: List[String],
     caminho: String,
     linhas_por_grupo: Int = 0,
+    compressao: String = "snappy",
 ) raises:
     """Grava um lote de colunas em Parquet.
 
-    Texto ja dicionarizado sai em `RLE_DICTIONARY` (pagina de dicionario +
-    indices). O restante continua PLAIN, sem compressao. Qualquer leitor de
-    Parquet aceita os dois; a verificacao e ler o arquivo de volta com outra
-    implementacao, nao com esta.
+    Texto ja dicionarizado sai em `RLE_DICTIONARY`. Paginas em Snappy por
+    padrao (`compressao="nenhuma"` desliga). Qualquer leitor de Parquet aceita
+    os dois; a verificacao e ler o arquivo de volta com outra implementacao.
     """
+    var codec = _codec_de_nome(compressao)
     var n_linhas = 0
     if len(colunas) > 0:
         n_linhas = colunas[0].tamanho()
@@ -2383,6 +2404,7 @@ def para_parquet_lote(
     # offsets[g * n_col + c]
     var offsets = List[Int]()
     var tamanhos = List[Int]()
+    var tamanhos_uncomp = List[Int]()
     var offset_dados = List[Int]()
     var offset_dic = List[Int]()
     var stats = List[StatsFaixa]()
@@ -2392,27 +2414,35 @@ def para_parquet_lote(
             stats.append(_stats_de_coluna(fatia))
             var usa_dic = fatia.tipo == DType.TEXTO and fatia.eh_dicionarizada()
             var inicio_chunk = len(arquivo)
+            var uncomp = 0
             var dic_off = -1
             if usa_dic:
                 var corpo_dic = _valores_plain_dicionario(fatia)
+                var n_dic = len(corpo_dic)
+                var corpo_dic_c = _aplicar_codec(corpo_dic^, codec)
                 var cab_dic = _cabecalho_de_dicionario(
-                    fatia.cardinalidade(), len(corpo_dic)
+                    fatia.cardinalidade(), n_dic, len(corpo_dic_c)
                 )
                 dic_off = len(arquivo)
                 _acrescentar(arquivo, cab_dic)
-                _acrescentar(arquivo, corpo_dic)
+                _acrescentar(arquivo, corpo_dic_c)
+                uncomp += len(cab_dic) + n_dic
             var encoding = PCodificacao.PLAIN
             if usa_dic:
                 encoding = PCodificacao.RLE_DICTIONARY
             var pagina = _pagina_de_dados(fatia, usa_dic)
+            var n_pag = len(pagina)
+            var pagina_c = _aplicar_codec(pagina^, codec)
             var cabecalho = _cabecalho_de_dados(
-                fins[g] - inicios[g], len(pagina), encoding
+                fins[g] - inicios[g], n_pag, len(pagina_c), encoding
             )
             var dados_off = len(arquivo)
             _acrescentar(arquivo, cabecalho)
-            _acrescentar(arquivo, pagina)
+            _acrescentar(arquivo, pagina_c)
+            uncomp += len(cabecalho) + n_pag
             offsets.append(inicio_chunk)
             tamanhos.append(len(arquivo) - inicio_chunk)
+            tamanhos_uncomp.append(uncomp)
             offset_dados.append(dados_off)
             offset_dic.append(dic_off)
 
@@ -2476,9 +2506,9 @@ def para_parquet_lote(
                 w.zigzag(PCodificacao.RLE)
             w.campo_lista(3, TTipo.BINARIO, 1)
             w.binario(nomes[c])
-            w.campo_i32(4, PCompressao.NENHUMA)
+            w.campo_i32(4, codec)
             w.campo_i64(5, linhas_g)
-            w.campo_i64(6, tamanhos[k])
+            w.campo_i64(6, tamanhos_uncomp[k])
             w.campo_i64(7, tamanhos[k])
             w.campo_i64(9, offset_dados[k])
             if offset_dic[k] >= 0:

@@ -444,14 +444,18 @@ def ler_parquet(
 
 
 def para_parquet(
-    tabela: Tabela, caminho: String, linhas_por_grupo: Int = 0
+    tabela: Tabela, caminho: String, linhas_por_grupo: Int = 0,
+    compressao: String = "snappy",
 ) raises:
     """Grava a tabela em Parquet.
 
     `linhas_por_grupo` divide o arquivo em row groups. Grupos menores permitem
-    leitura em fluxo com pico de memoria menor.
+    leitura em fluxo com pico de memoria menor. `compressao` e `"snappy"`
+    (padrao) ou `"nenhuma"`.
     """
-    para_parquet_lote(tabela.lote(), tabela.nomes(), caminho, linhas_por_grupo)
+    para_parquet_lote(
+        tabela.lote(), tabela.nomes(), caminho, linhas_por_grupo, compressao
+    )
 
 
 def para_arrow(tabela: Tabela, caminho: String) raises:

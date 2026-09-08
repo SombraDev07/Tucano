@@ -1,10 +1,11 @@
-"""Decodificadores de bytes usados pelo Parquet (M5).
+"""Codificadores e decodificadores de bytes usados pelo Parquet.
 
 Dois formatos, ambos independentes do resto da biblioteca:
 
 **Snappy (formato cru)** — o codec de compressao padrao na pratica. Um varint com
 o tamanho descomprimido, seguido de literais e referencias para tras. Sem
-enquadramento de stream: as paginas do Parquet usam o formato cru.
+enquadramento de stream: as paginas do Parquet usam o formato cru. Encoder e
+decoder moram aqui; o escritor comprime, o leitor descomprime.
 
 **RLE / bit-packing hibrido** — carrega os niveis de definicao (quais linhas sao
 ausentes) e os indices de dicionario. Alterna dois tipos de trecho, escolhidos
@@ -18,6 +19,7 @@ cada byte.
 """
 
 from std.memory import bitcast
+from std.ffi import external_call
 
 
 def bits_para_real64(bits: Int) -> Float64:
@@ -114,6 +116,128 @@ def descomprimir_snappy(bytes: List[UInt8], ini: Int, fim: Int) raises -> List[U
             "snappy: descomprimiu " + String(len(out)) + " bytes, esperado "
             + String(tamanho)
         )
+    return out^
+
+
+def _snappy_varint(mut out: List[UInt8], n: Int):
+    var v = n
+    while v >= 128:
+        out.append(UInt8((v & 0x7F) | 0x80))
+        v >>= 7
+    out.append(UInt8(v))
+
+
+def _snappy_literal(
+    mut out: List[UInt8], src: List[UInt8], ini: Int, n: Int
+):
+    """Literal de `n` bytes a partir de `ini`."""
+    if n <= 0:
+        return
+    var menos_um = n - 1
+    if n <= 60:
+        out.append(UInt8(menos_um << 2))
+    elif menos_um < 256:
+        out.append(UInt8(60 << 2))
+        out.append(UInt8(menos_um))
+    elif menos_um < 65536:
+        out.append(UInt8(61 << 2))
+        out.append(UInt8(menos_um & 0xFF))
+        out.append(UInt8(menos_um >> 8))
+    elif menos_um < 16777216:
+        out.append(UInt8(62 << 2))
+        out.append(UInt8(menos_um & 0xFF))
+        out.append(UInt8((menos_um >> 8) & 0xFF))
+        out.append(UInt8(menos_um >> 16))
+    else:
+        out.append(UInt8(63 << 2))
+        out.append(UInt8(menos_um & 0xFF))
+        out.append(UInt8((menos_um >> 8) & 0xFF))
+        out.append(UInt8((menos_um >> 16) & 0xFF))
+        out.append(UInt8(menos_um >> 24))
+    var antes = len(out)
+    out.resize(unsafe_uninit_length=antes + n)
+    _ = external_call["memcpy", Int](
+        out.unsafe_ptr().unsafe_offset(antes),
+        src.unsafe_ptr().unsafe_offset(ini),
+        n,
+    )
+
+
+def _snappy_copia(mut out: List[UInt8], comprimento: Int, offset: Int):
+    """Uma ou mais copias cobrindo `comprimento` bytes a `offset` de distancia."""
+    var rest = comprimento
+    while rest > 0:
+        var n = rest
+        if n > 64:
+            n = 64
+        if n >= 4 and n <= 11 and offset < 2048:
+            var tag = 1 | ((n - 4) << 2) | ((offset >> 8) << 5)
+            out.append(UInt8(tag))
+            out.append(UInt8(offset & 0xFF))
+        else:
+            var tag = 2 | ((n - 1) << 2)
+            out.append(UInt8(tag))
+            out.append(UInt8(offset & 0xFF))
+            out.append(UInt8((offset >> 8) & 0xFF))
+        rest -= n
+
+
+def _snappy_hash4(src: List[UInt8], i: Int) -> Int:
+    var v = Int(src[i])
+    v |= Int(src[i + 1]) << 8
+    v |= Int(src[i + 2]) << 16
+    v |= Int(src[i + 3]) << 24
+    return ((v * 0x1E35A7BD) >> 18) & 16383
+
+
+def comprimir_snappy(src: List[UInt8]) raises -> List[UInt8]:
+    """Snappy cru: o inverso de `descomprimir_snappy`.
+
+    Greedy: literal ate achar 4 bytes que ja apareceram a ate 64 KiB.
+    Copia de 1 ou 2 bytes de deslocamento, a mesma que o decoder le.
+    """
+    var n = len(src)
+    var out = List[UInt8]()
+    _snappy_varint(out, n)
+    if n == 0:
+        return out^
+    if n < 4:
+        _snappy_literal(out, src, 0, n)
+        return out^
+
+    var tab = List[Int](capacity=16384)
+    tab.resize(16384, -1)
+    var i = 0
+    var lit = 0
+    while i + 4 <= n:
+        var h = _snappy_hash4(src, i)
+        var cand = tab[h]
+        tab[h] = i
+        var off = i - cand
+        if cand >= 0 and off > 0 and off <= 65535:
+            if (
+                src[cand] == src[i]
+                and src[cand + 1] == src[i + 1]
+                and src[cand + 2] == src[i + 2]
+                and src[cand + 3] == src[i + 3]
+            ):
+                var m = 4
+                while i + m < n and src[cand + m] == src[i + m]:
+                    m += 1
+                if i > lit:
+                    _snappy_literal(out, src, lit, i - lit)
+                _snappy_copia(out, m, off)
+                var k = i + 1
+                var fim = i + m
+                while k + 4 <= n and k < fim:
+                    tab[_snappy_hash4(src, k)] = k
+                    k += 1
+                i = fim
+                lit = i
+                continue
+        i += 1
+    if lit < n:
+        _snappy_literal(out, src, lit, n - lit)
     return out^
 
 

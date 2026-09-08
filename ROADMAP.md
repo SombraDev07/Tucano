@@ -120,7 +120,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M10.9 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby. SQL junta com `USING`. O servidor HTTP do painel está estacionado.
+**M0 → M10.10 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby. SQL junta com `USING`. O escritor comprime páginas com Snappy. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -179,6 +179,7 @@ GPU (M11), Excel (M12) e o servidor HTTP do painel (M7) seguem fora do caminho c
 | Estatísticas min/max no row group + predicate pushdown | ✅ M10.7 |
 | `distinct_count` + hash join no lado mais barato | ✅ M10.8 |
 | SQL `JOIN` / `LEFT JOIN` com `USING` | ✅ M10.9 |
+| Escritor emite Snappy | ✅ M10.10 |
 | Paralelismo por chunk | ❌ **bloqueado** — fechado por construção no Mojo 1.0 |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
@@ -218,6 +219,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M10.7 | Predicate pushdown | crítica | ✅ feito | min/max no rodapé; pula row group |
 | M10.8 | distinct_count + join | crítica | ✅ feito | NDV no rodapé; hash no lado barato |
 | M10.9 | SQL JOIN | crítica | ✅ feito | `USING` sobre o mesmo `unir` |
+| M10.10 | Snappy na escrita | crítica | ✅ feito | páginas comprimidas por padrão |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
 | M12 | Excel | baixa | não iniciado | compatibilidade tardia |
 
@@ -253,6 +255,8 @@ M10.7 Predicate pushdown
 M10.8 distinct_count + reordenação de junção
  ↓
 M10.9 SQL JOIN
+ ↓
+M10.10 Snappy na escrita
  ↓
 Tucano 1.0
    └── M11 GPU [experimental]   M12 Excel [depois]
@@ -1139,6 +1143,26 @@ também — inverta as tabelas ou use `LEFT JOIN`. O plano é o mesmo `JOIN inte
 
 ---
 
+## M10.10 — Snappy na escrita ✅
+
+O leitor já descomprimia Snappy (arquivo de terceiro). O escritor emitia página
+crua: o arquivo nosso saía maior do que o mesmo dado escrito por outro engine, e
+a ida e volta com compressão não era nossa.
+
+Uma forma: Snappy por padrão, o codec que o Parquet usa na prática. `compressao="nenhuma"`
+desliga. Encoder e decoder são o mesmo formato cru (varint + literais/copias), em
+`tucano/codecs.mojo`. Cabeçalho da página leva tamanho descomprimido e comprimido;
+o chunk no rodapé também.
+
+### Critério de saída
+
+- [x] encoder round-trip com o decoder próprio
+- [x] `para_parquet` emite Snappy por padrão; `"nenhuma"` continua
+- [x] pyarrow lê o arquivo comprimido
+- [x] 199 testes verdes
+
+---
+
 ## M11 — GPU [experimental]
 
 Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / Aggregate / Sort estarem maduros na CPU, e só onde o workload justificar.
@@ -1161,7 +1185,7 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **Analytics** — groupby, join, concat, resumo, estatísticas básicas
 
-**I/O** — CSV, Parquet (column pruning + predicate pushdown + distinct_count)
+**I/O** — CSV, Parquet (column pruning + predicate pushdown + distinct_count + Snappy na escrita)
 
 **SQL** — SELECT/WHERE/GROUP BY/ORDER BY/LIMIT e JOIN (`USING`), sobre o mesmo planner
 
@@ -1221,3 +1245,4 @@ tempo, RAM, throughput, **startup**, scaling por cores, I/O
 14. ~~**Próximo com retorno:** `distinct_count` em coluna dicionarizada + reordenação de junção~~ — M10.8
 15. ~~**Próximo com retorno:** `JOIN` no SQL (`USING`)~~ — M10.9
 16. Painel HTTP — **fora por ora.** Reavalia quando o Mojo expuser `std.net`.
+17. ~~**Próximo com retorno:** Snappy na escrita~~ — M10.10

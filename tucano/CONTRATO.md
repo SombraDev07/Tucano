@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.17.0 — M0 → M10.9 fechados; HTTP do painel fora do caminho crítico.
+Versão 0.18.0 — M0 → M10.10 fechados; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -442,7 +442,7 @@ fronteiras dos campos ficam inteiros em memória. E/S com memória limitada é M
 |---|---|
 | `ler_parquet(caminho)` | lê o arquivo inteiro |
 | `ler_parquet(caminho, [nomes])` | **column pruning**: as outras colunas nunca são lidas |
-| `para_parquet(tabela, caminho)` | escreve |
+| `para_parquet(tabela, caminho)` | escreve (Snappy; `compressao="nenhuma"` desliga) |
 | `esquema_parquet(caminho)` | esquema só do rodapé, sem tocar nos dados |
 | `metadados_parquet(caminho)` | linhas, row groups, codificações, compressão |
 
@@ -452,7 +452,9 @@ páginas V1 e V2, sem compressão e Snappy, múltiplos row groups, tipos lógico
 
 Escrita: `PLAIN` para numéricas e texto de alta cardinalidade; `RLE_DICTIONARY` para
 texto já dicionarizado. O rodapé leva min/max numérico e `distinct_count` no texto
-dicionarizado (NDV do row group). Sem compressão, colunas opcionais, um ou mais row groups.
+dicionarizado (NDV do row group). Páginas em **Snappy** por padrão
+(`para_parquet(..., compressao="nenhuma")` desliga). Colunas opcionais, um ou mais
+row groups.
 A interoperabilidade é verificada lendo os arquivos gerados com outra implementação
 (`pixi run -e fixtures interop`), não com o próprio leitor: um leitor e um escritor
 com o mesmo mal-entendido concordam entre si.

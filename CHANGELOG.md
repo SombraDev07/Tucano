@@ -3,6 +3,18 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.18.0] — Escritor emite Snappy
+
+O leitor ja descomprimia Snappy; o escritor so emitia pagina crua. Agora o
+padrao e comprimir cada pagina (dicionario e dados). `compressao="nenhuma"`
+desliga. Encoder e decoder de Snappy cru moram em `tucano/codecs.mojo`.
+
+### Adicionado
+
+- **`comprimir_snappy`** — formato cru (varint + literais/copias), o mesmo que
+  o Parquet usa nas paginas.
+- **`para_parquet(..., compressao="snappy")`** — padrao. `"nenhuma"` grava cru.
+
 ## [0.17.0] — SQL JOIN; painel HTTP estacionado
 
 O `SELECT` passa a juntar: `JOIN` / `LEFT JOIN ... USING (colunas)` vira o mesmo

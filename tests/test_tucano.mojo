@@ -51,6 +51,7 @@ from tucano import (
     TipoWidget,
     esquema_parquet,
     metadados_parquet,
+    PCompressao,
     consultar_sql,
     para_arrow,
     ler_arrow,
@@ -69,6 +70,7 @@ from tucano.codecs import (
     decodificar_rle_i32,
     codificar_rle_i32,
     descomprimir_snappy,
+    comprimir_snappy,
     largura_de_bits,
 )
 from tucano.thrift import LeitorThrift
@@ -1165,6 +1167,42 @@ def test_pq_rle_i32_ida_e_volta() raises:
         assert_equal(Int(v), 3)
 
 
+def test_pq_snappy_ida_e_volta() raises:
+    """Encoder e decoder de Snappy cru concordam, inclusive com copia."""
+    var casos = List[List[UInt8]]()
+    casos.append(List[UInt8]())
+    var curto = List[UInt8]()
+    curto.append(UInt8(1))
+    curto.append(UInt8(2))
+    curto.append(UInt8(3))
+    casos.append(curto^)
+    var repetido = List[UInt8](capacity=80)
+    for _ in range(80):
+        repetido.append(UInt8(7))
+    casos.append(repetido^)
+    var ciclo = List[UInt8](capacity=60)
+    for i in range(60):
+        ciclo.append(UInt8(i % 3))
+    casos.append(ciclo^)
+    var misturado = List[UInt8](capacity=200)
+    for i in range(200):
+        misturado.append(UInt8((i * 17) % 251))
+    casos.append(misturado^)
+
+    for src in casos:
+        var enc = comprimir_snappy(src)
+        var dec = descomprimir_snappy(enc, 0, len(enc))
+        assert_equal(len(dec), len(src))
+        for i in range(len(src)):
+            assert_equal(Int(dec[i]), Int(src[i]))
+    # repeticao tem de encolher
+    var r = List[UInt8](capacity=80)
+    for _ in range(80):
+        r.append(UInt8(7))
+    var enc_r = comprimir_snappy(r)
+    assert_true(len(enc_r) < len(r))
+
+
 def test_pq_largura_de_bits() raises:
     assert_equal(largura_de_bits(0), 0)
     assert_equal(largura_de_bits(1), 1)
@@ -1408,6 +1446,28 @@ def test_pq_escrita_emite_dicionario() raises:
     assert_equal(volta.pegar("grupo").texto_em(0), original.pegar("grupo").texto_em(0))
     assert_equal(volta.pegar("grupo").texto_em(1000), original.pegar("grupo").texto_em(1000))
     assert_equal(volta.pegar("id").texto_em(2999), "2999")
+
+
+def test_pq_escrita_emite_snappy() raises:
+    """Padrao e Snappy; `nenhuma` continua disponivel."""
+    var original = ler_parquet("tests/fixtures/grupos.parquet")
+    var saida = "tests/fixtures/_saida_snappy.parquet"
+    para_parquet(original, saida)
+    var m = metadados_parquet(saida)
+    for c in range(m.num_colunas()):
+        assert_equal(m.grupos[0].colunas[c].codec, PCompressao.SNAPPY)
+    var volta = ler_parquet(saida)
+    assert_equal(volta.linhas(), original.linhas())
+    assert_equal(volta.pegar("id").texto_em(2999), original.pegar("id").texto_em(2999))
+    assert_equal(volta.pegar("grupo").texto_em(1000), original.pegar("grupo").texto_em(1000))
+
+    var cru = "tests/fixtures/_saida_sem_snappy.parquet"
+    para_parquet(original, cru, 0, "nenhuma")
+    var m2 = metadados_parquet(cru)
+    assert_equal(m2.grupos[0].colunas[0].codec, PCompressao.NENHUMA)
+    var volta2 = ler_parquet(cru)
+    assert_equal(volta2.linhas(), original.linhas())
+    assert_true(m.grupos[0].colunas[0].tamanho_comprimido < m2.grupos[0].colunas[0].tamanho_comprimido)
 
 
 def test_pq_escrita_emite_min_max() raises:
