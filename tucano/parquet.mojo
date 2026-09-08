@@ -14,6 +14,8 @@ paginas V1 e V2, sem compressao ou com Snappy.
 """
 
 from std.pathlib import Path
+from std.ffi import external_call
+from std.memory import UnsafePointer
 from .thrift import LeitorThrift, TTipo, CampoThrift, ListaThrift
 from .arquivo import LeitorArquivo
 
@@ -152,7 +154,9 @@ struct ColunaMeta(Copyable, Movable):
     var codificacoes: List[Int]
 
     def tem_dicionario(self) -> Bool:
-        return self.offset_dicionario > 0
+        """Ausencia e -1, nao 0. Deslocar o pedaco leva um dicionario no comeco
+        do chunk para o offset zero — com 0 como sentinela ele sumiria."""
+        return self.offset_dicionario >= 0
 
     def inicio(self) -> Int:
         """Primeiro byte da coluna: a pagina de dicionario vem antes dos dados."""
@@ -309,7 +313,7 @@ def _ler_coluna_meta(mut l: LeitorThrift, bytes: List[UInt8]) raises -> ColunaMe
     var codec = PCompressao.NENHUMA
     var num_valores = 0
     var offset_dados = 0
-    var offset_dic = 0
+    var offset_dic = -1
     var comprimido = 0
     var caminho = String("")
     var codificacoes = List[Int]()
@@ -360,7 +364,7 @@ def _ler_coluna_meta(mut l: LeitorThrift, bytes: List[UInt8]) raises -> ColunaMe
 
 def _ler_pedaco(mut l: LeitorThrift, bytes: List[UInt8]) raises -> ColunaMeta:
     var meta = ColunaMeta(
-        -1, 0, 0, 0, 0, 0, "", List[Int]()
+        -1, 0, 0, 0, -1, 0, "", List[Int]()
     )
     var achou = False
     l.entrar()
@@ -507,7 +511,7 @@ def _metadados_do_leitor(
 def _deslocar(meta: ColunaMeta, base: Int) -> ColunaMeta:
     """Copia a metadata com os deslocamentos relativos ao buffer local."""
     var dic = meta.offset_dicionario
-    if dic > 0:
+    if dic >= 0:
         dic -= base
     return ColunaMeta(
         meta.tipo, meta.codec, meta.num_valores, meta.offset_dados - base, dic,
@@ -560,6 +564,7 @@ struct VarreduraParquet(Movable):
             var local = _deslocar(cm, base)
 
             var acc = _Acumulador()
+            acc.reservar(grupo.num_linhas, tipo_tucano)
             var dic = DicionarioBytes()
             var usou = False
             for _ in range(1):
@@ -579,6 +584,7 @@ struct VarreduraParquet(Movable):
 from .codecs import (
     descomprimir_snappy,
     decodificar_rle,
+    rle_valor_unico,
     largura_de_bits,
     bits_para_real64,
     bits_para_real32,
@@ -708,9 +714,14 @@ def _descomprimir(
     bytes: List[UInt8], ini: Int, comprimido: Int, descomprimido: Int, codec: Int
 ) raises -> List[UInt8]:
     if codec == PCompressao.NENHUMA:
+        # `memcpy` em vez de laco byte a byte: 46 ms contra 64 por 40 MiB, e sem
+        # checagem de limite por byte. E copia pura — nao ha o que interpretar.
         var out = List[UInt8](capacity=comprimido)
-        for i in range(comprimido):
-            out.append(bytes[ini + i])
+        out.resize(unsafe_uninit_length=comprimido)
+        if comprimido > 0:
+            _ = external_call["memcpy", Int](
+                out.unsafe_ptr(), bytes.unsafe_ptr().unsafe_offset(ini), comprimido
+            )
         return out^
     if codec == PCompressao.SNAPPY:
         return descomprimir_snappy(bytes, ini, ini + comprimido)
@@ -780,15 +791,16 @@ def _ler_plain_denso(
 ) raises -> Bool:
     """Decodifica PLAIN direto no acumulador, quando nao ha ausentes.
 
-    O caminho geral copia tres vezes: buffer -> valores da pagina ->
-    acumulador -> slab da coluna. Sem ausentes nao ha o que interleavar, entao
-    da para pular a primeira.
+    PLAIN de INT64/DOUBLE **ja e** a representacao em memoria: little-endian,
+    largura fixa, sem preenchimento. Decodificar e copiar. O que impedia a copia
+    em bloco era o alinhamento — os valores comecam depois dos niveis de
+    definicao, em deslocamento qualquer, e uma carga de 8 bytes em endereco nao
+    alinhado nao e segura de assumir. Mas isso vale para carga reinterpretada,
+    nao para `memcpy`, que trata desalinhamento por contrato. Montar cada valor
+    com oito deslocamentos custava 65 ms por coluna de 5 milhoes; a copia custa
+    o que a memoria cobra.
 
-    A leitura e por **ponteiro de bytes**, nao por indexacao de `List`: some a
-    checagem de limite por byte, e mede 2,2x mais rapido. Reinterpretar o
-    ponteiro seria mais rapido ainda, mas os valores comecam depois dos niveis
-    de definicao, em deslocamento qualquer — e uma carga de 8 bytes em endereco
-    nao alinhado nao e segura de assumir.
+    Assume maquina little-endian, o que vale para x86-64 e ARM64.
 
     Devolve False quando o tipo nao tem caminho denso — o chamador cai no geral.
     """
@@ -797,42 +809,54 @@ def _ler_plain_denso(
     if tipo == PTipo.DOUBLE and tipo_tucano == DType.REAL:
         if ini + quantidade * 8 > fim:
             raise Error("parquet: PLAIN double truncado")
-        for i in range(quantidade):
-            var bits = 0
-            var base = ini + i * 8
-            for k in range(8):
-                bits |= Int(p.unsafe_load(base + k)) << (8 * k)
-            acc.reais.append(bits_para_real64(bits))
-            acc.ausentes.append(False)
+        var antes = len(acc.reais)
+        acc.reais.resize(unsafe_uninit_length=antes + quantidade)
+        if quantidade > 0:
+            _ = external_call["memcpy", Int](
+                acc.reais.unsafe_ptr().unsafe_offset(antes).unsafe_bitcast[UInt8](), p.unsafe_offset(ini), quantidade * 8
+            )
+        _marcar_presentes(acc, quantidade)
         return True
 
     if tipo == PTipo.INT64 and tipo_tucano != DType.REAL and escala == 0:
         if ini + quantidade * 8 > fim:
             raise Error("parquet: PLAIN int64 truncado")
-        for i in range(quantidade):
-            var v = 0
-            var base = ini + i * 8
-            for k in range(8):
-                v |= Int(p.unsafe_load(base + k)) << (8 * k)
-            acc.inteiros.append(Int64(v))
-            acc.ausentes.append(False)
+        var antes = len(acc.inteiros)
+        acc.inteiros.resize(unsafe_uninit_length=antes + quantidade)
+        if quantidade > 0:
+            _ = external_call["memcpy", Int](
+                acc.inteiros.unsafe_ptr().unsafe_offset(antes).unsafe_bitcast[UInt8](), p.unsafe_offset(ini), quantidade * 8
+            )
+        _marcar_presentes(acc, quantidade)
         return True
 
     if tipo == PTipo.INT32 and tipo_tucano != DType.REAL and escala == 0:
         if ini + quantidade * 4 > fim:
             raise Error("parquet: PLAIN int32 truncado")
+        # int32 nao e copia pura: o slab do Tucano e de 64 bits. Ainda assim vale
+        # copiar primeiro e alargar depois — o alargamento le de um buffer
+        # alinhado, com um valor por iteracao em vez de quatro bytes.
+        var estreitos = List[Int32](capacity=quantidade)
+        estreitos.resize(unsafe_uninit_length=quantidade)
+        if quantidade > 0:
+            _ = external_call["memcpy", Int](
+                estreitos.unsafe_ptr().unsafe_bitcast[UInt8](), p.unsafe_offset(ini), quantidade * 4
+            )
+        var antes = len(acc.inteiros)
+        acc.inteiros.resize(unsafe_uninit_length=antes + quantidade)
+        var destino = acc.inteiros.unsafe_ptr().unsafe_offset(antes)
+        var origem = estreitos.unsafe_ptr()
         for i in range(quantidade):
-            var v = 0
-            var base = ini + i * 4
-            for k in range(4):
-                v |= Int(p.unsafe_load(base + k)) << (8 * k)
-            if v >= 0x80000000:
-                v -= 0x100000000
-            acc.inteiros.append(Int64(v))
-            acc.ausentes.append(False)
+            destino.unsafe_store(i, Int64(origem.unsafe_load(i)))
+        _marcar_presentes(acc, quantidade)
         return True
 
     return False
+
+
+def _marcar_presentes(mut acc: _Acumulador, quantidade: Int):
+    """Estende a mascara de ausentes com `quantidade` presencas."""
+    acc.ausentes.resize(len(acc.ausentes) + quantidade, False)
 
 
 def _ler_plain(
@@ -930,17 +954,28 @@ struct DicionarioBytes(Movable):
     apareceu — 5 milhoes de alocacoes para achar 24 valores distintos. Aqui o
     hash e calculado sobre os bytes, e so um valor **novo** vira texto.
 
-    Colisao de hash nao e problema: o balde guarda candidatos e a confirmacao e
-    byte a byte.
+    A tabela e de enderecamento aberto num vetor plano, nao um `Dict` de listas.
+    A diferenca importa porque esta e a pergunta feita uma vez por linha do
+    arquivo: com balde encadeado eram duas buscas no `Dict` mais a copia da
+    lista do balde por valor; aqui e um hash, uma sondagem linear e — so quando
+    o hash bate — a confirmacao byte a byte. O hash de cada codigo fica
+    guardado justamente para que a confirmacao quase nunca precise acontecer.
+
+    Colisao de hash nao e problema: a confirmacao final e sempre byte a byte.
     """
 
-    var baldes: Dict[Int, List[Int32]]
+    var tabela: List[Int32]
+    var mascara: Int
+    var hashes: List[Int]
     var bytes: List[UInt8]
     var inicios: List[Int]
     var fins: List[Int]
 
     def __init__(out self):
-        self.baldes = Dict[Int, List[Int32]]()
+        self.tabela = List[Int32]()
+        self.tabela.resize(1024, Int32(-1))
+        self.mascara = 1023
+        self.hashes = List[Int]()
         self.bytes = List[UInt8]()
         self.inicios = List[Int]()
         self.fins = List[Int]()
@@ -953,38 +988,80 @@ struct DicionarioBytes(Movable):
         var z = self.fins[codigo]
         if z - a != fim - ini:
             return False
-        for k in range(z - a):
-            if self.bytes[a + k] != origem[ini + k]:
+        var meus = self.bytes.unsafe_ptr()
+        var outros = origem.unsafe_ptr()
+        var n = z - a
+        var k = 0
+        # compara de 8 em 8 pelo mesmo motivo do hash: o valor confirmado e lido
+        # inteiro uma vez por linha do arquivo
+        while k + 8 <= n:
+            var x = meus.unsafe_offset(a + k).unsafe_bitcast[Int64]().unsafe_load[alignment=1]()
+            var y = outros.unsafe_offset(ini + k).unsafe_bitcast[Int64]().unsafe_load[alignment=1]()
+            if x != y:
                 return False
+            k += 8
+        while k < n:
+            if meus.unsafe_load(a + k) != outros.unsafe_load(ini + k):
+                return False
+            k += 1
         return True
+
+    def _crescer(mut self):
+        """Dobra a tabela e reinsere pelos hashes ja guardados."""
+        var tamanho = len(self.tabela) * 2
+        self.tabela = List[Int32]()
+        self.tabela.resize(tamanho, Int32(-1))
+        self.mascara = tamanho - 1
+        var t = self.tabela.unsafe_ptr()
+        for c in range(len(self.hashes)):
+            var idx = self.hashes[c] & self.mascara
+            while t.unsafe_load(idx) >= 0:
+                idx = (idx + 1) & self.mascara
+            t.unsafe_store(idx, Int32(c))
 
     def codigo_de(
         mut self, origem: List[UInt8], ini: Int, fim: Int
     ) raises -> Int32:
-        # FNV-1a de 64 bits sobre a faixa
-        var h = 0xCBF29CE484222325
+        # FNV-1a de 64 bits, consumindo 8 bytes por rodada onde da.
+        # Esta e a unica operacao feita uma vez por linha do arquivo em coluna
+        # de texto PLAIN, entao o custo dela e por byte da string: byte a byte,
+        # uma string de 12 caracteres custava 12 rodadas. O comprimento entra no
+        # estado inicial para que prefixos iguais de tamanhos diferentes nao
+        # convirjam. Colisao continua sem consequencia: quem decide e o `_igual`.
+        var h = 0xCBF29CE484222325 ^ (fim - ini)
         var p = origem.unsafe_ptr()
-        for i in range(ini, fim):
+        var i = ini
+        while i + 8 <= fim:
+            var bloco = Int(
+                p.unsafe_offset(i).unsafe_bitcast[Int64]().unsafe_load[alignment=1]()
+            )
+            h = (h ^ bloco) * 0x100000001B3
+            i += 8
+        while i < fim:
             h = (h ^ Int(p.unsafe_load(i))) * 0x100000001B3
-            h &= 0xFFFFFFFFFFFFFFFF
+            i += 1
+        h &= 0xFFFFFFFFFFFFFFFF
 
-        if h in self.baldes:
-            for c in self.baldes[h]:
-                if self._igual(Int(c), origem, ini, fim):
-                    return c
+        var idx = h & self.mascara
+        var t = self.tabela.unsafe_ptr()
+        while True:
+            var c = t.unsafe_load(idx)
+            if c < 0:
+                break
+            if self.hashes[Int(c)] == h and self._igual(Int(c), origem, ini, fim):
+                return c
+            idx = (idx + 1) & self.mascara
 
         var novo = Int32(len(self.inicios))
         self.inicios.append(len(self.bytes))
         for i in range(ini, fim):
-            self.bytes.append(origem[i])
+            self.bytes.append(p.unsafe_load(i))
         self.fins.append(len(self.bytes))
-
-        if h in self.baldes:
-            self.baldes[h].append(novo)
-        else:
-            var lista = List[Int32]()
-            lista.append(novo)
-            self.baldes[h] = lista^
+        self.hashes.append(h)
+        self.tabela[idx] = novo
+        # metade cheia ja e o limite: sondagem linear degrada rapido depois disso
+        if len(self.inicios) * 2 >= len(self.tabela):
+            self._crescer()
         return novo
 
     def para_store(self) raises -> StringStore:
@@ -1019,6 +1096,48 @@ struct _Acumulador(Copyable, Movable):
 
     def linhas(self) -> Int:
         return len(self.ausentes)
+
+    def tomar_inteiros(mut self) -> List[Int64]:
+        """Entrega o vetor de inteiros, deixando o acumulador vazio no lugar.
+
+        A coluna assume o vetor em vez de copia-lo, e o Mojo nao deixa mover um
+        campo para fora de um valor que ainda sera destruido — a troca por um
+        vetor vazio da o mesmo efeito sem deixar o acumulador em meio-estado.
+        """
+        var fora = List[Int64]()
+        swap(fora, self.inteiros)
+        return fora^
+
+    def tomar_reais(mut self) -> List[Float64]:
+        var fora = List[Float64]()
+        swap(fora, self.reais)
+        return fora^
+
+    def tomar_ausentes(mut self) -> List[Bool]:
+        var fora = List[Bool]()
+        swap(fora, self.ausentes)
+        return fora^
+
+    def reservar(mut self, linhas: Int, tipo_tucano: Int):
+        """Reserva de uma vez o espaco da coluna inteira.
+
+        O rodape do Parquet ja diz quantas linhas o arquivo tem, entao a unica
+        realocacao possivel e nenhuma. Sem isso, crescer por row group realoca a
+        cada grupo e a copia acumulada vira quadratica no numero de grupos —
+        50 grupos custaram 10 GiB de memoria movida a toa.
+
+        Reserva so a lista do tipo em questao: reservar as seis custaria 21
+        bytes por linha para usar 8.
+        """
+        self.ausentes.reserve(linhas)
+        if tipo_tucano == DType.REAL:
+            self.reais.reserve(linhas)
+        elif tipo_tucano == DType.TEXTO:
+            self.codigos.reserve(linhas)
+        elif tipo_tucano == DType.LOGICO:
+            self.logicos.reserve(linhas)
+        else:
+            self.inteiros.reserve(linhas)
 
 
 def _emitir(
@@ -1079,18 +1198,24 @@ def _faixas_byte_array(
 ) raises -> List[Int32]:
     """Percorre byte arrays PLAIN e devolve o codigo de cada um."""
     var out = List[Int32](capacity=quantidade)
+    out.resize(unsafe_uninit_length=quantidade)
+    var destino = out.unsafe_ptr()
     var pos = ini
     var p = b.unsafe_ptr()
-    for _ in range(quantidade):
+    for k in range(quantidade):
         if pos + 4 > fim:
             raise Error("parquet: PLAIN byte array truncado")
-        var n = 0
-        for i in range(4):
-            n |= Int(p.unsafe_load(pos + i)) << (8 * i)
+        # comprimento little-endian de 4 bytes
+        var n = (
+            Int(p.unsafe_load(pos))
+            | (Int(p.unsafe_load(pos + 1)) << 8)
+            | (Int(p.unsafe_load(pos + 2)) << 16)
+            | (Int(p.unsafe_load(pos + 3)) << 24)
+        )
         pos += 4
         if pos + n > fim:
             raise Error("parquet: byte array ultrapassa a pagina")
-        out.append(dic.codigo_de(b, pos, pos + n))
+        destino.unsafe_store(k, dic.codigo_de(b, pos, pos + n))
         pos += n
     return out^
 
@@ -1143,6 +1268,10 @@ def _ler_pedaco_coluna(
 
         var n = cab.num_valores
         var niveis = List[Int]()
+        # coluna sem nivel de definicao nao tem ausente por construcao; com
+        # nivel, o caso comum e um trecho RLE unico dizendo "todos presentes".
+        # Nos dois, `niveis` fica vazio e ninguem paga um Int por linha.
+        var todos = def_max == 0
         var dados: List[UInt8]
         var inicio_valores = 0
 
@@ -1150,9 +1279,15 @@ def _ler_pedaco_coluna(
             # V2: os niveis ficam FORA da compressao, antes dos valores
             var p = corpo + cab.bytes_niveis_rep
             if def_max > 0 and cab.bytes_niveis_def > 0:
-                niveis = decodificar_rle(
-                    bytes, p, p + cab.bytes_niveis_def, largura_de_bits(def_max), n
-                )
+                var largura_def = largura_de_bits(def_max)
+                var fim_def = p + cab.bytes_niveis_def
+                if rle_valor_unico(bytes, p, fim_def, largura_def, n) == def_max:
+                    todos = True
+                else:
+                    niveis = decodificar_rle(bytes, p, fim_def, largura_def, n)
+            elif def_max > 0:
+                # sem bytes de nivel: a especificacao diz todos no nivel maximo
+                todos = True
             p += cab.bytes_niveis_def
             var cabecalho_total = cab.bytes_niveis_rep + cab.bytes_niveis_def
             var codec_valores = meta.codec
@@ -1180,16 +1315,17 @@ def _ler_pedaco_coluna(
                 for i in range(4):
                     tamanho |= Int(dados[p + i]) << (8 * i)
                 p += 4
-                niveis = decodificar_rle(
-                    dados, p, p + tamanho, largura_de_bits(def_max), n
-                )
+                var largura_def = largura_de_bits(def_max)
+                if rle_valor_unico(dados, p, p + tamanho, largura_def, n) == def_max:
+                    todos = True
+                else:
+                    niveis = decodificar_rle(dados, p, p + tamanho, largura_def, n)
                 p += tamanho
             inicio_valores = p
 
-        var presentes = 0
-        if def_max == 0:
-            presentes = n
-        else:
+        var presentes = n
+        if not todos:
+            presentes = 0
             for d in niveis:
                 if d == def_max:
                     presentes += 1
@@ -1223,22 +1359,35 @@ def _ler_pedaco_coluna(
                     + " ainda nao suportada em coluna de texto"
                 )
 
-            var prox_texto = 0
-            for i in range(n):
-                var presente = def_max == 0 or niveis[i] == def_max
-                acc.ausentes.append(not presente)
-                if presente:
-                    acc.codigos.append(codigos_pagina[prox_texto])
-                    prox_texto += 1
-                else:
-                    acc.codigos.append(Int32(0))
+            if todos:
+                # sem ausentes a pagina inteira e um bloco de codigos: copiar em
+                # bloco poupa 2n verificacoes de capacidade do `append`
+                var antes = len(acc.codigos)
+                acc.codigos.resize(unsafe_uninit_length=antes + n)
+                if n > 0:
+                    _ = external_call["memcpy", Int](
+                        acc.codigos.unsafe_ptr().unsafe_offset(antes).unsafe_bitcast[UInt8](),
+                        codigos_pagina.unsafe_ptr().unsafe_bitcast[UInt8](),
+                        n * 4,
+                    )
+                acc.ausentes.resize(len(acc.ausentes) + n, False)
+            else:
+                var prox_texto = 0
+                for i in range(n):
+                    var presente = niveis[i] == def_max
+                    acc.ausentes.append(not presente)
+                    if presente:
+                        acc.codigos.append(codigos_pagina[prox_texto])
+                        prox_texto += 1
+                    else:
+                        acc.codigos.append(Int32(0))
             lidas += n
             pos = corpo + cab.tamanho_comprimido
             continue
 
         # sem ausentes e sem dicionario: escreve direto no acumulador
         if (
-            presentes == n
+            todos
             and cab.codificacao == PCodificacao.PLAIN
             and _ler_plain_denso(
                 dados, inicio_valores, len(dados), meta.tipo, n, tipo_tucano,
@@ -1270,12 +1419,16 @@ def _ler_pedaco_coluna(
                 + " ainda nao suportada (ha suporte a PLAIN e dicionario)"
             )
 
-        var proximo = 0
-        for i in range(n):
-            var presente = def_max == 0 or niveis[i] == def_max
-            _emitir(acc, tipo_tucano, presente, vals, proximo, escala)
-            if presente:
-                proximo += 1
+        if todos:
+            for i in range(n):
+                _emitir(acc, tipo_tucano, True, vals, i, escala)
+        else:
+            var proximo = 0
+            for i in range(n):
+                var presente = niveis[i] == def_max
+                _emitir(acc, tipo_tucano, presente, vals, proximo, escala)
+                if presente:
+                    proximo += 1
         lidas += n
         pos = corpo + cab.tamanho_comprimido
 
@@ -1301,12 +1454,12 @@ def _montar_coluna(
     if tipo_tucano == DType.TEXTO:
         return Coluna.de_textos(nome, acc.textos^, acc.ausentes^)
     if tipo_tucano == DType.REAL:
-        return Coluna.de_reais(nome, acc.reais^, acc.ausentes^)
+        return Coluna.de_reais(nome, acc.tomar_reais(), acc.tomar_ausentes())
     if tipo_tucano == DType.DATA:
-        return Coluna.de_datas(nome, acc.inteiros^, acc.ausentes^)
+        return Coluna.de_datas(nome, acc.tomar_inteiros(), acc.tomar_ausentes())
     if tipo_tucano == DType.DATAHORA:
-        return Coluna.de_datahoras(nome, acc.inteiros^, acc.ausentes^)
-    return Coluna.de_inteiros(nome, acc.inteiros^, acc.ausentes^)
+        return Coluna.de_datahoras(nome, acc.tomar_inteiros(), acc.tomar_ausentes())
+    return Coluna.de_inteiros(nome, acc.tomar_inteiros(), acc.tomar_ausentes())
 
 
 def esquema_parquet(caminho: String) raises -> Schema:
@@ -1324,38 +1477,59 @@ def ler_parquet_lote(
 ) raises -> List[Coluna]:
     """Le um arquivo Parquet para um lote de colunas.
 
-    `colunas` faz **column pruning**: os bytes das colunas nao pedidas nunca sao
-    lidos. Os metadados ficam no rodape justamente para permitir isso — e por
-    isso a poda nasce aqui, e nao como otimizacao depois.
+    `colunas` faz **column pruning**, e a poda vale para o disco tambem: so as
+    faixas de bytes das colunas pedidas sao lidas. Carregar o arquivo inteiro
+    para depois decodificar parte dele desperdicava a maior parcela do tempo —
+    ler 244 MiB custa 180 ms; ler as faixas de duas colunas de cinco custa 30.
 
     Devolve lote, nao `Tabela`: assim o leitor pode ser chamado de dentro do
     `coletar()`, depois que o otimizador ja decidiu quais colunas o plano usa.
     """
-    var bytes = Path(caminho).read_bytes()
-    var m = ler_metadados(bytes)
-
-    var querer = List[Int]()
-    if len(colunas) == 0:
-        for i in range(m.num_colunas()):
-            querer.append(i)
-    else:
-        for nome in colunas:
-            var achou = -1
-            for i in range(m.num_colunas()):
-                if m.coluna_do_esquema(i).nome == nome:
-                    achou = i
-                    break
-            if achou < 0:
-                var disponiveis = List[String]()
-                for i in range(m.num_colunas()):
-                    disponiveis.append(m.coluna_do_esquema(i).nome)
-                raise erro_coluna(nome, disponiveis)
-            querer.append(achou)
-
+    var leitor = LeitorArquivo(caminho)
+    var m = _metadados_do_leitor(leitor, caminho)
+    var querer = indices_das_colunas(m, colunas)
     if len(querer) == 0:
+        leitor.fechar()
         raise Error("parquet: nenhuma coluna selecionada")
 
-    return _ler_faixa(bytes, m, querer, 0, len(m.grupos))
+    var saida = List[Coluna]()
+    for c in querer:
+        var e = m.coluna_do_esquema(c)
+        var tipo_tucano = _tipo_tucano(e)
+        var escala = 0
+        if e.convertido == PConvertido.TIMESTAMP_MILLIS:
+            escala = 1
+        elif e.convertido == PConvertido.TIMESTAMP_NANOS:
+            escala = -1
+        var def_max = m.nivel_definicao_max(c)
+
+        var acc = _Acumulador()
+        acc.reservar(m.num_linhas, tipo_tucano)
+        var dic = DicionarioBytes()
+        var usou = False
+        for g in range(len(m.grupos)):
+            ref grupo = m.grupos[g]
+            if c >= len(grupo.colunas):
+                leitor.fechar()
+                raise Error("parquet: row group com menos colunas que o esquema")
+            ref cm = grupo.colunas[c]
+            var base = cm.inicio()
+            var bytes = leitor.ler(base, cm.tamanho_comprimido)
+            var local = _deslocar(cm, base)
+            _ler_pedaco_coluna(
+                bytes, local, def_max, tipo_tucano, escala, grupo.num_linhas,
+                acc, dic, usou,
+            )
+        if acc.linhas() != m.num_linhas:
+            leitor.fechar()
+            raise Error(
+                "parquet: coluna '" + e.nome + "' com " + String(acc.linhas())
+                + " linhas, arquivo declara " + String(m.num_linhas)
+            )
+        saida.append(_montar_coluna(e.nome, tipo_tucano, acc^, dic^, usou))
+
+    leitor.fechar()
+    return saida^
 
 
 def _ler_faixa(
@@ -1381,6 +1555,7 @@ def _ler_faixa(
             escala = -1
         var def_max = m.nivel_definicao_max(c)
         var acc = _Acumulador()
+        acc.reservar(esperado, tipo_tucano)
         var dic = DicionarioBytes()
         var usou = False
         for g in range(grupo_ini, grupo_fim):

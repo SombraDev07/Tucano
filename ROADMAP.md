@@ -873,6 +873,104 @@ Três armadilhas de FlatBuffer que custaram tempo e ficam registradas: o `soffse
 
 ---
 
+## M10.5 — Leitura de Parquet: tirar o desperdício ✅
+
+Medir contra Polars e DuckDB (M10) produziu o primeiro número desconfortável do
+projeto: ler 5 milhões de linhas × 5 colunas — 245 MiB — custava **1112 ms**,
+contra 84 ms da biblioteca tabular mais usada em Python e 33 ms do Polars. Treze
+vezes mais lento que o alvo que o projeto se propõe a substituir.
+
+A tentação era responder com "falta paralelismo". Não faltava: a máquina é a
+mesma, o arquivo é o mesmo, e o número mede uma thread contra uma thread. O que
+havia era desperdício — e paralelizar código que copia o arquivo três vezes só
+faz oito núcleos desperdiçarem juntos.
+
+### O piso físico, medido antes de qualquer mudança
+
+Antes de otimizar, medir o que a máquina cobra. Nos mesmos 244 MiB:
+
+| | |
+|---|---|
+| `pread` do arquivo inteiro | 78 ms (3,2 GB/s, em cache) |
+| `memcpy` de 244 MiB | 46 ms (5,5 GB/s) |
+
+Isso fecha a pergunta "dá para chegar a 9 ms como o DuckDB?": não, não numa
+thread que materializa os dados. Mas mostra que **1112 ms eram 14× o piso**, e
+essa distância é desperdício, não física.
+
+### As seis fontes, e o que cada uma custava
+
+| | efeito |
+|---|---|
+| `Path.read_bytes()` lia o arquivo **inteiro**, mesmo com column pruning | 1112 → 721 |
+| páginas sem compressão copiadas **byte a byte** em vez de `memcpy` | (junto com a anterior) |
+| níveis de definição expandidos a um `Int` por linha para descobrir "nenhum ausente" | 721 → 690 |
+| PLAIN de INT64/DOUBLE montado com **oito deslocamentos por valor** | 690 → 496 |
+| dicionário de bytes num `Dict` de listas encadeadas, consultado uma vez por linha | (junto com a anterior) |
+| slab da coluna **copiado** do acumulador em vez de assumido | 496 → 286 |
+
+E, depois, duas afiações no que sobrou: hash e comparação de bytes de 8 em 8, já
+que essas são as operações feitas exatamente uma vez por linha do arquivo.
+
+### Resultado
+
+| 5M linhas × 5 colunas, 245 MiB | antes | depois | |
+|---|---|---|---|
+| ler tudo | 1112 ms | **230 ms** | 4,8× |
+| ler 2 de 5 colunas | 568 ms | **103 ms** | 5,5× |
+
+A distância para a biblioteca de referência caiu de **13,9× para 2,7×**; no caso
+podado, de 16× para 2,9×. Do que resta, 78 ms são o `pread` — 34% do total é a
+leitura física, não o decodificador.
+
+### `resize` não é `reserve`
+
+O primeiro `memcpy` deixou a leitura **duas vezes mais lenta** (831 → 1519 ms).
+`resize` para o tamanho exato a cada row group realoca a cada grupo, e a cópia
+acumulada vira quadrática no número deles: 50 grupos moveram 10 GiB à toa. O
+rodapé do Parquet já diz quantas linhas o arquivo tem — reservar uma vez elimina
+toda realocação. Fica registrado porque a lição é geral: trocar `append` por
+cópia em bloco só ganha se a capacidade estiver garantida antes.
+
+O mesmo vale para `resize(n, 0)` antes de um `memcpy`: escreve 40 MiB de zeros
+para sobrescrevê-los. `resize(unsafe_uninit_length=n)` é o par certo da cópia.
+
+### Um bug que só aparecia lendo por faixa
+
+Tornar os deslocamentos relativos ao pedaço de coluna revelou que
+`tem_dicionario()` usava `offset > 0` como sentinela de ausência. Quando a página
+de dicionário abre o pedaço, o deslocamento relativo é exatamente **zero** — e a
+coluna passava a ser lida como se não tivesse dicionário.
+
+O defeito já existia na `VarreduraParquet` desde o M9, latente: nenhum teste lia
+um arquivo dicionarizado **por faixa**. O caso está coberto agora
+(`test_m8_varredura_le_dicionarizado`), e a sentinela virou `-1`.
+
+### O que ficou de fora, e por quê
+
+O escritor ainda emite texto em **PLAIN**, não `RLE_DICTIONARY`. São 5 milhões de
+cópias de 24 valores distintos no arquivo — o leitor precisa dicionarizar todos
+de volta, e é isso que faz as colunas de texto custarem 152 dos 230 ms. Escrever
+dicionarizado encolhe o arquivo e acelera qualquer leitor, não só o nosso. É a
+próxima peça, e é mudança de **escritor**, com risco de formato próprio: entra
+com a verificação cruzada que já existe, não junto com mudança de leitor.
+
+Paralelismo continua fora: `pthread_create` funciona via FFI, mas a regra de
+posse do Mojo (`struct fields cannot expose AnyOrigin in their type`) impede
+carregar as estruturas do Tucano por thread. `fork()` foi testado e funciona,
+com custo de ~9,4 ms por processo em espaço de 320 MB — mas uma biblioteca que
+bifurca processo sem o usuário pedir é surpresa, não recurso.
+
+### Critério de saída
+
+- [x] leitura lê só as faixas das colunas pedidas, nunca o arquivo inteiro
+- [x] nenhuma cópia byte a byte no caminho quente
+- [x] slab da coluna assumido, não copiado
+- [x] 185 testes verdes, ida e volta e interoperabilidade nos dois formatos
+- [x] ganho medido, não estimado: 4,8× em leitura completa, 5,5× com poda
+
+---
+
 ## M11 — GPU [experimental]
 
 Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / Aggregate / Sort estarem maduros na CPU, e só onde o workload justificar.
@@ -956,5 +1054,6 @@ E, a partir do M7, a métrica que é nossa: **latência de filtro de painel** e 
 7. ~~**M5**: scanner CSV tipado (bytes → buffers), streaming em fatias, datahora~~
 8. ~~**M6**: groupby e join como operadores~~
 9. ~~Decidir sobre `pyarrow` como dependência **de fixture** para destravar Parquet~~
-10. Reavaliar paralelismo quando o stdlib do Mojo expuser primitiva estável
-11. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5
+10. **Escritor**: emitir texto em `RLE_DICTIONARY` — encolhe o arquivo e tira o maior custo restante da leitura
+11. Reavaliar paralelismo quando o stdlib do Mojo expuser primitiva estável
+12. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5

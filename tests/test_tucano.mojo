@@ -2037,6 +2037,22 @@ def test_m8_varredura_parquet_le_so_o_necessario() raises:
     assert_equal(r.soma("soma_valor"), sem.soma("soma_valor"))
 
 
+def test_m8_varredura_le_dicionarizado() raises:
+    """Regressao: `tem_dicionario` usava `offset > 0` como sentinela.
+
+    Quando a pagina de dicionario abre o pedaco de coluna, torna-la relativa ao
+    buffer local a leva para o offset zero — e a coluna passava a ser lida como
+    se nao tivesse dicionario nenhum. So aparece em arquivo dicionarizado lido
+    por faixa, que era exatamente o caso que nenhum teste cobria.
+    """
+    var t = varredura_parquet("tests/fixtures/dicionario.parquet").coletar()
+    assert_equal(t.linhas(), 140)
+    assert_equal(t.pegar("cidade").texto_em(0), "SP")
+    assert_equal(t.pegar("cidade").texto_em(3), "BH")
+    assert_true(t.pegar("cidade").eh_dicionarizada())
+    assert_equal(t.pegar("cidade").cardinalidade(), 3)
+
+
 def test_m8_varredura_parquet_alimenta_o_plano() raises:
     var q = varredura_parquet("tests/fixtures/grupos.parquet").onde(
         coluna("valor").gt(lit(1000.0))

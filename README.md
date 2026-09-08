@@ -30,7 +30,7 @@ o que for mais conveniente na hora.
 
 ## Principais recursos
 
-- **Armazenamento columnar tipado** — slabs contíguos por coluna, `capacity == len`, sem
+- **Armazenamento columnar tipado** — slabs contíguos por coluna, sem
   lista de objetos em lugar nenhum.
 - **Ausentes de primeira classe** — bitmap de validade separado do valor. Uma coluna de
   inteiros com valores ausentes continua sendo de inteiros: não há promoção silenciosa para
@@ -445,25 +445,44 @@ Os números acima são internos — medem o Tucano contra ele mesmo. A suíte co
 contra os engines de referência, no mesmo arquivo e com a mesma pergunta:
 
 ```bash
-pixi run bench-comparativo
-pixi run -e comparativo referencia      # todos os núcleos
-pixi run -e comparativo referencia-1t   # uma thread
+pixi run bench-leitura                  # leitura, lado do Tucano
+pixi run -e comparativo leitura         # leitura, todos os engines
+pixi run bench-comparativo              # pipeline completo
+pixi run -e comparativo referencia-1t   # pipeline, uma thread
 ```
 
-| 5M linhas, Parquet → filtro → groupby → 3 agregações | tempo | atraso do Tucano |
+**Ler 5 milhões de linhas × 5 colunas de Parquet — 245 MiB — e materializar em memória:**
+
+| | ler tudo | ler 2 de 5 colunas |
 |---|---|---|
-| Tucano | 972 ms | — |
-| Polars (16 threads) | 57 ms | 17× |
-| DuckDB (16 threads) | 29 ms | 33× |
-| Polars (1 thread) | 100 ms | **9,7×** |
-| DuckDB (1 thread) | 139 ms | **7,0×** |
+| Tucano | **230 ms** | **103 ms** |
+| pandas 3.0.5 | 84 ms | 35 ms |
+| pyarrow | 59 ms | 23 ms |
+| Polars 1.44 | 33 ms | 14 ms |
+| DuckDB 1.5.5 | 9 ms | 4 ms |
 
-A linha que importa é a de baixo. Contra um núcleo só, o atraso cai de 33× para 7× — **de
-metade a dois terços da distância é simplesmente não usar os outros quinze núcleos**, que é
-o item bloqueado pela ausência de primitiva de paralelismo no Mojo 1.0.
+Nos mesmos 244 MiB, o `pread` sozinho custa 78 ms e um `memcpy` custa 46. Dos 230 ms do
+Tucano, portanto, um terço é leitura física — e 9 ms como o do DuckDB não são alcançáveis
+por nada que materialize os dados numa thread.
 
-O que sobra é maturidade de decodificação, e é onde o trabalho rende hoje. Publicar o número
-desfavorável é o ponto: sem ele, "é rápido porque tem SIMD" seria afirmação sem contraprova.
+**Pipeline completo — Parquet → filtro → groupby → 3 agregações, 5M linhas:**
+
+| | tempo | atraso do Tucano |
+|---|---|---|
+| Tucano | 376 ms | — |
+| Polars (16 threads) | 57 ms | 6,6× |
+| DuckDB (16 threads) | 30 ms | 12,7× |
+| Polars (1 thread) | 105 ms | **3,6×** |
+| DuckDB (1 thread) | 142 ms | **2,7×** |
+
+A linha que importa é a de baixo. Contra um núcleo só, o atraso é de 2,7× a 3,6× — o resto
+da distância é simplesmente não usar os outros quinze núcleos, item bloqueado pela ausência
+de primitiva de paralelismo estável no Mojo 1.0.
+
+Publicar o número desfavorável é o ponto: sem ele, "é rápido porque tem SIMD" seria
+afirmação sem contraprova. Foi exatamente essa medição que expôs 1112 ms na leitura, onde
+hoje há 230 — a distância era desperdício, não física, e desperdício mede-se antes de
+otimizar.
 
 ## Arquitetura
 

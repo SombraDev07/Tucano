@@ -3,6 +3,56 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.13.2] — Leitura de Parquet 4,8x mais rapida
+
+Sem mudanca de API. So desperdicio removido do caminho de leitura, depois que a
+suite comparativa do M10 mostrou 1112 ms onde a referencia fazia 84.
+
+| 5M linhas x 5 colunas, 245 MiB | antes | depois | |
+|---|---|---|---|
+| ler tudo | 1112 ms | **230 ms** | 4,8x |
+| ler 2 de 5 colunas | 568 ms | **103 ms** | 5,5x |
+
+### Corrigido
+
+- **`tem_dicionario()` usava `offset > 0` como sentinela de ausencia.** Com os
+  deslocamentos relativos ao pedaco de coluna, uma pagina de dicionario no inicio
+  do pedaco cai no offset zero e a coluna era lida como se nao tivesse dicionario.
+  O defeito estava latente na `VarreduraParquet` desde o M9 — nenhum teste lia um
+  arquivo dicionarizado por faixa. Sentinela agora e `-1`, e o caso esta coberto
+  por `test_m8_varredura_le_dicionarizado`.
+
+### Alterado
+
+- **`ler_parquet` le so as faixas das colunas pedidas.** Era
+  `Path.read_bytes()` do arquivo inteiro; o column pruning existia no
+  decodificador mas nao no disco. Agora usa `LeitorArquivo` por pedaco de coluna,
+  a mesma tecnica que a `VarreduraParquet` ja usava.
+- **PLAIN de INT64/DOUBLE decodificado por copia em bloco.** A representacao no
+  arquivo e identica a da memoria; montar cada valor com oito deslocamentos era
+  trabalho puro. `memcpy` trata o desalinhamento que impedia a carga larga.
+- **`DicionarioBytes` passou a enderecamento aberto** num vetor plano, no lugar
+  de um `Dict` de listas por balde. E a pergunta feita uma vez por linha em
+  coluna de texto PLAIN. Hash e comparacao consomem 8 bytes por rodada.
+- **`slab_int64`/`slab_float64` assumem a lista em vez de copia-la.** Um `List`
+  do Mojo ja e um slab contiguo; a copia so tocava 40 MiB de paginas novas por
+  coluna para chegar aos mesmos bytes.
+- **`Validity.de_lista` monta o byte inteiro antes de escrever**, no lugar de
+  ler e reescrever o mesmo byte uma vez por bit: 14 ms -> 2 ms em 5M linhas.
+- **Niveis de definicao nao sao mais expandidos** quando a pagina e um unico
+  trecho RLE dizendo "todos presentes" — o caso normal. `rle_valor_unico` le o
+  cabecalho e responde sem materializar um `Int` por linha.
+- **`desempacotar_bits` confere os limites uma vez**, na entrada, em vez de a
+  cada byte: um trecho empacotado tem tamanho fechado.
+
+### Nota de desempenho
+
+`resize` para o tamanho exato a cada row group realoca a cada grupo — a primeira
+versao com `memcpy` ficou **duas vezes mais lenta** que a que substituia. O
+rodape ja diz quantas linhas o arquivo tem: reservar uma vez elimina o problema.
+E `resize(n, 0)` antes de um `memcpy` escreve os mesmos bytes duas vezes;
+`resize(unsafe_uninit_length=n)` e o par correto.
+
 ## [0.7.0] — Parquet: leitura, escrita e column pruning
 
 Fecha o unico item que faltava do M5. Interoperabilidade verificada lendo com outra

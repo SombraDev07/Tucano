@@ -59,7 +59,7 @@ struct Coluna(Copyable, Movable):
 
     @staticmethod
     def de_inteiros(
-        nome: String, valores: List[Int64], ausentes: List[Bool] = List[Bool]()
+        nome: String, var valores: List[Int64], ausentes: List[Bool] = List[Bool]()
     ) raises -> Self:
         var n = len(valores)
         _validar_ausentes(n, ausentes)
@@ -71,7 +71,7 @@ struct Coluna(Copyable, Movable):
             DType.INTEIRO,
             n,
             val^,
-            slab_int64(valores),
+            slab_int64(valores^),
             List[Float64](),
             List[UInt8](),
             StringStore.vazio(),
@@ -80,7 +80,7 @@ struct Coluna(Copyable, Movable):
 
     @staticmethod
     def de_reais(
-        nome: String, valores: List[Float64], ausentes: List[Bool] = List[Bool]()
+        nome: String, var valores: List[Float64], ausentes: List[Bool] = List[Bool]()
     ) raises -> Self:
         var n = len(valores)
         _validar_ausentes(n, ausentes)
@@ -93,7 +93,7 @@ struct Coluna(Copyable, Movable):
             n,
             val^,
             List[Int64](),
-            slab_float64(valores),
+            slab_float64(valores^),
             List[UInt8](),
             StringStore.vazio(),
             List[Int32](),
@@ -169,7 +169,7 @@ struct Coluna(Copyable, Movable):
 
     @staticmethod
     def de_datas(
-        nome: String, dias: List[Int64], ausentes: List[Bool] = List[Bool]()
+        nome: String, var dias: List[Int64], ausentes: List[Bool] = List[Bool]()
     ) raises -> Self:
         """Coluna de datas a partir de dias desde 1970-01-01."""
         var n = len(dias)
@@ -182,7 +182,7 @@ struct Coluna(Copyable, Movable):
             DType.DATA,
             n,
             val^,
-            slab_int64(dias),
+            slab_int64(dias^),
             List[Float64](),
             List[UInt8](),
             StringStore.vazio(),
@@ -191,7 +191,7 @@ struct Coluna(Copyable, Movable):
 
     @staticmethod
     def de_datahoras(
-        nome: String, micros: List[Int64], ausentes: List[Bool] = List[Bool]()
+        nome: String, var micros: List[Int64], ausentes: List[Bool] = List[Bool]()
     ) raises -> Self:
         """Coluna de datahora a partir de microssegundos desde a epoch."""
         var n = len(micros)
@@ -204,7 +204,7 @@ struct Coluna(Copyable, Movable):
             DType.DATAHORA,
             n,
             val^,
-            slab_int64(micros),
+            slab_int64(micros^),
             List[Float64](),
             List[UInt8](),
             StringStore.vazio(),

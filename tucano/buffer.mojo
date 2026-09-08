@@ -9,6 +9,8 @@ Layout:
 A API publica nao expoe o layout interno alem de `unsafe` futuro (M4).
 """
 
+from std.ffi import external_call
+
 
 def _bytes_para_bits(n: Int) -> Int:
     if n <= 0:
@@ -50,19 +52,38 @@ struct Validity(Copyable, Movable):
 
     @staticmethod
     def de_lista(ausentes: List[Bool]) -> Self:
+        """Empacota a lista de ausentes na mascara de bits.
+
+        Percorre de oito em oito e monta o byte inteiro antes de escrever: o
+        laco anterior lia e reescrevia o mesmo byte oito vezes, uma por bit. Na
+        pratica quase toda coluna chega sem nenhum ausente, e ai o byte sai zero
+        sem nenhuma escrita — por isso o caso de todos presentes tambem sai
+        barato, sem precisar de um caminho proprio.
+        """
         var n = len(ausentes)
         var nb = _bytes_para_bits(n)
-        var bits = List[UInt8](capacity=nb)
-        for _ in range(nb):
-            bits.append(UInt8(0))
+        var bits = List[UInt8]()
+        bits.resize(nb, UInt8(0))
         var total = 0
-        for i in range(n):
-            if ausentes[i]:
-                var byte_i = i // 8
-                var bit_i = i % 8
-                var atual = Int(bits[byte_i])
-                bits[byte_i] = UInt8(atual | (1 << bit_i))
+        var origem = ausentes.unsafe_ptr()
+        var destino = bits.unsafe_ptr()
+        var completos = n // 8
+        for b in range(completos):
+            var base = b * 8
+            var acumulado = 0
+            for k in range(8):
+                if origem[unsafe_offset=base + k]:
+                    acumulado |= 1 << k
+                    total += 1
+            if acumulado != 0:
+                destino.unsafe_store(b, UInt8(acumulado))
+        var acumulado = 0
+        for i in range(completos * 8, n):
+            if origem[unsafe_offset=i]:
+                acumulado |= 1 << (i % 8)
                 total += 1
+        if acumulado != 0:
+            destino.unsafe_store(completos, UInt8(acumulado))
         return Self(n, bits^, total)
 
     def tamanho(self) -> Int:
@@ -173,21 +194,23 @@ struct StringStore(Copyable, Movable):
         return len(self.bytes)
 
 
-def slab_int64(valores: List[Int64]) -> List[Int64]:
-    """Copia para slab contiguidade com capacity == len."""
-    var n = len(valores)
-    var out = List[Int64](capacity=n)
-    for v in valores:
-        out.append(v)
-    return out^
+def slab_int64(var valores: List[Int64]) -> List[Int64]:
+    """Assume a lista como slab da coluna.
+
+    Um `List` do Mojo **ja e** um slab contiguo — nao ha layout a converter.
+    Esta funcao existia para copiar mesmo assim, garantindo `capacity == len`;
+    o que a coluna precisa de verdade e contiguidade, e isso o `List` da de
+    graca. A copia custava tocar 40 MiB de paginas novas por coluna de 5
+    milhoes, so para chegar aos mesmos bytes.
+
+    Continua sendo o unico ponto por onde valores viram slab: o nome marca a
+    fronteira, mesmo quando a fronteira nao custa nada.
+    """
+    return valores^
 
 
-def slab_float64(valores: List[Float64]) -> List[Float64]:
-    var n = len(valores)
-    var out = List[Float64](capacity=n)
-    for v in valores:
-        out.append(v)
-    return out^
+def slab_float64(var valores: List[Float64]) -> List[Float64]:
+    return valores^
 
 
 def slab_bool_u8(valores: List[Bool]) -> List[UInt8]:

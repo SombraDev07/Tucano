@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.12.0 — M0 → M10 fechados (paralelismo por thread à parte).
+Versão 0.13.2 — M0 → M10.5 fechados (paralelismo por thread à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -113,19 +113,23 @@ verdadeiro.
 ```
 Coluna
 ├── validity : bitmap empacotado (List[UInt8]) + contagem de ausentes O(1)
-├── ints     : slab contíguo Int64    (capacity == len) — inteiro e data
-├── reals    : slab contíguo Float64  (capacity == len)
+├── ints     : slab contíguo Int64  — inteiro, data e datahora
+├── reals    : slab contíguo Float64
 ├── logics   : slab contíguo UInt8 0/1
 └── textos   : StringStore (offsets + bytes UTF-8)
 ```
 
-- As factories (`de_inteiros`, `de_reais`, `de_logicos`, `de_textos`) aceitam `List` na
-  entrada e **copiam** para o layout columnar.
+- As factories numéricas (`de_inteiros`, `de_reais`, `de_datas`, `de_datahoras`) **assumem**
+  a `List` recebida como slab da coluna, sem copiá-la: um `List` do Mojo já é contíguo, e
+  copiar só tocava páginas novas para chegar aos mesmos bytes. Quem passa uma lista viva
+  continua funcionando — o Mojo insere a cópia na chamada. As de texto e lógicos ainda
+  convertem, porque ali o layout de destino é outro.
+- O que a coluna garante é **contiguidade**, não `capacity == len`.
 - `List` aqui é o slab contíguo do Mojo — não uma lista de objetos.
 ├── codigos  : Int32 por linha quando a coluna de texto é dicionarizada
 ```
 
-- As factories (`de_inteiros`, …) aceitam `List` na entrada e **copiam** para o layout.
+- As factories (`de_inteiros`, …) recebem a `List` por posse; ver acima.
 - `List` aqui é o slab contíguo do Mojo — não uma lista de objetos.
 - O layout interno não é API pública. Os kernels SIMD acessam esses slabs por ponteiro.
 

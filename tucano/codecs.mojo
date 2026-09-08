@@ -136,24 +136,37 @@ def desempacotar_bits(
     bytes: List[UInt8], mut cursor: Cursor, quantidade: Int, largura: Int,
     mut saida: List[Int], fim: Int
 ) raises:
-    """Le `quantidade` valores de `largura` bits, do menos ao mais significativo."""
+    """Le `quantidade` valores de `largura` bits, do menos ao mais significativo.
+
+    Um trecho empacotado tem tamanho fechado — `quantidade * largura` bits — e
+    da para conferir isso uma vez, na entrada, em vez de perguntar "cabe?" a
+    cada byte. O resto e leitura por ponteiro e escrita em posicao ja reservada:
+    e o laco mais quente da leitura de coluna dicionarizada, e nele o teste de
+    limite do `List` custava mais que o deslocamento de bits.
+    """
     if largura == 0:
-        for _ in range(quantidade):
-            saida.append(0)
+        saida.resize(len(saida) + quantidade, 0)
         return
+    var necessarios = (quantidade * largura + 7) // 8
+    if cursor.pos + necessarios > fim:
+        raise Error("rle: fim inesperado no trecho empacotado")
     var mascara = (1 << largura) - 1
+    var antes = len(saida)
+    saida.resize(antes + quantidade, 0)
+    var destino = saida.unsafe_ptr().unsafe_offset(antes)
+    var origem = bytes.unsafe_ptr()
+    var pos = cursor.pos
     var buffer = 0
     var bits = 0
-    for _ in range(quantidade):
+    for i in range(quantidade):
         while bits < largura:
-            if cursor.pos >= fim:
-                raise Error("rle: fim inesperado no trecho empacotado")
-            buffer |= Int(bytes[cursor.pos]) << bits
-            cursor.pos += 1
+            buffer |= Int(origem.unsafe_load(pos)) << bits
+            pos += 1
             bits += 8
-        saida.append(buffer & mascara)
+        destino.unsafe_store(i, buffer & mascara)
         buffer >>= largura
         bits -= largura
+    cursor.pos = pos
 
 
 def _varint(bytes: List[UInt8], mut cursor: Cursor, fim: Int) raises -> Int:
@@ -192,14 +205,11 @@ def decodificar_rle(
             var grupos = cabecalho >> 1
             var n = grupos * 8
             var faltam = quantidade - len(saida)
-            var lidos = List[Int](capacity=n)
-            desempacotar_bits(bytes, cursor, n, largura, lidos, fim)
+            var alvo = len(saida)
+            desempacotar_bits(bytes, cursor, n, largura, saida, fim)
             # o ultimo grupo pode trazer valores de enchimento
-            var usar = n
-            if usar > faltam:
-                usar = faltam
-            for i in range(usar):
-                saida.append(lidos[i])
+            if n > faltam:
+                saida.resize(alvo + faltam, 0)
         else:
             var repeticoes = cabecalho >> 1
             var bytes_valor = (largura + 7) // 8
@@ -212,10 +222,43 @@ def decodificar_rle(
             var faltam = quantidade - len(saida)
             if repeticoes > faltam:
                 repeticoes = faltam
-            for _ in range(repeticoes):
-                saida.append(valor)
+            saida.resize(len(saida) + repeticoes, valor)
 
     return saida^
+
+
+def rle_valor_unico(
+    bytes: List[UInt8], ini: Int, fim: Int, largura: Int, quantidade: Int
+) raises -> Int:
+    """Devolve o valor se a faixa inteira for **um unico trecho repetido**.
+
+    Existe para a pergunta mais comum sobre niveis de definicao: "a pagina tem
+    algum ausente?". A resposta quase sempre e nao, e escrita como um trecho RLE
+    so — mas descobrir isso via `decodificar_rle` custa materializar um `Int` por
+    linha (40 MiB em 5 milhoes) para depois compara-los todos com o mesmo numero.
+    Aqui se le o cabecalho e pronto. Devolve -1 quando nao e trecho unico; o
+    chamador entao decodifica de verdade.
+    """
+    if largura == 0:
+        # largura zero: o valor e sempre 0 e nem bytes existem
+        return 0
+    var cursor = Cursor(ini)
+    if cursor.pos >= fim:
+        return -1
+    var cabecalho = _varint(bytes, cursor, fim)
+    if cabecalho & 1 == 1:
+        return -1
+    var repeticoes = cabecalho >> 1
+    if repeticoes < quantidade:
+        return -1
+    var bytes_valor = (largura + 7) // 8
+    var valor = 0
+    for i in range(bytes_valor):
+        if cursor.pos >= fim:
+            return -1
+        valor |= Int(bytes[cursor.pos]) << (8 * i)
+        cursor.pos += 1
+    return valor
 
 
 def codificar_rle(valores: List[UInt8], largura: Int) -> List[UInt8]:
