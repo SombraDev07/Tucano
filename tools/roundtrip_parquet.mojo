@@ -1,4 +1,4 @@
-from tucano.parquet import ler_parquet, para_parquet
+from tucano import ler_parquet, para_parquet
 def main() raises:
     for nome in ["simples", "com_na", "temporal", "grupos"]:
         var t = ler_parquet("tests/fixtures/" + nome + ".parquet")
