@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.9.0 — M0 → M7 fechados (paralelismo por thread à parte).
+Versão 0.10.0 — M0 → M8 fechados (paralelismo por thread à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -286,6 +286,31 @@ valor. Nome que colide fora das chaves é recusado com erro, não renomeado em s
 Estável, com ausente sempre por último nas duas direções. Direções mistas saem de dois
 passos: `ordenar(["b"], True).ordenar(["a"])`.
 
+### Otimizador
+
+`coletar()` otimiza antes de executar. Quatro regras, todas conservadoras:
+
+| Regra | O que faz |
+|---|---|
+| dobra de constantes | `lit(2) * lit(3)` vira `lit(6)`, uma vez em vez de por linha |
+| fusão de filtros | filtros seguidos viram um `E`, numa passada só |
+| empurrão de filtro | o filtro sobe, para ordenar e derivar sobre menos linhas |
+| poda de colunas | o que o plano não usa não é lido |
+
+O empurrão **nunca** atravessa agregação, junção, concatenação ou preenchimento: filtrar
+antes de agregar é outra pergunta, não a mesma mais rápida.
+
+| Método | Papel |
+|---|---|
+| `explicar()` | plano antes, plano depois, colunas lidas e regras que dispararam |
+| `descrever_otimizado()` | só o plano otimizado |
+| `plano_otimizado()` | as etapas, colunas lidas e regras, como valores |
+| `coletar_sem_otimizar()` | executa o plano como escrito — para medir e para provar equivalência |
+
+`varredura_parquet(caminho)` devolve uma `Consulta` cuja fonte é o arquivo. Ele só é aberto
+no `coletar()`, depois que o otimizador decidiu quais colunas o plano usa — é o que torna a
+poda menos I/O em vez de menos cópia.
+
 ### Painel
 
 ```mojo
@@ -382,6 +407,8 @@ um leitor e um escritor com o mesmo mal-entendido concordam entre si.
 | `tucano.scanner` / `tucano.thrift` / `tucano.codecs` | **interno** |
 | `tucano.http` / `tucano.painel_web` | **interno** |
 | `Painel` / `tucano.json` | estável |
+| `tucano.otimizador` | **interno**, as regras podem mudar |
+| `varredura_parquet` / `explicar` | estável |
 | `ler_parquet` / `para_parquet` / `esquema_parquet` | estável |
 | `ler_csv_tipado` / `LeitorCSV` | estável |
 | `ler_csv` / `para_csv` | assinatura estável, implementação refeita em M5 |

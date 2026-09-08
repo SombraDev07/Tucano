@@ -57,6 +57,8 @@ o que for mais conveniente na hora.
   agrupa por indexação direta de array, sem hash: 14,7× mais rápido que chave composta.
 - **Painel embutido** — KPIs, gráficos e filtros servidos pela própria biblioteca. Cada
   widget guarda uma *consulta*, não uma tabela: o filtro reexecuta e só o agregado atravessa.
+- **Otimizador de consultas** — o filtro sobe no plano, constantes dobram, e a coluna que
+  ninguém usa não sai do disco. `explicar()` mostra o plano antes e depois.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
 
 ## Instalação
@@ -211,6 +213,32 @@ A ordenação é **estável**, com ausente sempre por último. Direções mistas
 passos: `ordenar(["b"], True).ordenar(["a"])` — por isso não existe uma segunda forma de
 ordenar.
 
+## Otimizador
+
+`coletar()` otimiza antes de executar, e `explicar()` mostra o que mudou:
+
+```mojo
+varredura_parquet("vendas.parquet")
+    .onde(coluna("valor").gt(lit(1000.0)))
+    .agrupar(["cidade"])
+    .agregar([soma("valor")])
+    .explicar()
+```
+
+```
+LOGICO     SCAN -> FILTER (coluna(valor) > lit(1000.0)) -> AGGREGATE [cidade] -> RESULT
+OTIMIZADO  SCAN -> FILTER (coluna(valor) > lit(1000.0)) -> AGGREGATE [cidade] -> RESULT
+FONTE      parquet vendas.parquet
+COLUNAS    2 de 5 [valor, cidade]
+REGRAS     poda de colunas (5 -> 2)
+```
+
+`varredura_parquet` adia a leitura: o arquivo só é aberto depois que o otimizador decidiu
+quais colunas o plano usa. As outras nunca saem do disco.
+
+`coletar_sem_otimizar()` executa o plano como escrito — serve para medir o ganho e para
+provar que o otimizador não mudou a resposta.
+
 ## Painel
 
 ```mojo
@@ -340,6 +368,15 @@ E `pixi run bench-m6`, sobre 1 milhão de linhas com chave de 50 valores distint
 | `unir` à esquerda | 316 | |
 | `ordenar` | 382 | |
 
+E `pixi run bench-m8`, sobre 500 mil linhas em 5 colunas:
+
+| | sem otimizar | otimizado | ganho |
+|---|---|---|---|
+| agrupar sobre Parquet (lê 2 de 5 colunas) | 288 ms | **152 ms** | **1,90×** |
+| ordenar e filtrar (25k de 500k linhas) | 351 ms | **30 ms** | **11,5×** |
+
+Painel sobre **10 milhões de linhas**: 186 ms com filtro, 336 bytes de payload.
+
 E `pixi run bench-m3` mostra que o executor escala linear — ns/linha praticamente constante
 de 25 mil a 200 mil linhas.
 
@@ -374,12 +411,12 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Parquet: leitura, escrita, column pruning | ✅ |
 | Agregação, junção, ordenação e verbos de análise | ✅ |
 | Painel: KPI, gráfico, tabela, filtro | ✅ |
-| Otimizador de consultas | próximo |
+| Otimizador: dobra, fusão, empurrão, poda de colunas | ✅ |
+| Execução out-of-core | próximo |
 | Painel de visualização | planejado |
-| Execução out-of-core | planejado |
 | Interoperabilidade Arrow | planejado |
 
-137 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+151 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do
@@ -400,6 +437,7 @@ pixi run bench-m3  # escala do executor
 pixi run bench-m4  # SIMD contra o laço escalar
 pixi run bench-m5  # leitura de CSV
 pixi run bench-m6  # agregação, junção e ordenação
+pixi run bench-m8  # o que o otimizador poupa
 pixi run bench-parquet  # Parquet e column pruning
 pixi run build     # precompilar o pacote
 ```

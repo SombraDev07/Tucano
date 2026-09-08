@@ -8,7 +8,12 @@ from .dtype import DType
 from .schema import Campo, Schema, Shape
 from .buffer import Validity, StringStore
 from .coluna import Coluna
-from .tabela import Tabela
+from .tabela import (
+    Tabela,
+    ler_parquet,
+    para_parquet,
+    varredura_parquet,
+)
 from .csv import ler_csv, ler_csv_tipado, LeitorCSV, para_csv
 from .tipos import Tipo
 from .datas import (
@@ -46,8 +51,6 @@ from .vetor import Vetor, Unidade
 from .plano import Etapa, TipoEtapa
 from .executor import Tri
 from .parquet import (
-    ler_parquet,
-    para_parquet,
     esquema_parquet,
     metadados_parquet,
     MetadadosParquet,
@@ -68,4 +71,5 @@ from .agregacao import (
     distintos,
 )
 from .painel import Painel, Widget, TipoWidget
+from .otimizador import otimizar, PlanoOtimizado
 from .consulta import Consulta, lazy

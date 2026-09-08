@@ -32,7 +32,7 @@ A análise tabular em memória consagrou um conjunto de decisões que hoje custa
 | **NaN como único missing** | Int com 1 nulo vira `float64` e perde precisão | Validity bitmap separado do valor: Int64 continua Int64 com NA | ✅ M1 |
 | **String = `object` dtype** | Um ponteiro Python por célula, zero vetorização | `StringStore` (offsets + bytes) + dictionary encoding — `cidade == "SP"` medido 4,2× | ✅ M1 / M4 |
 | **View vs. copy indecidível** | `SettingWithCopyWarning`; ninguém sabe se mutou | Ownership do Mojo (`var` / `^` / `ref`) resolve em compile-time | ✅ grátis |
-| **Eager sem plano** | `df[df.a>5][['b','c']]` materializa o intermediário | Lazy por padrão + pushdown | ✅ M2 / M8 |
+| **Eager sem plano** | Cada passo materializa um intermediário que ninguém pediu | Lazy por padrão + otimizador: filtro sobe, coluna não usada não é lida | ✅ M2 / M8 |
 | **`apply(lambda)` 100x lento em silêncio** | O usuário nunca sabe que caiu do caminho rápido | Plano inspecionável + **aviso explícito ao sair do kernel vetorizado** | ✅ M3 |
 | **~600 métodos, 5 formas de indexar** | `.loc`/`.iloc`/`.at`/`.iat`/`[]`, `apply`/`map`/`agg`/`transform` | **Uma forma por operação.** Sinônimos são recusados | permanente |
 | **Coerção silenciosa de tipo** | Concat de tipos diferentes → `object` | Erro, nunca coerção implícita | ✅ prática atual |
@@ -107,7 +107,7 @@ São três provas, em ordem de honestidade:
 
 ## Estado atual do código (honestidade)
 
-**M0 → M7 fechados.** Próximo: **M8 — Optimizer**. 137 testes verdes.
+**M0 → M8 fechados.** Próximo: **M9 — Out-of-Core**. 151 testes verdes.
 
 Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo por thread**, sem primitiva no stdlib do Mojo 1.0. O Parquet, que estava bloqueado por falta de fixture, foi destravado e entregue — leitura e escrita, com interoperabilidade verificada contra outra implementação.
 
@@ -149,6 +149,8 @@ Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo p
 | `agrupar` / `unir` / `ordenar` | ❌ M6 |
 | Painel: KPI, gráfico, tabela, filtro | ✅ M7 |
 | Servidor HTTP sobre libc (`external_call`) | ✅ M7 |
+| Otimizador: dobra, fusão, empurrão, poda | ✅ M8 |
+| Varredura Parquet adiada + pushdown de colunas | ✅ M8 — 1,9× |
 
 ### Dívidas concretas identificadas
 
@@ -177,8 +179,8 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M5 | I/O + Streaming | crítica | ✅ feito | scanner CSV, Parquet, fatias, datahora |
 | M6 | Aggregation + Join | crítica | ✅ feito | group/join como operadores |
 | **M7** | **Painel** | **alta** | **próximo** | dashboard nativo |
-| **M8** | **Optimizer** | **crítica** | **próximo** | pushdown + folding + reorder |
-| M9 | Out-of-Core | alta | não iniciado | datasets > RAM |
+| M8 | Optimizer | crítica | ✅ feito | pushdown + folding + reorder |
+| **M9** | **Out-of-Core** | **alta** | **próximo** | datasets > RAM |
 | M10 | Interop | alta | não iniciado | Arrow (sem Python) + SQL |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
 | M12 | Excel | baixa | não iniciado | compatibilidade tardia |
@@ -641,22 +643,70 @@ O eixo do gráfico sai **ordenado**. Um gráfico na ordem de aparição dos grup
 
 ---
 
-## M8 — Query Optimizer
+## M8 — Query Optimizer ✅
 
-- Projection pushdown
-- Predicate pushdown (especialmente Parquet)
-- Constant folding
-- Common subexpression elimination
-- Join ordering (v1 simples)
-- Type specialization
-- Cardinalidade (v1 heurística)
+O plano lógico diz **o que** o usuário quer. Nada nele obriga a executar naquela ordem, e é essa folga que o otimizador aproveita.
+
+### Quatro regras, todas conservadoras
+
+| Regra | O que faz |
+|---|---|
+| **dobra de constantes** | `lit(2) * lit(3)` vira `lit(6)` uma vez, em vez de uma multiplicação por linha |
+| **fusão de filtros** | filtros seguidos viram um `E`, numa passada só |
+| **empurrão de filtro** | o filtro sobe no plano, para que ordenação e colunas derivadas trabalhem sobre menos linhas |
+| **poda de colunas** | o que o plano não usa não é lido — sobre arquivo, isso vira menos I/O de verdade |
+
+Uma regra que às vezes muda o resultado não é otimização, é defeito. Por isso o empurrão é conservador: passa por ordenação e projeção, para por causa da coluna que o filtro lê, e **nunca** atravessa agregação, junção, concatenação ou preenchimento — filtrar antes de agregar é outra pergunta, não a mesma mais rápida.
+
+### Ganhos medidos
+
+`pixi run bench-m8`, 500 mil linhas em 5 colunas:
+
+| | sem otimizar | otimizado | ganho |
+|---|---|---|---|
+| agrupar sobre Parquet (lê 2 de 5 colunas) | 288 ms | **152 ms** | **1,90×** |
+| ordenar e filtrar (25k de 500k linhas) | 351 ms | **30 ms** | **11,5×** |
+
+O segundo caso é o retrato do problema: ordenar 500 mil linhas para depois jogar fora 95% delas. O plano escrito diz isso; o plano executado não precisa obedecer.
+
+### A prova que autoriza otimizar
+
+`coletar_sem_otimizar()` executa o plano como escrito. Existe para duas coisas: medir o ganho, e **provar que o otimizador não mudou a resposta**. Os testes comparam os dois caminhos linha a linha.
+
+### Varredura adiada
+
+`varredura_parquet(caminho)` devolve uma `Consulta` cuja fonte é o **arquivo**, não um lote já lido. O arquivo só é aberto no `coletar()` — depois que o otimizador decidiu quais colunas o plano usa. É o que transforma poda de colunas em menos I/O em vez de menos cópia.
+
+```
+LOGICO     SCAN -> AGGREGATE [grupo] -> [soma(valor)] -> RESULT
+OTIMIZADO  SCAN -> AGGREGATE [grupo] -> [soma(valor)] -> RESULT
+FONTE      parquet vendas.parquet
+COLUNAS    2 de 5 [valor, grupo]
+REGRAS     poda de colunas (5 -> 2)
+```
+
+### O painel também poda
+
+O painel sabe quais colunas seus widgets leem antes de executar, então a projeção entra no plano e o resto nem é materializado. Sobre **10 milhões de linhas**:
+
+| | tempo | payload |
+|---|---|---|
+| painel sem filtro | 887 ms | 980 bytes |
+| painel com filtro | **186 ms** | 336 bytes |
+
+Com filtro é mais rápido que sem: o filtro reduz as linhas antes das agregações. É o critério de "tempo de interação" cumprido com número.
 
 ### Critério de saída
 
-- [ ] Planos antes/depois inspecionáveis
-- [ ] Pushdown demonstrável em Parquet
-- [ ] Menos I/O e menos colunas lidas nos benches
-- [ ] Filtro de painel sobre 10M linhas em tempo de interação
+- [x] Planos antes/depois inspecionáveis (`explicar()`)
+- [x] Pushdown demonstrável em Parquet — 1,9×, com as colunas lidas listadas
+- [x] Menos I/O e menos colunas lidas nos benches
+- [x] Filtro de painel sobre 10M linhas em tempo de interação — 186 ms
+- [x] Equivalência otimizado × não otimizado verificada em teste
+- [x] 151 testes verdes
+- [ ] Reordenação de junção — fora por ora: sem estatística de cardinalidade, escolher ordem seria adivinhar
+
+> Reordenar junções exige saber o tamanho de cada lado antes de executar. As estatísticas de row group do Parquet trazem isso de graça, mas o leitor ainda não as extrai. Entra quando entrar o *predicate pushdown* por estatística — as duas coisas dependem da mesma leitura.
 
 ---
 

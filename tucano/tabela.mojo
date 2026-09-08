@@ -19,6 +19,8 @@ from .erros import erro_coluna
 from .expr import Expr
 from .plano import Etapa, TipoEtapa, descrever_logico, descrever_fisico
 from .agregacao import Agregacao, contar
+from .parquet import ler_parquet_lote, para_parquet_lote, esquema_parquet
+from .otimizador import otimizar, PlanoOtimizado
 from .executor import (
     executar,
     avisos_plano,
@@ -33,8 +35,20 @@ from .executor import (
 
 
 
+struct Fonte:
+    """De onde a consulta le.
+
+    Quando a fonte e um arquivo, a leitura acontece no `coletar()` — depois do
+    otimizador. E o que permite ler so as colunas que o plano usa, em vez de ler
+    tudo e descartar.
+    """
+
+    comptime MEMORIA = 0
+    comptime PARQUET = 1
+
+
 struct Consulta(Copyable, Movable):
-    """Pipeline lazy sobre um lote de colunas.
+    """Pipeline lazy sobre um lote de colunas ou sobre um arquivo.
 
     `onde` / `selecionar` / `com_coluna` so acrescentam etapas ao plano. A
     materializacao e automatica: `mostrar()`, `linhas()`, `soma()` e companhia
@@ -44,11 +58,26 @@ struct Consulta(Copyable, Movable):
     var fonte: List[Coluna]
     var etapas: List[Etapa]
     var chaves_pendentes: List[String]
+    var caminho: String
+    var tipo_fonte: Int
 
     def __init__(out self, var fonte: List[Coluna]):
         self.fonte = fonte^
         self.etapas = List[Etapa]()
         self.chaves_pendentes = List[String]()
+        self.caminho = ""
+        self.tipo_fonte = Fonte.MEMORIA
+
+    @staticmethod
+    def de_parquet(caminho: String) -> Self:
+        """Varredura adiada: o arquivo so e lido em `coletar()`."""
+        var q = Self(List[Coluna]())
+        q.caminho = caminho
+        q.tipo_fonte = Fonte.PARQUET
+        return q^
+
+    def le_de_arquivo(self) -> Bool:
+        return self.tipo_fonte != Fonte.MEMORIA
 
     @staticmethod
     def de(tab: Tabela) -> Self:
@@ -192,14 +221,88 @@ struct Consulta(Copyable, Movable):
 
     # ----------------------------------------------------- materializacao
 
+    def _nomes_da_fonte(self) raises -> List[String]:
+        if self.le_de_arquivo():
+            return esquema_parquet(self.caminho).nomes()
+        var out = List[String]()
+        for c in self.fonte:
+            out.append(c.nome)
+        return out^
+
+    def plano_otimizado(self) raises -> PlanoOtimizado:
+        return otimizar(self.etapas, self._nomes_da_fonte())
+
+    def _lote_de_entrada(self, colunas_lidas: List[String]) raises -> List[Coluna]:
+        if self.le_de_arquivo():
+            # aqui a poda vira menos I/O: as outras colunas nao saem do disco
+            return ler_parquet_lote(self.caminho, colunas_lidas)
+        if len(colunas_lidas) == 0:
+            return self.fonte.copy()
+        var out = List[Coluna]()
+        for nome in colunas_lidas:
+            for c in self.fonte:
+                if c.nome == nome:
+                    out.append(c.copy())
+        return out^
+
     def coletar(self) raises -> Tabela:
-        """Executa o plano e devolve a Tabela."""
+        """Otimiza o plano e executa."""
         if len(self.chaves_pendentes) > 0:
             raise Error(
                 "agrupar sem agregar: encadeie `.agregar([...])` depois de"
                 " `.agrupar([...])`"
             )
-        return Tabela(executar(self.fonte, self.etapas))
+        var plano = self.plano_otimizado()
+        var entrada = self._lote_de_entrada(plano.colunas_lidas)
+        return Tabela(executar(entrada, plano.etapas))
+
+    def coletar_sem_otimizar(self) raises -> Tabela:
+        """Executa o plano como escrito, sem otimizar.
+
+        Existe para duas coisas: medir o ganho do otimizador, e provar que ele
+        nao mudou a resposta. Uma regra que as vezes muda o resultado nao e
+        otimizacao, e defeito — e isso precisa ser verificavel.
+        """
+        if len(self.chaves_pendentes) > 0:
+            raise Error("agrupar sem agregar")
+        var entrada: List[Coluna]
+        if self.le_de_arquivo():
+            entrada = ler_parquet_lote(self.caminho, List[String]())
+        else:
+            entrada = self.fonte.copy()
+        return Tabela(executar(entrada, self.etapas))
+
+    def descrever_otimizado(self) raises -> String:
+        """Plano logico depois do otimizador."""
+        return descrever_logico(self.plano_otimizado().etapas)
+
+    def explicar(self) raises -> String:
+        """Plano antes, plano depois e as regras que dispararam."""
+        var plano = self.plano_otimizado()
+        var s = String("LOGICO     ") + descrever_logico(self.etapas)
+        s += "\nOTIMIZADO  " + descrever_logico(plano.etapas)
+        if self.le_de_arquivo():
+            s += "\nFONTE      parquet " + self.caminho
+        var todas = self._nomes_da_fonte()
+        s += "\nCOLUNAS    "
+        if len(plano.colunas_lidas) == 0:
+            s += String(len(todas)) + " de " + String(len(todas)) + " (sem poda)"
+        else:
+            s += String(len(plano.colunas_lidas)) + " de " + String(len(todas)) + " ["
+            for i in range(len(plano.colunas_lidas)):
+                if i > 0:
+                    s += ", "
+                s += plano.colunas_lidas[i]
+            s += "]"
+        s += "\nREGRAS     "
+        if len(plano.regras) == 0:
+            s += "nenhuma"
+        else:
+            for i in range(len(plano.regras)):
+                if i > 0:
+                    s += ", "
+                s += plano.regras[i]
+        return s
 
     def mostrar(self) raises:
         self.coletar().mostrar()
@@ -230,6 +333,26 @@ struct Consulta(Copyable, Movable):
 
     def media(self, nome: String) raises -> Float64:
         return self.coletar().media(nome)
+
+
+def ler_parquet(
+    caminho: String, colunas: List[String] = List[String]()
+) raises -> Tabela:
+    """Le um arquivo Parquet. `colunas` faz column pruning."""
+    return Tabela(ler_parquet_lote(caminho, colunas))
+
+
+def para_parquet(tabela: Tabela, caminho: String) raises:
+    """Grava a tabela em Parquet."""
+    para_parquet_lote(tabela.lote(), tabela.nomes(), caminho)
+
+
+def varredura_parquet(caminho: String) -> Consulta:
+    """Varredura adiada de Parquet: o arquivo so e lido em `coletar()`.
+
+    E o que permite o otimizador decidir quais colunas ler antes de ler.
+    """
+    return Consulta.de_parquet(caminho)
 
 
 def lazy(tab: Tabela) -> Consulta:

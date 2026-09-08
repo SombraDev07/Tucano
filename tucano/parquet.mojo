@@ -474,7 +474,6 @@ from .codecs import (
     bits_para_real32,
 )
 from .coluna import Coluna
-from .tabela import Tabela
 from .dtype import DType
 from .schema import Campo, Schema
 from .erros import erro_coluna
@@ -966,12 +965,17 @@ def esquema_parquet(caminho: String) raises -> Schema:
     return Schema(campos^)
 
 
-def ler_parquet(caminho: String, colunas: List[String] = List[String]()) raises -> Tabela:
-    """Le um arquivo Parquet.
+def ler_parquet_lote(
+    caminho: String, colunas: List[String] = List[String]()
+) raises -> List[Coluna]:
+    """Le um arquivo Parquet para um lote de colunas.
 
     `colunas` faz **column pruning**: os bytes das colunas nao pedidas nunca sao
     lidos. Os metadados ficam no rodape justamente para permitir isso — e por
     isso a poda nasce aqui, e nao como otimizacao depois.
+
+    Devolve lote, nao `Tabela`: assim o leitor pode ser chamado de dentro do
+    `coletar()`, depois que o otimizador ja decidiu quais colunas o plano usa.
     """
     var bytes = Path(caminho).read_bytes()
     var m = ler_metadados(bytes)
@@ -1022,7 +1026,7 @@ def ler_parquet(caminho: String, colunas: List[String] = List[String]()) raises 
                 + " linhas, arquivo declara " + String(m.num_linhas)
             )
         saida.append(_montar_coluna(e.nome, tipo_tucano, acc^))
-    return Tabela(saida^)
+    return saida^
 
 
 # ------------------------------------------------------------------ escrita
@@ -1147,17 +1151,19 @@ def _cabecalho_de_dados(num_valores: Int, tamanho: Int) raises -> List[UInt8]:
     return w.finalizar()
 
 
-def para_parquet(tabela: Tabela, caminho: String) raises:
-    """Grava a tabela em Parquet.
+def para_parquet_lote(
+    colunas: List[Coluna], nomes: List[String], caminho: String
+) raises:
+    """Grava um lote de colunas em Parquet.
 
     Subconjunto deliberado: PLAIN, sem compressao, um row group, todas as
     colunas opcionais. E o subconjunto que qualquer leitor de Parquet aceita —
     a verificacao e ler o arquivo de volta com outra implementacao, nao com
     esta.
     """
-    var nomes = tabela.nomes()
-    var colunas = tabela.lote()
-    var n_linhas = tabela.linhas()
+    var n_linhas = 0
+    if len(colunas) > 0:
+        n_linhas = colunas[0].tamanho()
 
     var arquivo = List[UInt8]()
     for b in String("PAR1").as_bytes():

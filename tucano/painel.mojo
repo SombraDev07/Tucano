@@ -69,6 +69,15 @@ struct Widget(Copyable, Movable):
         self.limite = limite
 
 
+def _juntar_nome(mut lista: List[String], nome: String):
+    if nome == "":
+        return
+    for x in lista:
+        if x == nome:
+            return
+    lista.append(nome)
+
+
 def _literal_do_valor(tipo: Int, valor: String) raises -> Expr:
     """Converte o texto vindo da URL para o literal do tipo da coluna."""
     if tipo == DType.TEXTO:
@@ -160,6 +169,25 @@ struct Painel(Movable):
             )
         return out + "]}"
 
+    def colunas_usadas(self) raises -> List[String]:
+        """Uniao das colunas que os widgets e os filtros leem.
+
+        O painel sabe disso antes de executar, entao a projecao entra no plano e
+        o resto nem e materializado. E poda de colunas no nivel do painel, pelo
+        mesmo motivo que o otimizador faz no nivel do plano.
+        """
+        var out = List[String]()
+        for f in self.filtros:
+            _juntar_nome(out, f)
+        for w in self.widgets:
+            if w.tipo == TipoWidget.TABELA:
+                for c in w.colunas:
+                    _juntar_nome(out, c)
+            else:
+                _juntar_nome(out, w.eixo_x)
+                _juntar_nome(out, w.agregacao.coluna)
+        return out^
+
     def _filtrada(self, consulta: String) raises -> Consulta:
         """Aplica os filtros ativos como etapas do plano."""
         var q = Consulta(self.fonte.copy())
@@ -179,6 +207,10 @@ struct Painel(Movable):
                 continue
             var tipo = self.fonte[posicao_no_lote(self.fonte, nome)].tipo
             q = q^.onde(coluna(nome).eq(_literal_do_valor(tipo, valor)))
+
+        var usadas = self.colunas_usadas()
+        if len(usadas) > 0 and len(usadas) < len(self.fonte):
+            q = q^.selecionar(usadas)
         return q^
 
     def json_dados(self, consulta: String) raises -> String:

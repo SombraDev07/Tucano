@@ -47,6 +47,7 @@ from tucano import (
     distintos,
     Agregacao,
     Painel,
+    varredura_parquet,
     TipoWidget,
     esquema_parquet,
     metadados_parquet,
@@ -57,6 +58,15 @@ from tucano import (
 )
 from tucano.codecs import decodificar_rle, descomprimir_snappy, largura_de_bits
 from tucano.thrift import LeitorThrift
+from tucano.otimizador import (
+    dobrar_constantes,
+    mesclar_filtros,
+    empurrar_filtros,
+    colunas_do_plano,
+    colunas_da_expr,
+    otimizar,
+)
+from tucano.plano import Etapa, TipoEtapa
 from tucano.json import escapar, tabela_para_json, lista_para_json
 from tucano.http import decodificar_url, parametros
 from tucano.painel_web import pagina
@@ -1825,6 +1835,202 @@ def test_m7_filtro_desconhecido_e_ignorado() raises:
     var p = _painel_de_vendas()
     var j = p.json_dados("qualquer=coisa")
     assert_true('"linhas_filtradas":5' in j)
+
+
+# ------------------------------------------------------------------ M8
+
+
+def test_m8_dobra_de_constantes() raises:
+    var e = coluna("v").vezes(lit(2.0).vezes(lit(3.0)))
+    var d = dobrar_constantes(e)
+    assert_equal(d.descrever(), "(coluna(v) * lit(6.0))")
+
+    # inteiro com inteiro continua inteiro
+    var i = lit_int(2).mais(lit_int(5))
+    assert_equal(dobrar_constantes(i).descrever(), "lit(7)")
+
+    # comparacao entre literais vira booleano
+    var c = lit(3.0).gt(lit(1.0))
+    assert_equal(dobrar_constantes(c).descrever(), "lit(True)")
+
+    # com coluna dentro, nao dobra
+    var m = coluna("a").mais(coluna("b"))
+    assert_equal(dobrar_constantes(m).descrever(), "(coluna(a) + coluna(b))")
+
+
+def test_m8_dobra_nao_divide_por_zero() raises:
+    var e = lit(1.0).sobre(lit(0.0))
+    # deixa como esta em vez de produzir infinito em tempo de plano
+    assert_equal(dobrar_constantes(e).descrever(), "(lit(1.0) / lit(0.0))")
+
+
+def test_m8_colunas_da_expr() raises:
+    var e = coluna("a").gt(lit(1.0)).e(coluna("b").eq(coluna("a")))
+    var out = List[String]()
+    colunas_da_expr(e, e.root, out)
+    assert_equal(len(out), 2)
+    assert_equal(out[0], "a")
+    assert_equal(out[1], "b")
+
+
+def test_m8_fusao_de_filtros() raises:
+    var etapas = List[Etapa]()
+    etapas.append(Etapa.filtro(coluna("a").gt(lit(1.0))))
+    etapas.append(Etapa.filtro(coluna("b").gt(lit(2.0))))
+    var nomes = List[String]()
+    nomes.append("a")
+    etapas.append(Etapa.projecao(nomes^))
+    var out = mesclar_filtros(etapas)
+    assert_equal(len(out), 2)
+    assert_equal(out[0].tipo, TipoEtapa.FILTRO)
+    assert_true("&" in out[0].expr.descrever())
+
+
+def test_m8_empurrao_de_filtro() raises:
+    var ordem = List[String]()
+    ordem.append("v")
+    var etapas = List[Etapa]()
+    etapas.append(Etapa.ordenacao(ordem^, List[Bool]()))
+    etapas.append(Etapa.filtro(coluna("v").gt(lit(1.0))))
+    var out = empurrar_filtros(etapas)
+    assert_equal(out[0].tipo, TipoEtapa.FILTRO)
+    assert_equal(out[1].tipo, TipoEtapa.ORDENACAO)
+
+
+def test_m8_filtro_nao_ultrapassa_a_coluna_que_usa() raises:
+    """Empurrar um filtro para antes da coluna que ele le seria defeito."""
+    var etapas = List[Etapa]()
+    etapas.append(Etapa.com_coluna("dobro", coluna("v").vezes(lit(2.0))))
+    etapas.append(Etapa.filtro(coluna("dobro").gt(lit(1.0))))
+    var out = empurrar_filtros(etapas)
+    assert_equal(out[0].tipo, TipoEtapa.COM_COLUNA)
+    assert_equal(out[1].tipo, TipoEtapa.FILTRO)
+
+
+def test_m8_filtro_nao_ultrapassa_agregacao() raises:
+    """Filtrar antes de agregar e outra pergunta, nao a mesma mais rapida."""
+    var chaves = List[String]()
+    chaves.append("g")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("v"))
+    var etapas = List[Etapa]()
+    etapas.append(Etapa.agregacao(chaves^, aggs^))
+    etapas.append(Etapa.filtro(coluna("soma_v").gt(lit(1.0))))
+    var out = empurrar_filtros(etapas)
+    assert_equal(out[0].tipo, TipoEtapa.AGREGACAO)
+    assert_equal(out[1].tipo, TipoEtapa.FILTRO)
+
+
+def test_m8_poda_de_colunas() raises:
+    var todas = List[String]()
+    todas.append("id")
+    todas.append("valor")
+    todas.append("grupo")
+    todas.append("nota")
+
+    var chaves = List[String]()
+    chaves.append("grupo")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    var etapas = List[Etapa]()
+    etapas.append(Etapa.agregacao(chaves^, aggs^))
+
+    var usadas = colunas_do_plano(etapas, todas)
+    assert_equal(len(usadas), 2)
+    assert_equal(usadas[0], "valor")
+    assert_equal(usadas[1], "grupo")
+
+
+def test_m8_sem_projecao_final_nao_poda() raises:
+    """Se a saida e 'todas as colunas', nao ha o que podar."""
+    var todas = List[String]()
+    todas.append("a")
+    todas.append("b")
+    var etapas = List[Etapa]()
+    etapas.append(Etapa.filtro(coluna("a").gt(lit(1.0))))
+    assert_equal(len(colunas_do_plano(etapas, todas)), 0)
+
+
+def test_m8_juncao_bloqueia_a_poda() raises:
+    var todas = List[String]()
+    todas.append("a")
+    todas.append("b")
+    var chaves = List[String]()
+    chaves.append("a")
+    var etapas = List[Etapa]()
+    etapas.append(Etapa.juncao(List[Coluna](), chaves^, 0))
+    var nomes = List[String]()
+    nomes.append("a")
+    etapas.append(Etapa.projecao(nomes^))
+    assert_equal(len(colunas_do_plano(etapas, todas)), 0)
+
+
+def test_m8_explicar_mostra_antes_e_depois() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var ordem = List[String]()
+    ordem.append("valor")
+    var q = (
+        t.ordenar(ordem)
+        .onde(coluna("valor").gt(lit(100.0)))
+        .onde(coluna("cidade").eq(lit_texto("SP")))
+    )
+    var texto = q.explicar()
+    assert_true("LOGICO" in texto)
+    assert_true("OTIMIZADO" in texto)
+    assert_true("fusao de filtros" in texto)
+    assert_true("empurrao de filtro" in texto)
+    # no plano otimizado o filtro vem antes da ordenacao
+    var otimizado = q.descrever_otimizado()
+    assert_true(otimizado.find("FILTER") < otimizado.find("SORT"))
+
+
+def test_m8_otimizar_nao_muda_o_resultado() raises:
+    """A prova que autoriza otimizar: mesma resposta, nos dois caminhos."""
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var ordem = List[String]()
+    ordem.append("valor")
+    var q = (
+        t.ordenar(ordem, True)
+        .com_coluna("dobro", coluna("valor").vezes(lit(2.0).vezes(lit(1.0))))
+        .onde(coluna("cidade").eq(lit_texto("SP")))
+    )
+    var com = q.coletar()
+    var sem = q.coletar_sem_otimizar()
+    assert_equal(com.linhas(), sem.linhas())
+    assert_equal(com.colunas(), sem.colunas())
+    for i in range(com.linhas()):
+        assert_equal(com.pegar("valor").texto_em(i), sem.pegar("valor").texto_em(i))
+        assert_equal(com.pegar("dobro").texto_em(i), sem.pegar("dobro").texto_em(i))
+
+
+def test_m8_varredura_parquet_le_so_o_necessario() raises:
+    var chaves = List[String]()
+    chaves.append("grupo")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    var q = (
+        varredura_parquet("tests/fixtures/grupos.parquet")
+        .agrupar(chaves)
+        .agregar(aggs^)
+    )
+    var plano = q.plano_otimizado()
+    assert_equal(len(plano.colunas_lidas), 2)
+    assert_true("poda de colunas (3 -> 2)" in plano.regras[0])
+
+    var r = q.coletar()
+    assert_equal(r.linhas(), 3)
+    assert_equal(r.colunas(), 2)
+    # e o resultado bate com a leitura completa
+    var sem = q.coletar_sem_otimizar()
+    assert_equal(r.soma("soma_valor"), sem.soma("soma_valor"))
+
+
+def test_m8_varredura_parquet_alimenta_o_plano() raises:
+    var q = varredura_parquet("tests/fixtures/grupos.parquet").onde(
+        coluna("valor").gt(lit(1000.0))
+    )
+    assert_equal(q.linhas(), 999)
+    assert_true("parquet" in q.explicar())
 
 
 def main() raises:
