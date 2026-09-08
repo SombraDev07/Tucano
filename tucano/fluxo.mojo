@@ -27,7 +27,7 @@ from .executor import (
     posicao_no_lote,
     esquema_do_lote,
     tipo_da_agregacao,
-    extrair_coluna,
+    calcular_grupos,
     _chave_texto,
 )
 
@@ -138,36 +138,51 @@ struct EstadoAgregacao(Movable):
         for c in self.chaves:
             pos_chave.append(posicao_no_lote(cols, c))
 
-        # identifica os grupos desta fatia
-        var ids = List[Int](capacity=n)
-        for i in range(n):
+        # Duas etapas, e a ordem e o ponto. Primeiro os grupos **desta fatia**,
+        # pelo mesmo `calcular_grupos` do caminho normal — indexacao direta
+        # quando da, sem `String` nenhuma. So depois cada grupo local procura o
+        # seu global, e ai sim monta a chave em texto.
+        #
+        # O texto continua sendo a identidade entre fatias: codigo de dicionario
+        # de um row group nao quer dizer nada no seguinte. O que muda e quantas
+        # vezes ele e montado — uma por grupo da fatia, nao uma por linha. Nesta
+        # medida, vinte e quatro em vez de cem mil.
+        var locais = calcular_grupos(cols, self.chaves)
+        var local_para_global = List[Int](capacity=locais.n_grupos)
+        for gl in range(locais.n_grupos):
+            var i = locais.representantes[gl]
             var composta = String("")
             for p in pos_chave:
                 composta += _chave_texto(cols[p], i) + "\x01"
             if composta in self.mapa:
-                ids.append(self.mapa[composta])
-            else:
-                var novo = len(self.linhas)
-                self.mapa[composta] = novo
-                ids.append(novo)
-                self.linhas.append(0)
-                for k in range(len(pos_chave)):
-                    ref col = cols[pos_chave[k]]
-                    self.chave_na[k].append(col.eh_ausente(i))
-                    if col.tipo == DType.TEXTO:
-                        self.chave_textos[k].append(
-                            "" if col.eh_ausente(i) else col.texto_bruto(i)
-                        )
-                        self.chave_reais[k].append(0.0)
-                    else:
-                        self.chave_textos[k].append("")
-                        self.chave_reais[k].append(
-                            0.0 if col.eh_ausente(i) else col._como_real(i)
-                        )
-                for j in range(len(self.agregacoes)):
-                    self.acc[j].append(0.0)
-                    self.acc_textos[j].append("")
-                    self.vistos[j].append(0)
+                local_para_global.append(self.mapa[composta])
+                continue
+            var novo = len(self.linhas)
+            self.mapa[composta] = novo
+            local_para_global.append(novo)
+            self.linhas.append(0)
+            for k in range(len(pos_chave)):
+                ref col = cols[pos_chave[k]]
+                self.chave_na[k].append(col.eh_ausente(i))
+                if col.tipo == DType.TEXTO:
+                    self.chave_textos[k].append(
+                        "" if col.eh_ausente(i) else col.texto_bruto(i)
+                    )
+                    self.chave_reais[k].append(0.0)
+                else:
+                    self.chave_textos[k].append("")
+                    self.chave_reais[k].append(
+                        0.0 if col.eh_ausente(i) else col._como_real(i)
+                    )
+            for j in range(len(self.agregacoes)):
+                self.acc[j].append(0.0)
+                self.acc_textos[j].append("")
+                self.vistos[j].append(0)
+
+        var ids = List[Int](capacity=n)
+        var pl = locais.ids.unsafe_ptr()
+        for i in range(n):
+            ids.append(local_para_global[Int(pl.unsafe_load(i))])
 
         for i in range(n):
             self.linhas[ids[i]] += 1
@@ -206,23 +221,42 @@ struct EstadoAgregacao(Movable):
                 self.vistos[j][g] += 1
             return
 
-        var v = extrair_coluna(cols, a.coluna)
+        # le o slab no lugar: `extrair_coluna` copiava a coluna inteira, uma vez
+        # por fatia E por agregacao — tres agregacoes sobre cinquenta row groups
+        # eram cento e cinquenta copias de coluna
+        var na = col.validity_bits.para_bytes()
+        var pna = na.unsafe_ptr()
+        var pid = ids.unsafe_ptr()
+        var eh_real = col.tipo == DType.REAL
+        var preal = col.reals.unsafe_ptr()
+        var pint = col.ints.unsafe_ptr()
+        var pacc = self.acc[j].unsafe_ptr()
+        var pvis = self.vistos[j].unsafe_ptr()
+        var soma_ou_media = (
+            a.tipo == TipoAgregacao.SOMA or a.tipo == TipoAgregacao.MEDIA
+        )
+        var minimo = a.tipo == TipoAgregacao.MINIMO
+        var maximo = a.tipo == TipoAgregacao.MAXIMO
         for i in range(n):
-            if v.na[i] != 0:
+            if pna.unsafe_load(i) != 0:
                 continue
-            var g = ids[i]
-            var x = v.reais[i]
-            if self.vistos[j][g] == 0:
-                self.acc[j][g] = x
-            elif a.tipo == TipoAgregacao.SOMA or a.tipo == TipoAgregacao.MEDIA:
-                self.acc[j][g] += x
-            elif a.tipo == TipoAgregacao.MINIMO:
-                if x < self.acc[j][g]:
-                    self.acc[j][g] = x
-            elif a.tipo == TipoAgregacao.MAXIMO:
-                if x > self.acc[j][g]:
-                    self.acc[j][g] = x
-            self.vistos[j][g] += 1
+            var g = Int(pid.unsafe_load(i))
+            var x: Float64
+            if eh_real:
+                x = preal.unsafe_load(i)
+            else:
+                x = Float64(pint.unsafe_load(i))
+            if pvis.unsafe_load(g) == 0:
+                pacc.unsafe_store(g, x)
+            elif soma_ou_media:
+                pacc.unsafe_store(g, pacc.unsafe_load(g) + x)
+            elif minimo:
+                if x < pacc.unsafe_load(g):
+                    pacc.unsafe_store(g, x)
+            elif maximo:
+                if x > pacc.unsafe_load(g):
+                    pacc.unsafe_store(g, x)
+            pvis.unsafe_store(g, pvis.unsafe_load(g) + 1)
 
     def finalizar(self) raises -> List[Coluna]:
         var g = self.n_grupos()

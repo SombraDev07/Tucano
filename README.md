@@ -481,6 +481,7 @@ menos porque duas colunas só dão duas threads.
 | | tempo | vs Tucano |
 |---|---|---|
 | Tucano | **88 ms** | — |
+| Tucano **em fluxo** (pico de 1 row group) | 93 ms | era 900 ms |
 | pandas 3.0.5 (1 thread) | 242 ms | Tucano **2,7×** mais rápido |
 | Polars (1 thread) | 146 ms | Tucano **1,7×** mais rápido |
 | DuckDB (1 thread) | 94 ms | Tucano **1,1×** mais rápido |
@@ -534,7 +535,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Excel `.xlsx`: leitura | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-236 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+237 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Por muitos marcos o roadmap registrou paralelismo como bloqueado pela linguagem. **Estava

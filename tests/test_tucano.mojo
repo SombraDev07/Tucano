@@ -2740,6 +2740,70 @@ def test_m9_fluxo_preserva_ausentes() raises:
             assert_equal(r.pegar("contagem").texto_em(i), "1")
 
 
+def test_m9_fluxo_reencontra_o_grupo_em_outra_fatia() raises:
+    """O mesmo grupo em fatias separadas tem de ser o mesmo grupo.
+
+    O fluxo passou a agrupar **dentro da fatia** primeiro e so depois procurar o
+    grupo global — o que reduz a chave em texto de uma por linha para uma por
+    grupo da fatia. A identidade entre fatias continua sendo o valor, e nao o id
+    local: id local nao quer dizer nada na fatia seguinte.
+
+    Por isso o teste faz o grupo sumir no meio e voltar, e inclui chave ausente,
+    que e onde a identidade e mais facil de perder.
+    """
+    var cid = List[String]()
+    var aus = List[Bool]()
+    var val = List[Float64]()
+    # fatia 1: a, NA | fatia 2: b, b | fatia 3: a, NA  (fatias de 2 linhas)
+    var padrao = List[String]()
+    for x in ["a", "", "b", "b", "a", ""]:
+        padrao.append(String(x))
+    for i in range(len(padrao)):
+        cid.append(padrao[i])
+        aus.append(padrao[i] == "")
+        val.append(Float64(i + 1))
+
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("cidade", cid^, aus^))
+    cols.append(Coluna.de_reais("valor", val^))
+    var t = Tabela(cols^)
+
+    var chaves = _uma_lista("cidade")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    aggs.append(contar())
+    var em_fluxo = t.agrupar(chaves).agregar(aggs^).coletar_em_fluxo(2)
+
+    var chaves2 = _uma_lista("cidade")
+    var aggs2 = List[Agregacao]()
+    aggs2.append(soma("valor"))
+    aggs2.append(contar())
+    var inteiro = t.agrupar(chaves2).agregar(aggs2^).coletar()
+
+    assert_equal(em_fluxo.linhas(), inteiro.linhas())
+    assert_equal(em_fluxo.linhas(), 3)
+    for i in range(inteiro.linhas()):
+        assert_equal(
+            em_fluxo.pegar("cidade").texto_em(i),
+            inteiro.pegar("cidade").texto_em(i),
+        )
+        assert_equal(
+            em_fluxo.pegar("soma_valor").texto_em(i),
+            inteiro.pegar("soma_valor").texto_em(i),
+        )
+        assert_equal(
+            em_fluxo.pegar("contagem").texto_em(i),
+            inteiro.pegar("contagem").texto_em(i),
+        )
+    # "a" aparece na fatia 1 e na 3: 1 + 5 = 6, duas linhas
+    assert_equal(em_fluxo.pegar("cidade").texto_em(0), "a")
+    assert_equal(em_fluxo.pegar("soma_valor").texto_em(0), "6.0")
+    assert_equal(em_fluxo.pegar("contagem").texto_em(0), "2")
+    # o ausente tambem: 2 + 6 = 8
+    assert_true(em_fluxo.pegar("cidade").eh_ausente(1))
+    assert_equal(em_fluxo.pegar("soma_valor").texto_em(1), "8.0")
+
+
 def test_m9_fluxo_com_ordenacao_erra_com_explicacao() raises:
     var t = ler_csv("tests/fixtures/vendas.csv")
     var chaves = _uma_lista("cidade")

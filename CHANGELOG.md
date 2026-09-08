@@ -3,6 +3,42 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.27.0] — Execucao em fluxo
+
+O modo em fluxo cumpria o que prometia — pico de memoria de um row group — mas
+custava **dez vezes** o modo normal, e ninguem tinha perguntado por que.
+
+| 5M linhas, pipeline completo | antes | depois |
+|---|---|---|
+| `coletar()` | 88 ms | 88 ms |
+| `coletar_em_fluxo()` | **900 ms** | **93 ms** |
+
+Ler os cinquenta row groups um a um custava 62 ms e filtra-los 38. Os outros
+oitocentos estavam no estado de agregacao.
+
+### Alterado
+
+- **A fatia e agrupada antes de procurar o grupo global.** O estado montava uma
+  `String` por linha para identificar o grupo — o mesmo desperdicio que o
+  [0.25.0] tirou do `calcular_grupos`. Aqui a `String` nao da para remover: o
+  estado precisa reconhecer o mesmo grupo em fatias diferentes, e codigo de
+  dicionario de um row group nao quer dizer nada no seguinte. O que muda e
+  quantas vezes ela e montada: uma por grupo da fatia, nao uma por linha —
+  vinte e quatro em vez de cem mil.
+- **A agregacao le o slab no lugar.** `extrair_coluna` copiava a coluna inteira
+  uma vez por fatia E por agregacao: tres agregacoes sobre cinquenta row groups
+  eram cento e cinquenta copias. O tipo de agregacao passou para fora do laco.
+
+### Adicionado
+
+- `test_m9_fluxo_reencontra_o_grupo_em_outra_fatia` — grupo que some no meio e
+  volta, com chave ausente junto, comparado com `coletar()` valor a valor. E a
+  identidade entre fatias que a mudanca mexe.
+
+### O que nao mudou
+
+O pico de memoria: `bench-m9` continua medindo 13 KiB contra o arquivo inteiro.
+
 ## [0.26.0] — Chave de grupo inteira
 
 Ultimo operador acima do piso: 22 -> **11 ns/linha**, empatando com a chave

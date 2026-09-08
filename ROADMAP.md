@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13 e M15 → M18 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13 e M15 → M19 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -241,6 +241,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M16 | Junção e ordenação | crítica | ✅ feito | 470 → 66 e 335 → 98 ns/linha |
 | M17 | Chave de grupo composta | crítica | ✅ feito | 221 → 30 ns/linha |
 | M18 | Chave de grupo inteira | crítica | ✅ feito | 22 → 11 ns/linha |
+| M19 | Execução em fluxo | crítica | ✅ feito | 900 → 93 ms, mesmo pico de memória |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -1825,6 +1826,64 @@ o que era 221 são 30.
 - [x] endereçamento aberto guarda a chave e confere — nunca agrupa por hash
 - [x] os dois caminhos cobertos por teste, inclusive o esparso, que não existia
 - [x] 236 testes verdes, interoperabilidade nos dois formatos
+
+---
+
+## M19 — Execução em fluxo: 900 ms para fazer o que o normal faz em 88 ✅
+
+O modo em fluxo existe desde o M9 e cumpria o que prometia — pico de memória de
+um row group em vez do arquivo inteiro. Só que custava **dez vezes** o modo
+normal, e ninguém tinha perguntado por quê. Um número desses no benchmark
+público sem explicação é uma dívida.
+
+### Onde estavam os 900 ms
+
+Ler os cinquenta row groups um a um: 62 ms. Filtrar os cinquenta: 38 ms. Cem dos
+novecentos. Os outros oitocentos estavam no estado de agregação.
+
+**Uma `String` por linha para identificar o grupo.** Exatamente o que o M17 tirou
+do `calcular_grupos`, sobrevivendo aqui. E aqui a `String` não é gratuita de
+remover: o estado tem de reconhecer o mesmo grupo em **fatias diferentes**, e o
+código de dicionário de um row group não quer dizer nada no seguinte. A
+identidade entre fatias é o valor.
+
+A saída não é trocar a chave — é mudar quantas vezes ela é montada. A fatia é
+agrupada primeiro pelo mesmo `calcular_grupos` do caminho normal, que já não usa
+texto; só depois cada **grupo local** procura o seu global. Cem mil linhas viram
+vinte e quatro consultas em vez de cem mil.
+
+**`extrair_coluna` por fatia e por agregação.** A cópia inteira da coluna, uma
+vez para cada agregação de cada fatia — três agregações sobre cinquenta row
+groups são cento e cinquenta cópias. Agora lê o slab no lugar, com o tipo de
+agregação decidido fora do laço.
+
+### Resultado
+
+| 5M linhas, pipeline completo | antes | depois |
+|---|---|---|
+| `coletar()` | 88 ms | 88 ms |
+| `coletar_em_fluxo()` | **900 ms** | **93 ms** |
+
+O modo em fluxo passou a custar o que devia custar desde o começo: praticamente o
+mesmo do normal, com pico de memória de um row group. A diferença de 5 ms é o
+preço honesto de processar por fatia.
+
+E ele passa a caber na comparação: 93 ms contra 254 do pandas e 138 do Polars,
+ambos carregando tudo em memória.
+
+### O que o teste precisava dizer
+
+A mudança altera **como** o grupo é reencontrado entre fatias, então o teste que
+faltava é o do grupo que some no meio e volta — com chave ausente junto, que é
+onde a identidade é mais fácil de perder. `coletar_em_fluxo(2)` contra
+`coletar()`, valor a valor.
+
+### Critério de saída
+
+- [x] fluxo sem `String` por linha e sem cópia de coluna por agregação
+- [x] pico de memória inalterado — 13 KiB contra o arquivo inteiro, no bench-m9
+- [x] grupo que reaparece em fatia posterior coberto por teste, com ausente
+- [x] 237 testes verdes, interoperabilidade nos dois formatos
 
 ---
 
