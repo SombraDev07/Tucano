@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13 e M15 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13, M15 e M16 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -193,7 +193,8 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. **Sa
 | SQL `SELECT DISTINCT` / `SELECT ALL` | ✅ M10.13 |
 | Paralelismo na leitura (uma thread por coluna) | ✅ M13 |
 | Paralelismo nos operadores de execução | ❌ **medido e recusado** — banda de memória, não CPU (M15) |
-| Junção e ordenação mais baratas | ⏳ próximo — 459 e 321 ns/linha, sem estar limitadas por banda |
+| Junção e ordenação mais baratas | ✅ M16 — 74 e 100 ns/linha |
+| Chave de grupo composta | ⏳ próximo — 221 ns/linha, uma `String` por linha |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
 
@@ -237,6 +238,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M12 | Excel (leitura) | alta | ✅ feito | `ler_xlsx`, primeira aba ou pelo nome |
 | M13 | Paralelismo por thread | crítica | ✅ feito | leitura 105 → 69 ms |
 | M15 | Operadores | crítica | ✅ feito | filtro 47 → 16 ms; paralelizar operador medido e recusado |
+| M16 | Junção e ordenação | crítica | ✅ feito | 470 → 74 e 335 → 100 ns/linha |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -1604,6 +1606,97 @@ DuckDB, pela primeira vez, por pouco.
 - [x] atalho conferido contra oráculo independente, não contra o próprio motor
 - [x] paralelismo de operador medido antes de construído — e recusado com número
 - [x] 227 testes verdes, interoperabilidade nos dois formatos
+
+---
+
+## M16 — Junção e ordenação: o valor vira código ✅
+
+O M15 terminou apontando: junção a 470 ns/linha e ordenação a 335, contra 14 para
+formar grupos por chave dicionarizada. Não era banda de memória — era trabalho
+demais. As duas tinham a mesma doença, e é a mesma de todo este ciclo:
+**materializar por linha o que se resolve uma vez por valor distinto.**
+
+### Ordenação: 20 milhões de comparações, cada uma relendo a coluna
+
+O comparador roda O(n log n) vezes. Cada chamada fazia dois `eh_ausente` que
+lançam e extraem bit, um desvio por tipo, e — em coluna de texto — **duas
+`String` alocadas**. Ordenar um milhão de linhas por texto alocava quarenta
+milhões de `String` para responder "qual vem antes".
+
+Três mudanças, cada uma medida:
+
+**Chave extraída antes do laço.** A coluna é lida uma vez e vira vetor plano.
+342 → 211 ms.
+
+**Texto vira posto.** Os valores distintos são ordenados uma vez — cinquenta,
+não um milhão — e cada linha guarda a posição do seu valor nessa ordem.
+Comparar texto passa a ser comparar inteiro, e a ordem é a mesma por construção.
+1320 → 210 ms, e texto passou a custar o mesmo que número.
+
+**A chave viaja ao lado do índice.** `chave[indice[i]]` é acesso aleatório a um
+vetor de dezenas de MiB, vinte milhões de vezes. Carregar a chave junto do
+índice torna as leituras sequenciais. 211 → 70 ms.
+
+E ausente sai da comparação: como vai sempre para o fim nas duas direções, é
+separado antes, e o comparador vira uma comparação de número e nada mais.
+
+> Um erro meu no caminho, e vale registrar: a primeira versão ordenava ao
+> contrário **invertendo o vetor no fim**. Isso põe os empates na ordem inversa
+> da original — a ordenação deixa de ser estável, e nenhum teste existente
+> pegava. Descendente vira a comparação, não o resultado. O teste que faltava
+> existe agora.
+
+### Junção: duas buscas no `Dict` por linha, e uma `String` por linha de saída
+
+| | |
+|---|---|
+| `Dict` consultado uma vez por **valor distinto**, não por linha sondada | |
+| baldes viram duas listas planas — `inicio[c]` e `linhas` | 470 → 493 ms |
+| `coletar_linhas_opcional` ganha o atalho de dicionário que já existia na versão não-opcional | 493 → 207 ms |
+| chave de texto dicionarizada não materializa `String` por linha | 207 → **74 ms** |
+
+A primeira mudança **não melhorou nada** — 470 para 493. Foi o que obrigou a
+medir por fase em vez de continuar adivinhando, e aí apareceu o real: a junção à
+esquerda alocava uma `String` por linha de saída para redicionarizar tudo no
+fim. O atalho já existia em `coletar_linhas` desde sempre; faltava na versão que
+trata o índice -1.
+
+### Resultado
+
+| 1M linhas, chave de 50 valores | antes | depois | |
+|---|---|---|---|
+| junção à esquerda | 470 ns/linha | **74 ns/linha** | 6,4× |
+| ordenação estável | 335 ns/linha | **100 ns/linha** | 3,4× |
+| ordenação por texto | 1320 ms | **98 ms** | 13,5× |
+
+### Como se prova que continua certo
+
+Junção e ordenação são operadores em que o erro não aparece: a linha errada
+casa, o empate troca de lugar, e o resultado parece plausível. As duas ganharam
+conferência contra referência **externa ao motor**:
+
+- `test_juncao_bate_com_forca_bruta` — laço duplo, que é obviamente certo, com
+  chave repetida nos dois lados, chave só de um lado, e ausente que nunca casa
+  nem com outro ausente. Nas duas direções de junção e nos dois ramos da
+  sondagem (texto e inteiro).
+- `test_ordenar_uma_chave_bate_com_o_caminho_geral` — ordenar por `[c]` usa o
+  caminho novo, por `[c, c]` usa o geral; a mesma pergunta feita aos dois.
+- `test_ordenar_estavel_e_ausente_no_fim` — o teste que teria pegado o erro do
+  vetor invertido.
+
+### O próximo, com número
+
+`grupos por chave composta` está em **221 ns/linha**, contra 12 pela chave
+dicionarizada. `_chave_composta` monta uma `String` por linha para representar a
+combinação — a mesma doença, no último lugar onde ela ainda mora.
+
+### Critério de saída
+
+- [x] chave de ordenação extraída uma vez; texto comparado por posto
+- [x] estabilidade preservada no descendente, com teste que a exige
+- [x] junção sem `Dict` no laço de sondagem e sem `String` por linha de saída
+- [x] os dois conferidos contra referência externa ao motor
+- [x] 232 testes verdes, interoperabilidade nos dois formatos
 
 ---
 

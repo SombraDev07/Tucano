@@ -97,6 +97,7 @@ from tucano.otimizador import (
     otimizar,
 )
 from tucano.plano import Etapa, TipoEtapa
+from tucano.executor import op_unir as _op_unir, n_linhas as _n_linhas
 from tucano.expr import Expr as ExprArvore
 from tucano.json import escapar, tabela_para_json, lista_para_json
 from tucano.http import decodificar_url, parametros
@@ -3176,6 +3177,249 @@ def test_filtro_escalar_bate_com_oraculo() raises:
     var esp_i = _tri_esperado(v, aus, ">", 10.0)
     for i in range(n):
         assert_equal(Int(i_lit[i]), Int(esp_i[i]))
+
+
+def test_juncao_bate_com_forca_bruta() raises:
+    """A junção por hash contra um laco duplo, que e obviamente certo.
+
+    A sondagem passou a traduzir a chave para um espaco de codigos comum e a
+    caminhar em baldes planos, e a chave de texto dicionarizada nem materializa
+    `String` por linha. Sao tres representacoes intermediarias entre o valor e a
+    resposta; qualquer erro nelas casa a linha errada em silencio.
+
+    Ha de proposito: chave repetida nos dois lados, chave so de um lado, e
+    ausente nos dois — que nunca casa, nem com outro ausente.
+    """
+    var ce = List[String]()
+    var ae = List[Bool]()
+    var me = List[Int64]()
+    var dados = List[String]()
+    for x in ["sp", "rj", "sp", "bh", "", "rj", "xx"]:
+        dados.append(String(x))
+    for i in range(len(dados)):
+        ce.append(dados[i])
+        ae.append(dados[i] == "")
+        me.append(Int64(i))
+    var esq = List[Coluna]()
+    esq.append(Coluna.de_textos("cidade", ce^, ae^))
+    esq.append(Coluna.de_inteiros("marca_e", me^))
+
+    var cd = List[String]()
+    var ad = List[Bool]()
+    var md = List[Int64]()
+    var dados_d = List[String]()
+    for x in ["sp", "rj", "sp", "", "zz"]:
+        dados_d.append(String(x))
+    for i in range(len(dados_d)):
+        cd.append(dados_d[i])
+        ad.append(dados_d[i] == "")
+        md.append(Int64(100 + i))
+    var dir = List[Coluna]()
+    dir.append(Coluna.de_textos("cidade", cd^, ad^))
+    dir.append(Coluna.de_inteiros("marca_d", md^))
+
+    var chaves = List[String]()
+    chaves.append("cidade")
+
+    for tipo in [TipoJuncao.INTERNO, TipoJuncao.ESQUERDA]:
+        var r = _op_unir(esq, dir, chaves, tipo)
+        var obtidos = List[String]()
+        for i in range(_n_linhas(r)):
+            var linha = r[0].texto_em(i) + "|" + r[1].texto_em(i) + "|"
+            linha += r[2].texto_em(i)
+            obtidos.append(linha)
+
+        # oraculo: laco duplo, ausente nunca casa
+        var esperados = List[String]()
+        for i in range(len(dados)):
+            var casou = False
+            for j in range(len(dados_d)):
+                if dados[i] == "" or dados_d[j] == "":
+                    continue
+                if dados[i] == dados_d[j]:
+                    casou = True
+                    esperados.append(
+                        dados[i] + "|" + String(i) + "|" + String(100 + j)
+                    )
+            if not casou and tipo == TipoJuncao.ESQUERDA:
+                var chave = dados[i]
+                if chave == "":
+                    chave = "NA"
+                esperados.append(chave + "|" + String(i) + "|NA")
+
+        assert_equal(len(obtidos), len(esperados))
+        for i in range(len(esperados)):
+            assert_equal(obtidos[i], esperados[i])
+
+
+def test_juncao_chave_inteira_bate_com_forca_bruta() raises:
+    """O mesmo para chave inteira, que usa o outro ramo da sondagem."""
+    var ke = List[Int64]()
+    var me = List[Int64]()
+    for x in [1, 2, 1, 3, 9]:
+        ke.append(Int64(x))
+    for i in range(5):
+        me.append(Int64(i))
+    var esq = List[Coluna]()
+    esq.append(Coluna.de_inteiros("k", ke^))
+    esq.append(Coluna.de_inteiros("marca_e", me^))
+
+    var kd = List[Int64]()
+    var md = List[Int64]()
+    for x in [1, 2, 2, 7]:
+        kd.append(Int64(x))
+    for i in range(4):
+        md.append(Int64(100 + i))
+    var dir = List[Coluna]()
+    dir.append(Coluna.de_inteiros("k", kd^))
+    dir.append(Coluna.de_inteiros("marca_d", md^))
+
+    var chaves = List[String]()
+    chaves.append("k")
+    var esquerda = List[Int]()
+    for x in [1, 2, 1, 3, 9]:
+        esquerda.append(x)
+    var direita = List[Int]()
+    for x in [1, 2, 2, 7]:
+        direita.append(x)
+
+    for tipo in [TipoJuncao.INTERNO, TipoJuncao.ESQUERDA]:
+        var r = _op_unir(esq, dir, chaves, tipo)
+        var obtidos = List[String]()
+        for i in range(_n_linhas(r)):
+            obtidos.append(
+                r[0].texto_em(i) + "|" + r[1].texto_em(i) + "|" + r[2].texto_em(i)
+            )
+        var esperados = List[String]()
+        for i in range(len(esquerda)):
+            var casou = False
+            for j in range(len(direita)):
+                if esquerda[i] == direita[j]:
+                    casou = True
+                    esperados.append(
+                        String(esquerda[i]) + "|" + String(i) + "|"
+                        + String(100 + j)
+                    )
+            if not casou and tipo == TipoJuncao.ESQUERDA:
+                esperados.append(String(esquerda[i]) + "|" + String(i) + "|NA")
+        assert_equal(len(obtidos), len(esperados))
+        for i in range(len(esperados)):
+            assert_equal(obtidos[i], esperados[i])
+
+
+def test_ordenar_uma_chave_bate_com_o_caminho_geral() raises:
+    """Uma chave usa caminho proprio; duas usam o geral. Tem de dar o mesmo.
+
+    Ordenar por `[c]` e por `[c, c]` e a mesma pergunta feita aos dois
+    caminhos — o especializado, que separa ausentes e carrega a chave ao lado do
+    indice, e o geral, que compara linha a linha. Divergencia aqui e ordem
+    errada em silencio.
+    """
+    # 800 linhas com 50 valores distintos: dezesseis empates por valor, que e o
+    # que a comparacao precisa exercitar. Mais linhas so fariam a suite esperar —
+    # o caminho geral compara linha a linha e e lento de proposito
+    var n = 800
+    var v = List[Float64](capacity=n)
+    var aus = List[Bool](capacity=n)
+    var marca = List[Int64](capacity=n)
+    for i in range(n):
+        v.append(Float64((i * 37) % 50))
+        aus.append(i % 61 == 0)
+        marca.append(Int64(i))
+
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_reais("v", v^, aus^))
+    cols.append(Coluna.de_inteiros("marca", marca^))
+    var t = Tabela(cols^)
+
+    for descendente in [False, True]:
+        var uma = List[String]()
+        uma.append("v")
+        var duas = List[String]()
+        duas.append("v")
+        duas.append("v")
+        var a = t.ordenar(uma, descendente)
+        var b = t.ordenar(duas, descendente)
+        assert_equal(a.linhas(), b.linhas())
+        var difs = 0
+        for i in range(a.linhas()):
+            if a.pegar("marca").texto_em(i) != b.pegar("marca").texto_em(i):
+                difs += 1
+        if difs != 0:
+            raise Error(
+                "descendente=" + String(descendente) + ": " + String(difs)
+                + " linhas em ordem diferente entre o caminho de uma chave e o geral"
+            )
+
+
+def test_ordenar_estavel_e_ausente_no_fim() raises:
+    """Empate mantem a ordem original — nos dois sentidos.
+
+    O caminho de uma chave chegou a inverter o vetor para ordenar ao contrario,
+    o que punha os empates na ordem inversa da original. Descendente vira a
+    comparacao, nao o resultado.
+    """
+    var v = List[Float64]()
+    var aus = List[Bool]()
+    var marca = List[Int64]()
+    # tres blocos de valor igual, e um ausente no meio
+    for i in range(9):
+        marca.append(Int64(i))
+        if i == 4:
+            v.append(0.0)
+            aus.append(True)
+        else:
+            v.append(Float64(i // 3))
+            aus.append(False)
+
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_reais("v", v^, aus^))
+    cols.append(Coluna.de_inteiros("marca", marca^))
+    var t = Tabela(cols^)
+    var uma = List[String]()
+    uma.append("v")
+
+    var asc = t.ordenar(uma, False)
+    # ausente por ultimo
+    assert_true(asc.pegar("v").eh_ausente(8))
+    assert_equal(asc.pegar("marca").texto_em(8), "4")
+    # empates de valor 0 (marcas 0,1,2) na ordem original
+    assert_equal(asc.pegar("marca").texto_em(0), "0")
+    assert_equal(asc.pegar("marca").texto_em(1), "1")
+    assert_equal(asc.pegar("marca").texto_em(2), "2")
+
+    var desc = t.ordenar(uma, True)
+    # ausente continua por ultimo, e nao primeiro
+    assert_true(desc.pegar("v").eh_ausente(8))
+    # o maior valor (2) vem primeiro, e seus empates na ordem ORIGINAL
+    assert_equal(desc.pegar("marca").texto_em(0), "6")
+    assert_equal(desc.pegar("marca").texto_em(1), "7")
+    assert_equal(desc.pegar("marca").texto_em(2), "8")
+
+
+def test_ordenar_texto_por_posto() raises:
+    """Texto vira posto do valor distinto — a ordem tem de ser a alfabetica."""
+    var c = List[String]()
+    for x in ["pera", "abacaxi", "melancia", "abacaxi", "banana"]:
+        c.append(String(x))
+    var m = List[Int64]()
+    for i in range(5):
+        m.append(Int64(i))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("fruta", c^))
+    cols.append(Coluna.de_inteiros("marca", m^))
+    var t = Tabela(cols^)
+    var uma = List[String]()
+    uma.append("fruta")
+    var r = t.ordenar(uma, False)
+    assert_equal(r.pegar("fruta").texto_em(0), "abacaxi")
+    assert_equal(r.pegar("fruta").texto_em(1), "abacaxi")
+    assert_equal(r.pegar("fruta").texto_em(2), "banana")
+    assert_equal(r.pegar("fruta").texto_em(3), "melancia")
+    assert_equal(r.pegar("fruta").texto_em(4), "pera")
+    # os dois "abacaxi" na ordem original: marca 1 antes de 3
+    assert_equal(r.pegar("marca").texto_em(0), "1")
+    assert_equal(r.pegar("marca").texto_em(1), "3")
 
 
 def test_paralelo_politica() raises:

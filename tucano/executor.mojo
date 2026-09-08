@@ -1438,6 +1438,18 @@ def coletar_linhas_opcional(
             aus.append(col.eh_ausente(i))
 
     if col.tipo == DType.TEXTO:
+        if col.eh_dicionarizada():
+            # o mesmo atalho que `coletar_linhas` ja tinha, e que faltava aqui:
+            # a saida herda o dicionario da origem e so junta os codigos. Sem
+            # ele, uma juncao a esquerda com chave de texto alocava uma `String`
+            # por linha de saida para redicionarizar tudo de novo no fim.
+            var codigos = List[Int32](capacity=n)
+            for i in indices:
+                if i < 0:
+                    codigos.append(Int32(0))  # ausente: o codigo nao e olhado
+                else:
+                    codigos.append(col.codigos[i])
+            return Coluna.de_dicionario(nome, col.textos.copy(), codigos^, aus^)
         var vals = List[String](capacity=n)
         for i in indices:
             if i < 0 or col.eh_ausente(i):
@@ -1493,6 +1505,11 @@ struct ChavesJuncao(Copyable, Movable):
     var textos: List[String]
     var ausente: List[Bool]
     var usa_inteiro: Bool
+    var codigos: List[Int32]
+    """Coluna de texto ja dicionarizada: um codigo por linha, e os valores
+    distintos em `textos`. Assim a chave nao materializa uma `String` por linha
+    para representar cinquenta cidades — a traducao para o espaco de codigos
+    comum acontece uma vez por valor distinto."""
 
     def __init__(
         out self,
@@ -1500,11 +1517,16 @@ struct ChavesJuncao(Copyable, Movable):
         var textos: List[String],
         var ausente: List[Bool],
         usa_inteiro: Bool,
+        var codigos: List[Int32] = List[Int32](),
     ):
         self.inteiras = inteiras^
         self.textos = textos^
         self.ausente = ausente^
         self.usa_inteiro = usa_inteiro
+        self.codigos = codigos^
+
+    def usa_dicionario(self) -> Bool:
+        return len(self.codigos) > 0
 
 
 def _chaves_de_juncao(
@@ -1535,6 +1557,16 @@ def _chaves_de_juncao(
                     ints.append(Int(col.ints[i]))
             return ChavesJuncao(ints^, List[String](), ausente^, True)
         if col.tipo == DType.TEXTO:
+            if col.eh_dicionarizada():
+                var distintos = List[String](capacity=col.cardinalidade())
+                for k in range(col.cardinalidade()):
+                    distintos.append(col.textos.get(k))
+                var codigos = List[Int32](capacity=n)
+                for i in range(n):
+                    codigos.append(col.codigos[i])
+                return ChavesJuncao(
+                    List[Int](), distintos^, ausente^, False, codigos^
+                )
             var txt = List[String](capacity=n)
             for i in range(n):
                 if ausente[i]:
@@ -1578,52 +1610,164 @@ def _sondar_juncao(
     mut idx_probe: List[Int],
     mut idx_build: List[Int],
 ) raises:
-    """Hash em `build`, sonda com `probe`. Preenche indices (probe, build)."""
+    """Hash em `build`, sonda com `probe`. Preenche indices (probe, build).
+
+    O `Dict` aparece **uma vez por valor distinto**, nao uma vez por linha
+    sondada. A versao anterior fazia duas buscas no `Dict` por linha de sondagem
+    — `k in balde` e depois `balde[k]` — e iterava o balde, o que copia a lista
+    a cada linha. Com um milhao de linhas sondando cinquenta cidades, eram dois
+    milhoes de buscas com hash de `String` e um milhao de copias de lista.
+
+    Aqui cada valor distinto do lado de construcao ganha um **codigo**, e os
+    baldes viram duas listas planas: `inicio[c]` diz onde comecam as linhas do
+    codigo `c` e `linhas` as guarda em sequencia. A sondagem faz uma busca para
+    traduzir a chave em codigo e depois so caminha num vetor.
+    """
+    # ---- codigo por valor distinto do lado de construcao
+    var codigo_de_build = List[Int](capacity=n_build)
+    var distintos = 0
     if ch_build.usa_inteiro:
-        var balde = Dict[Int, List[Int]]()
+        var mapa = Dict[Int, Int]()
         for i in range(n_build):
             if ch_build.ausente[i]:
+                codigo_de_build.append(-1)
                 continue
             var k = ch_build.inteiras[i]
-            if k in balde:
-                balde[k].append(i)
+            if k in mapa:
+                codigo_de_build.append(mapa[k])
             else:
-                var lista = List[Int]()
-                lista.append(i)
-                balde[k] = lista^
+                mapa[k] = distintos
+                codigo_de_build.append(distintos)
+                distintos += 1
+        # ---- traduz a sondagem para o mesmo espaco de codigos
+        var codigo_de_probe = List[Int](capacity=n_probe)
         for i in range(n_probe):
-            var casou = False
-            if not ch_probe.ausente[i]:
-                var k = ch_probe.inteiras[i]
-                if k in balde:
-                    casou = True
-                    for j in balde[k]:
-                        idx_probe.append(i)
-                        idx_build.append(j)
-            if not casou and manter_sem_par:
-                idx_probe.append(i)
-                idx_build.append(-1)
+            if ch_probe.ausente[i]:
+                codigo_de_probe.append(-1)
+                continue
+            var k = ch_probe.inteiras[i]
+            if k in mapa:
+                codigo_de_probe.append(mapa[k])
+            else:
+                codigo_de_probe.append(-1)
+        _emitir_juncao(
+            codigo_de_build, codigo_de_probe, distintos, n_build, n_probe,
+            manter_sem_par, idx_probe, idx_build,
+        )
         return
-    var balde = Dict[String, List[Int]]()
-    for i in range(n_build):
-        if ch_build.ausente[i]:
-            continue
-        var k = ch_build.textos[i]
-        if k in balde:
-            balde[k].append(i)
-        else:
-            var lista = List[Int]()
-            lista.append(i)
-            balde[k] = lista^
-    for i in range(n_probe):
-        var casou = False
-        if not ch_probe.ausente[i]:
+
+    var mapa = Dict[String, Int]()
+    if ch_build.usa_dicionario():
+        # traduz o dicionario, nao as linhas: cinquenta buscas, nao um milhao
+        var por_codigo = List[Int](capacity=len(ch_build.textos))
+        for k in range(len(ch_build.textos)):
+            var v = ch_build.textos[k]
+            if v in mapa:
+                por_codigo.append(mapa[v])
+            else:
+                mapa[v] = distintos
+                por_codigo.append(distintos)
+                distintos += 1
+        for i in range(n_build):
+            if ch_build.ausente[i]:
+                codigo_de_build.append(-1)
+            else:
+                codigo_de_build.append(por_codigo[Int(ch_build.codigos[i])])
+    else:
+        for i in range(n_build):
+            if ch_build.ausente[i]:
+                codigo_de_build.append(-1)
+                continue
+            var k = ch_build.textos[i]
+            if k in mapa:
+                codigo_de_build.append(mapa[k])
+            else:
+                mapa[k] = distintos
+                codigo_de_build.append(distintos)
+                distintos += 1
+
+    var codigo_de_probe = List[Int](capacity=n_probe)
+    if ch_probe.usa_dicionario():
+        var por_codigo = List[Int](capacity=len(ch_probe.textos))
+        for k in range(len(ch_probe.textos)):
+            var v = ch_probe.textos[k]
+            if v in mapa:
+                por_codigo.append(mapa[v])
+            else:
+                por_codigo.append(-1)
+        for i in range(n_probe):
+            if ch_probe.ausente[i]:
+                codigo_de_probe.append(-1)
+            else:
+                codigo_de_probe.append(por_codigo[Int(ch_probe.codigos[i])])
+    else:
+        for i in range(n_probe):
+            if ch_probe.ausente[i]:
+                codigo_de_probe.append(-1)
+                continue
             var k = ch_probe.textos[i]
-            if k in balde:
+            if k in mapa:
+                codigo_de_probe.append(mapa[k])
+            else:
+                codigo_de_probe.append(-1)
+    _emitir_juncao(
+        codigo_de_build, codigo_de_probe, distintos, n_build, n_probe,
+        manter_sem_par, idx_probe, idx_build,
+    )
+
+
+def _emitir_juncao(
+    codigo_de_build: List[Int],
+    codigo_de_probe: List[Int],
+    distintos: Int,
+    n_build: Int,
+    n_probe: Int,
+    manter_sem_par: Bool,
+    mut idx_probe: List[Int],
+    mut idx_build: List[Int],
+):
+    """Baldes planos por codigo, e a sondagem so caminha neles.
+
+    `inicio[c] .. inicio[c+1]` sao as posicoes do codigo `c` dentro de `linhas`,
+    na ordem original — e a ordem original e o que mantem a juncao previsivel.
+    """
+    var contagem = List[Int]()
+    contagem.resize(distintos + 1, 0)
+    for i in range(n_build):
+        var c = codigo_de_build[i]
+        if c >= 0:
+            contagem[c] += 1
+    var inicio = List[Int]()
+    inicio.resize(distintos + 1, 0)
+    var acumulado = 0
+    for c in range(distintos):
+        inicio[c] = acumulado
+        acumulado += contagem[c]
+    inicio[distintos] = acumulado
+
+    var cursor = inicio.copy()
+    var linhas = List[Int]()
+    linhas.resize(acumulado, 0)
+    for i in range(n_build):
+        var c = codigo_de_build[i]
+        if c >= 0:
+            linhas[cursor[c]] = i
+            cursor[c] += 1
+
+    var pi = codigo_de_probe.unsafe_ptr()
+    var pin = inicio.unsafe_ptr()
+    var pl = linhas.unsafe_ptr()
+    for i in range(n_probe):
+        var c = pi.unsafe_load(i)
+        var casou = False
+        if c >= 0:
+            var a = pin.unsafe_load(c)
+            var z = pin.unsafe_load(c + 1)
+            if z > a:
                 casou = True
-                for j in balde[k]:
+                for p in range(a, z):
                     idx_probe.append(i)
-                    idx_build.append(j)
+                    idx_build.append(Int(pl.unsafe_load(p)))
         if not casou and manter_sem_par:
             idx_probe.append(i)
             idx_build.append(-1)
@@ -1729,6 +1873,157 @@ def esquema_unido(
 # ------------------------------------------------- ordenacao e transformacoes
 
 
+struct _ChavesOrdenacao(Movable):
+    """Chaves de ordenacao extraidas UMA vez, em forma direta de comparar.
+
+    O comparador roda O(n log n) vezes — vinte milhoes de vezes em um milhao de
+    linhas. Ler a coluna por dentro a cada chamada custava, por comparacao: dois
+    `eh_ausente` que lancam e extraem bit, um desvio por tipo, e — em coluna de
+    texto — **duas `String` alocadas**. Ordenar um milhao de linhas por texto
+    alocava quarenta milhoes de `String` para responder "qual vem antes".
+
+    Aqui a coluna e lida uma vez e vira vetor plano. Texto vira **posto**: os
+    valores distintos sao ordenados uma vez (cinquenta, nao um milhao) e cada
+    linha guarda a posicao do seu valor nessa ordem. Comparar texto passa a ser
+    comparar inteiro, e a ordem e a mesma por construcao.
+    """
+
+    var eh_real: List[Bool]
+    var reais: List[List[Float64]]
+    var inteiros: List[List[Int64]]
+    var na: List[List[UInt8]]
+    var desc: List[Bool]
+
+    def __init__(out self):
+        self.eh_real = List[Bool]()
+        self.reais = List[List[Float64]]()
+        self.inteiros = List[List[Int64]]()
+        self.na = List[List[UInt8]]()
+        self.desc = List[Bool]()
+
+    def quantas(self) -> Int:
+        return len(self.eh_real)
+
+
+def _postos_de_texto(col: Coluna) raises -> List[Int64]:
+    """Posto de cada linha na ordem alfabetica dos valores distintos.
+
+    Distintos primeiro, ordenacao depois: uma coluna com um milhao de linhas e
+    cinquenta cidades ordena cinquenta textos, nao um milhao.
+    """
+    var n = col.tamanho()
+    var vistos = Dict[String, Int]()
+    var distintos = List[String]()
+    var por_linha = List[Int](capacity=n)
+    for i in range(n):
+        if col.eh_ausente(i):
+            por_linha.append(-1)
+            continue
+        var v = col.texto_bruto(i)
+        if v in vistos:
+            por_linha.append(vistos[v])
+        else:
+            var k = len(distintos)
+            vistos[v] = k
+            distintos.append(v)
+            por_linha.append(k)
+
+    # ordena os indices dos distintos por insercao: sao poucos, e a insercao
+    # nao paga alocacao nenhuma alem da lista de indices
+    var ordem = List[Int](capacity=len(distintos))
+    for i in range(len(distintos)):
+        ordem.append(i)
+    for i in range(1, len(ordem)):
+        var atual = ordem[i]
+        var j = i - 1
+        while j >= 0 and distintos[ordem[j]] > distintos[atual]:
+            ordem[j + 1] = ordem[j]
+            j -= 1
+        ordem[j + 1] = atual
+
+    var posto_de = List[Int64](capacity=len(distintos))
+    posto_de.resize(len(distintos), Int64(0))
+    for posicao in range(len(ordem)):
+        posto_de[ordem[posicao]] = Int64(posicao)
+
+    var saida = List[Int64](capacity=n)
+    for i in range(n):
+        if por_linha[i] < 0:
+            saida.append(Int64(0))  # ausente: o valor nao e olhado
+        else:
+            saida.append(posto_de[por_linha[i]])
+    return saida^
+
+
+def _extrair_chaves(
+    cols: List[Coluna], chaves: List[String], desc: List[Bool]
+) raises -> _ChavesOrdenacao:
+    var ch = _ChavesOrdenacao()
+    for k in range(len(chaves)):
+        ref col = cols[posicao_no_lote(cols, chaves[k])]
+        ch.na.append(col.validity_bits.para_bytes())
+        var descendente = False
+        if k < len(desc):
+            descendente = desc[k]
+        ch.desc.append(descendente)
+
+        if col.tipo == DType.REAL:
+            ch.eh_real.append(True)
+            ch.reais.append(col.reals.copy())
+            ch.inteiros.append(List[Int64]())
+        elif col.tipo == DType.TEXTO:
+            ch.eh_real.append(False)
+            ch.reais.append(List[Float64]())
+            ch.inteiros.append(_postos_de_texto(col))
+        elif col.tipo == DType.LOGICO:
+            ch.eh_real.append(False)
+            ch.reais.append(List[Float64]())
+            var v = List[Int64](capacity=col.tamanho())
+            for i in range(col.tamanho()):
+                v.append(Int64(col.logics[i]))
+            ch.inteiros.append(v^)
+        else:
+            ch.eh_real.append(False)
+            ch.reais.append(List[Float64]())
+            ch.inteiros.append(col.ints.copy())
+    return ch^
+
+
+def _comparar_chaves(ch: _ChavesOrdenacao, a: Int, b: Int) -> Int:
+    """-1, 0 ou 1. Ausente vai sempre para o fim, nas duas direcoes."""
+    for k in range(ch.quantas()):
+        var na_a = ch.na[k][a] != 0
+        var na_b = ch.na[k][b] != 0
+        if na_a and na_b:
+            continue
+        if na_a:
+            return 1
+        if na_b:
+            return -1
+
+        var ordem = 0
+        if ch.eh_real[k]:
+            var x = ch.reais[k][a]
+            var y = ch.reais[k][b]
+            if x < y:
+                ordem = -1
+            elif x > y:
+                ordem = 1
+        else:
+            var x = ch.inteiros[k][a]
+            var y = ch.inteiros[k][b]
+            if x < y:
+                ordem = -1
+            elif x > y:
+                ordem = 1
+
+        if ordem != 0:
+            if ch.desc[k]:
+                return -ordem
+            return ordem
+    return 0
+
+
 def _comparar_linhas(
     cols: List[Coluna], posicoes: List[Int], desc: List[Bool], a: Int, b: Int
 ) raises -> Int:
@@ -1778,21 +2073,19 @@ def _comparar_linhas(
 
 
 def _mesclar(
-    cols: List[Coluna],
-    posicoes: List[Int],
-    desc: List[Bool],
+    ch: _ChavesOrdenacao,
     origem: List[Int],
     mut destino: List[Int],
     ini: Int,
     meio: Int,
     fim: Int,
-) raises:
+):
     var i = ini
     var j = meio
     var k = ini
     while i < meio and j < fim:
         # `<= 0` mantem a ordenacao estavel
-        if _comparar_linhas(cols, posicoes, desc, origem[i], origem[j]) <= 0:
+        if _comparar_chaves(ch, origem[i], origem[j]) <= 0:
             destino[k] = origem[i]
             i += 1
         else:
@@ -1809,15 +2102,192 @@ def _mesclar(
         k += 1
 
 
+def _mesclar_par_real(
+    ch_origem: List[Float64], ix_origem: List[Int],
+    mut ch_destino: List[Float64], mut ix_destino: List[Int],
+    ini: Int, meio: Int, fim: Int, desc: Bool,
+):
+    """Mescla carregando a chave junto do indice.
+
+    Sem isso, cada comparacao faz `chave[indice[i]]` — um acesso aleatorio a um
+    vetor de dezenas de MiB, com falha de cache provavel, vinte milhoes de
+    vezes. Carregar a chave ao lado do indice torna as duas leituras
+    sequenciais; custa um vetor a mais e paga com folga.
+    """
+    var pco = ch_origem.unsafe_ptr()
+    var pio = ix_origem.unsafe_ptr()
+    var pcd = ch_destino.unsafe_ptr()
+    var pid = ix_destino.unsafe_ptr()
+    var i = ini
+    var j = meio
+    var k = ini
+    while i < meio and j < fim:
+        # descendente vira a comparacao, nao o resultado: inverter o vetor no
+        # fim colocaria os empates na ordem inversa da original, e a ordenacao
+        # deixaria de ser estavel
+        var fica_o_da_esquerda: Bool
+        if desc:
+            fica_o_da_esquerda = pco.unsafe_load(i) >= pco.unsafe_load(j)
+        else:
+            fica_o_da_esquerda = pco.unsafe_load(i) <= pco.unsafe_load(j)
+        if fica_o_da_esquerda:
+            pcd.unsafe_store(k, pco.unsafe_load(i))
+            pid.unsafe_store(k, pio.unsafe_load(i))
+            i += 1
+        else:
+            pcd.unsafe_store(k, pco.unsafe_load(j))
+            pid.unsafe_store(k, pio.unsafe_load(j))
+            j += 1
+        k += 1
+    while i < meio:
+        pcd.unsafe_store(k, pco.unsafe_load(i))
+        pid.unsafe_store(k, pio.unsafe_load(i))
+        i += 1
+        k += 1
+    while j < fim:
+        pcd.unsafe_store(k, pco.unsafe_load(j))
+        pid.unsafe_store(k, pio.unsafe_load(j))
+        j += 1
+        k += 1
+
+
+def _mesclar_par_int(
+    ch_origem: List[Int64], ix_origem: List[Int],
+    mut ch_destino: List[Int64], mut ix_destino: List[Int],
+    ini: Int, meio: Int, fim: Int, desc: Bool,
+):
+    var pco = ch_origem.unsafe_ptr()
+    var pio = ix_origem.unsafe_ptr()
+    var pcd = ch_destino.unsafe_ptr()
+    var pid = ix_destino.unsafe_ptr()
+    var i = ini
+    var j = meio
+    var k = ini
+    while i < meio and j < fim:
+        var fica_o_da_esquerda: Bool
+        if desc:
+            fica_o_da_esquerda = pco.unsafe_load(i) >= pco.unsafe_load(j)
+        else:
+            fica_o_da_esquerda = pco.unsafe_load(i) <= pco.unsafe_load(j)
+        if fica_o_da_esquerda:
+            pcd.unsafe_store(k, pco.unsafe_load(i))
+            pid.unsafe_store(k, pio.unsafe_load(i))
+            i += 1
+        else:
+            pcd.unsafe_store(k, pco.unsafe_load(j))
+            pid.unsafe_store(k, pio.unsafe_load(j))
+            j += 1
+        k += 1
+    while i < meio:
+        pcd.unsafe_store(k, pco.unsafe_load(i))
+        pid.unsafe_store(k, pio.unsafe_load(i))
+        i += 1
+        k += 1
+    while j < fim:
+        pcd.unsafe_store(k, pco.unsafe_load(j))
+        pid.unsafe_store(k, pio.unsafe_load(j))
+        j += 1
+        k += 1
+
+
+def _ordem_uma_chave(ch: _ChavesOrdenacao) raises -> List[Int]:
+    """Uma chave so: separa ausentes, ordena o resto pelo valor.
+
+    Ausente vai sempre para o fim, nas duas direcoes — entao ele nao precisa
+    entrar na comparacao. Separar antes deixa o comparador ser uma comparacao de
+    numero e nada mais. A ordem original e preservada nos dois lados, que e o que
+    mantem a ordenacao estavel.
+    """
+    var n = len(ch.na[0])
+    var presentes = List[Int]()
+    var ausentes = List[Int]()
+    var pna = ch.na[0].unsafe_ptr()
+    for i in range(n):
+        if pna.unsafe_load(i) != 0:
+            ausentes.append(i)
+        else:
+            presentes.append(i)
+
+    var m = len(presentes)
+    var ix_a = presentes^
+    var ix_b = List[Int]()
+    ix_b.resize(m, 0)
+
+    if ch.eh_real[0]:
+        var ka = List[Float64](capacity=m)
+        var fonte = ch.reais[0].unsafe_ptr()
+        for i in range(m):
+            ka.append(fonte.unsafe_load(ix_a[i]))
+        var kb = List[Float64]()
+        kb.resize(m, Float64(0))
+        var largura = 1
+        while largura < m:
+            var i = 0
+            while i < m:
+                var meio = i + largura
+                if meio > m:
+                    meio = m
+                var fim = i + 2 * largura
+                if fim > m:
+                    fim = m
+                _mesclar_par_real(ka, ix_a, kb, ix_b, i, meio, fim, ch.desc[0])
+                i += 2 * largura
+            var tk = ka^
+            ka = kb^
+            kb = tk^
+            var ti = ix_a^
+            ix_a = ix_b^
+            ix_b = ti^
+            largura *= 2
+    else:
+        var ka = List[Int64](capacity=m)
+        var fonte = ch.inteiros[0].unsafe_ptr()
+        for i in range(m):
+            ka.append(fonte.unsafe_load(ix_a[i]))
+        var kb = List[Int64]()
+        kb.resize(m, Int64(0))
+        var largura = 1
+        while largura < m:
+            var i = 0
+            while i < m:
+                var meio = i + largura
+                if meio > m:
+                    meio = m
+                var fim = i + 2 * largura
+                if fim > m:
+                    fim = m
+                _mesclar_par_int(ka, ix_a, kb, ix_b, i, meio, fim, ch.desc[0])
+                i += 2 * largura
+            var tk = ka^
+            ka = kb^
+            kb = tk^
+            var ti = ix_a^
+            ix_a = ix_b^
+            ix_b = ti^
+            largura *= 2
+
+    var saida = List[Int](capacity=n)
+    for i in range(m):
+        saida.append(ix_a[i])
+    # ausentes por ultimo nas duas direcoes, na ordem em que apareciam
+    for i in ausentes:
+        saida.append(i)
+    return saida^
+
+
 def ordem_das_linhas(
     cols: List[Coluna], chaves: List[String], desc: List[Bool]
 ) raises -> List[Int]:
-    """Ordenacao por mesclagem, estavel: linhas equivalentes mantem a ordem."""
-    var n = linhas_do_lote(cols)
-    var posicoes = List[Int]()
-    for c in chaves:
-        posicoes.append(posicao_no_lote(cols, c))
+    """Ordenacao por mesclagem, estavel: linhas equivalentes mantem a ordem.
 
+    As chaves sao extraidas **antes** do laco. Ler a coluna por dentro a cada
+    comparacao custava mais que a mesclagem inteira — ver `_ChavesOrdenacao`.
+    """
+    var ch = _extrair_chaves(cols, chaves, desc)
+    if ch.quantas() == 1:
+        return _ordem_uma_chave(ch)
+
+    var n = linhas_do_lote(cols)
     var a = List[Int](capacity=n)
     var b = List[Int](capacity=n)
     for i in range(n):
@@ -1834,7 +2304,7 @@ def ordem_das_linhas(
             var fim = i + 2 * largura
             if fim > n:
                 fim = n
-            _mesclar(cols, posicoes, desc, a, b, i, meio, fim)
+            _mesclar(ch, a, b, i, meio, fim)
             i += 2 * largura
         var t = a^
         a = b^

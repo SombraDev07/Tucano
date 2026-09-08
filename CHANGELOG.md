@@ -3,6 +3,55 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.24.0] — Juncao e ordenacao: o valor vira codigo
+
+As duas tinham a mesma doenca, e e a mesma de todo este ciclo: materializar por
+linha o que se resolve uma vez por valor distinto.
+
+| 1M linhas, chave de 50 valores | antes | depois | |
+|---|---|---|---|
+| juncao a esquerda | 470 ns/linha | **74 ns/linha** | 6,4x |
+| ordenacao estavel | 335 ns/linha | **100 ns/linha** | 3,4x |
+| ordenacao por texto | 1320 ms | **98 ms** | 13,5x |
+
+### Alterado — ordenacao
+
+- **Chave extraida uma vez, antes do laco.** O comparador roda O(n log n) vezes;
+  ler a coluna por dentro a cada chamada custava dois `eh_ausente` que lancam,
+  um desvio por tipo e — em texto — duas `String` alocadas. 342 -> 211 ms.
+- **Texto vira posto.** Os distintos sao ordenados uma vez (cinquenta, nao um
+  milhao) e cada linha guarda a posicao do seu valor. 1320 -> 210 ms.
+- **A chave viaja ao lado do indice.** `chave[indice[i]]` e acesso aleatorio a
+  dezenas de MiB, vinte milhoes de vezes. 211 -> 70 ms.
+- Ausente sai da comparacao: vai sempre para o fim, entao e separado antes.
+
+### Alterado — juncao
+
+- **`Dict` consultado uma vez por valor distinto**, nao por linha sondada. Os
+  baldes viram duas listas planas.
+- **`coletar_linhas_opcional` ganhou o atalho de dicionario** que a versao
+  nao-opcional ja tinha. Sem ele, a juncao a esquerda alocava uma `String` por
+  linha de saida so para redicionarizar tudo de novo no fim. **Este era o custo
+  principal** — a mudanca anterior sozinha nao melhorou nada (470 -> 493 ms).
+- **Chave de texto dicionarizada nao materializa `String` por linha**: a
+  traducao para o espaco de codigos comum acontece por valor distinto.
+
+### Corrigido
+
+- **Ordenacao descendente deixava de ser estavel.** A primeira versao do caminho
+  de uma chave ordenava ao contrario invertendo o vetor no fim, o que poe os
+  empates na ordem inversa da original. Descendente vira a comparacao, nao o
+  resultado. Nenhum teste existente pegava; o que faltava existe agora.
+
+### Adicionado
+
+- `test_juncao_bate_com_forca_bruta` e a variante de chave inteira: laco duplo
+  como referencia, com chave repetida nos dois lados, chave so de um lado e
+  ausente que nunca casa nem com outro ausente.
+- `test_ordenar_uma_chave_bate_com_o_caminho_geral`: `[c]` usa o caminho novo,
+  `[c, c]` usa o geral, e a resposta tem de ser a mesma.
+- `test_ordenar_estavel_e_ausente_no_fim` e `test_ordenar_texto_por_posto`.
+
 ## [0.23.0] — Filtro sem materializar; paralelismo de operador medido e recusado
 
 Pedido: paralelizar os operadores. O que se mediu primeiro mudou o que valia
