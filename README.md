@@ -439,6 +439,32 @@ Painel sobre **10 milhões de linhas**: 186 ms com filtro, 336 bytes de payload.
 E `pixi run bench-m3` mostra que o executor escala linear — ns/linha praticamente constante
 de 25 mil a 200 mil linhas.
 
+## Onde o Tucano está
+
+Os números acima são internos — medem o Tucano contra ele mesmo. A suíte comparativa mede
+contra os engines de referência, no mesmo arquivo e com a mesma pergunta:
+
+```bash
+pixi run bench-comparativo
+pixi run -e comparativo referencia      # todos os núcleos
+pixi run -e comparativo referencia-1t   # uma thread
+```
+
+| 5M linhas, Parquet → filtro → groupby → 3 agregações | tempo | atraso do Tucano |
+|---|---|---|
+| Tucano | 972 ms | — |
+| Polars (16 threads) | 57 ms | 17× |
+| DuckDB (16 threads) | 29 ms | 33× |
+| Polars (1 thread) | 100 ms | **9,7×** |
+| DuckDB (1 thread) | 139 ms | **7,0×** |
+
+A linha que importa é a de baixo. Contra um núcleo só, o atraso cai de 33× para 7× — **de
+metade a dois terços da distância é simplesmente não usar os outros quinze núcleos**, que é
+o item bloqueado pela ausência de primitiva de paralelismo no Mojo 1.0.
+
+O que sobra é maturidade de decodificação, e é onde o trabalho rende hoje. Publicar o número
+desfavorável é o ponto: sem ele, "é rápido porque tem SIMD" seria afirmação sem contraprova.
+
 ## Arquitetura
 
 ```

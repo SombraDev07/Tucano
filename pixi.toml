@@ -1,6 +1,6 @@
 [workspace]
 name = "tucano"
-version = "0.12.0"
+version = "0.13.0"
 channels = ["https://conda.modular.com/max", "conda-forge"]
 platforms = ["linux-64"]
 
@@ -13,6 +13,7 @@ bench-m5 = "mojo -I . bench/bench_m5.mojo"
 bench-m6 = "mojo -I . bench/bench_m6.mojo"
 bench-m8 = "mojo -I . bench/bench_m8.mojo"
 bench-m9 = "mojo -I . bench/bench_m9.mojo"
+bench-comparativo = "mojo -I . bench/bench_comparativo.mojo"
 bench-parquet = "mojo -I . bench/bench_parquet.mojo"
 parquet-roundtrip = "mojo -I . tools/roundtrip_parquet.mojo"
 arrow-roundtrip = "mojo -I . tools/roundtrip_arrow.mojo"
@@ -37,5 +38,20 @@ fixtures = "python tools/gerar_fixtures_parquet.py"
 interop = "python tools/verificar_interop_parquet.py"
 interop-arrow = "python tools/verificar_interop_arrow.py"
 
+# Ambiente separado, so para MEDIR contra engines de referencia. Como o de
+# fixtures, nao entra no runtime: nenhum modulo em `tucano/` importa nada daqui.
+# O Zero Python e sobre o que a biblioteca carrega em producao, nao sobre a
+# bancada de medicao.
+[feature.comparativo.dependencies]
+python = ">=3.11"
+polars = "*"
+duckdb = "*"
+pyarrow = "*"
+
+[feature.comparativo.tasks]
+referencia = "python tools/bench_referencia.py"
+referencia-1t = "python tools/bench_referencia.py --uma-thread"
+
 [environments]
 fixtures = ["fixtures"]
+comparativo = ["comparativo"]

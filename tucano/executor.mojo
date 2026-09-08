@@ -643,6 +643,16 @@ def filtrar_coluna(col: Coluna, keep: List[UInt8]) raises -> Coluna:
                 aus.append(col.eh_ausente(i))
         return Coluna.de_logicos(col.nome, vals^, aus^)
 
+    # coluna dicionarizada: filtra os codigos e mantem o dicionario
+    if col.eh_dicionarizada():
+        var codigos = List[Int32](capacity=n_out)
+        var aus = List[Bool](capacity=n_out)
+        for i in range(col.tamanho()):
+            if keep[i] != 0:
+                codigos.append(col.codigos[i])
+                aus.append(col.eh_ausente(i))
+        return Coluna.de_dicionario(col.nome, col.textos.copy(), codigos^, aus^)
+
     var vals = List[String](capacity=n_out)
     var aus = List[Bool](capacity=n_out)
     for i in range(col.tamanho()):
@@ -963,6 +973,11 @@ def coletar_linhas(col: Coluna, indices: List[Int]) raises -> Coluna:
         aus.append(col.eh_ausente(i))
 
     if col.tipo == DType.TEXTO:
+        if col.eh_dicionarizada():
+            var codigos = List[Int32](capacity=n)
+            for i in indices:
+                codigos.append(col.codigos[i])
+            return Coluna.de_dicionario(col.nome, col.textos.copy(), codigos^, aus^)
         var vals = List[String](capacity=n)
         for i in indices:
             if col.eh_ausente(i):

@@ -101,7 +101,25 @@ São três provas, em ordem de honestidade:
 
 1. **Usabilidade** — um analista acostumado a bibliotecas tabulares resolve uma tarefa real (ler, filtrar, derivar coluna, agrupar, exportar) sem consultar documentação além do README.
 2. **Query interativa** — filtro de painel sobre 10M linhas responde em tempo de interação. Aqui pesam startup e replanejamento, onde binário AOT bate stack Python de verdade.
-3. **Escala** — suíte pública contra os engines tabulares de referência (1M → 1B linhas): tempo, RAM, throughput, startup, scaling por cores.
+3. **Escala** — suíte pública contra os engines tabulares de referência. **Feita e medida** — números abaixo.
+
+### Onde o Tucano está (medido)
+
+`pixi run bench-comparativo` e `pixi run -e comparativo referencia`. Mesmo arquivo Parquet, mesma pergunta (filtro + groupby + 3 agregações), menor de três execuções. Nenhum ajuste favorecendo ninguém.
+
+| 5M linhas | tempo | atraso do Tucano |
+|---|---|---|
+| Tucano | 972 ms | — |
+| Polars (16 threads) | 57 ms | **17×** |
+| DuckDB (16 threads) | 29 ms | **33×** |
+| Polars (1 thread) | 100 ms | **9,7×** |
+| DuckDB (1 thread) | 139 ms | **7,0×** |
+
+**A leitura que importa está na segunda metade da tabela.** Contra um núcleo só, o atraso cai de 33× para 7×. Ou seja: **de metade a dois terços da distância é simplesmente não usar os outros quinze núcleos** — exatamente o item que está bloqueado pela ausência de primitiva de paralelismo no stdlib do Mojo 1.0.
+
+O que sobra — 7× a 10× contra um único núcleo — é maturidade de decodificação e execução, e é onde o trabalho tem retorno hoje. Um exemplo do que isso rende: nesta mesma sessão, três otimizações guiadas por medição (preservar o dicionário ao filtrar, dicionarizar direto dos bytes na leitura, e ler por ponteiro em vez de indexar `List`) cortaram o tempo pela metade, de 1957 ms para 972 ms.
+
+Publicar o número desfavorável é o ponto. Sem ele, "é rápido porque tem SIMD" seria uma afirmação sem contraprova.
 
 ---
 

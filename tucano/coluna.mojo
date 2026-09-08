@@ -377,6 +377,36 @@ struct Coluna(Copyable, Movable):
                 mascara.append(self._como_real(i) > limiar)
         return mascara^
 
+    @staticmethod
+    def de_dicionario(
+        nome: String,
+        var dicionario: StringStore,
+        var codigos: List[Int32],
+        var ausentes: List[Bool],
+    ) raises -> Self:
+        """Coluna de texto reaproveitando um dicionario ja construido.
+
+        Filtrar, ordenar ou reamostrar uma coluna dicionarizada nao precisa
+        redescobrir os valores distintos: os codigos e o dicionario sobrevivem.
+        Reconstruir do zero era o custo dominante em tabela grande.
+        """
+        var n = len(codigos)
+        _validar_ausentes(n, ausentes)
+        var val = Validity.todos_presentes(n)
+        if len(ausentes) != 0:
+            val = Validity.de_lista(ausentes)
+        return Self(
+            nome,
+            DType.TEXTO,
+            n,
+            val^,
+            List[Int64](),
+            List[Float64](),
+            List[UInt8](),
+            dicionario^,
+            codigos^,
+        )
+
     def eh_dicionarizada(self) -> Bool:
         return len(self.codigos) > 0
 
