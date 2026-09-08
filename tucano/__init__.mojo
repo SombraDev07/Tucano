@@ -52,6 +52,7 @@ from .plano import Etapa, TipoEtapa
 from .executor import Tri
 from .parquet import (
     esquema_parquet,
+    VarreduraParquet,
     metadados_parquet,
     MetadadosParquet,
     PTipo,
@@ -72,4 +73,6 @@ from .agregacao import (
 )
 from .painel import Painel, Widget, TipoWidget
 from .otimizador import otimizar, PlanoOtimizado
+from .fluxo import plano_flui, EstadoAgregacao
+from .arquivo import LeitorArquivo
 from .consulta import Consulta, lazy

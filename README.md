@@ -59,6 +59,8 @@ o que for mais conveniente na hora.
   widget guarda uma *consulta*, não uma tabela: o filtro reexecuta e só o agregado atravessa.
 - **Otimizador de consultas** — o filtro sobe no plano, constantes dobram, e a coluna que
   ninguém usa não sai do disco. `explicar()` mostra o plano antes e depois.
+- **Execução em memória limitada** — agregar não exige ter tudo em RAM. Sobre Parquet, o
+  arquivo é lido row group por row group e nunca entra inteiro em memória.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
 
 ## Instalação
@@ -239,6 +241,34 @@ quais colunas o plano usa. As outras nunca saem do disco.
 `coletar_sem_otimizar()` executa o plano como escrito — serve para medir o ganho e para
 provar que o otimizador não mudou a resposta.
 
+## Memória limitada
+
+```mojo
+varredura_parquet("enorme.parquet")
+    .onde(coluna("valor").gt(lit(100.0)))
+    .agrupar(["grupo"])
+    .agregar([soma("valor"), media("valor"), contar()])
+    .coletar_em_fluxo()
+```
+
+Agregar não exige ter tudo em memória: exige carregar o **estado dos grupos**, que é
+proporcional ao número de grupos e não ao de linhas. Sobre um arquivo de 72 MB em 40 row
+groups, o pico foi **467 KiB** — 0,6% do arquivo, por 6% a mais de tempo, com resultado
+idêntico.
+
+O arquivo nunca é carregado inteiro: a leitura é por faixa, e cada pedaço de coluna sai do
+disco na sua própria faixa de bytes.
+
+`pode_fluir()` diz se o plano flui, ou por que não:
+
+```
+ordenacao precisa do conjunto inteiro — use coletar()
+distintos(x) nao combina entre fatias sem guardar todos os valores vistos
+```
+
+Ordenação e junção precisam do conjunto todo, e `distintos` não combina entre fatias. O
+plano é recusado com essa explicação, não executado pela metade.
+
 ## Painel
 
 ```mojo
@@ -412,11 +442,11 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Agregação, junção, ordenação e verbos de análise | ✅ |
 | Painel: KPI, gráfico, tabela, filtro | ✅ |
 | Otimizador: dobra, fusão, empurrão, poda de colunas | ✅ |
-| Execução out-of-core | próximo |
+| Execução em fluxo com memória limitada | ✅ |
+| Interoperabilidade Arrow | próximo |
 | Painel de visualização | planejado |
-| Interoperabilidade Arrow | planejado |
 
-151 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+162 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do
@@ -438,6 +468,7 @@ pixi run bench-m4  # SIMD contra o laço escalar
 pixi run bench-m5  # leitura de CSV
 pixi run bench-m6  # agregação, junção e ordenação
 pixi run bench-m8  # o que o otimizador poupa
+pixi run bench-m9  # execução em memória limitada
 pixi run bench-parquet  # Parquet e column pruning
 pixi run build     # precompilar o pacote
 ```

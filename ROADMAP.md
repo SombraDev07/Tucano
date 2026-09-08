@@ -40,7 +40,7 @@ A análise tabular em memória consagrou um conjunto de decisões que hoje custa
 | **2–5x a RAM do dado** | `inplace=True` mente e copia mesmo assim | Moves explícitos, zero-copy onde couber | parcial |
 | **`groupby.apply` com shape imprevisível** | O retorno muda conforme a função | Só agregações tipadas | M6 |
 | **`KeyError: 'idade'` e nada mais** | Um typo custa 5 minutos | `coluna inexistente: 'idade'. Você quis dizer 'idades'?` | M2.5 |
-| **Tudo precisa caber na RAM** | Morre em 50M linhas num laptop | Streaming out-of-core | M9 |
+| **Tudo precisa caber na RAM** | Morre em 50M linhas num laptop | Agregação em fluxo: pico proporcional ao número de grupos, não de linhas | ✅ M9 |
 | **Viz = PNG estático ou reenviar o dataset** | Ferramentas de painel re-executam o script inteiro ou reenviam a tabela | **Widget guarda uma `Consulta`, não uma `Tabela`** — payload medido na própria página | ✅ M7 |
 
 ---
@@ -107,7 +107,7 @@ São três provas, em ordem de honestidade:
 
 ## Estado atual do código (honestidade)
 
-**M0 → M8 fechados.** Próximo: **M9 — Out-of-Core**. 151 testes verdes.
+**M0 → M9 fechados.** Próximo: **M10 — Interoperabilidade**. 162 testes verdes.
 
 Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo por thread**, sem primitiva no stdlib do Mojo 1.0. O Parquet, que estava bloqueado por falta de fixture, foi destravado e entregue — leitura e escrita, com interoperabilidade verificada contra outra implementação.
 
@@ -151,6 +151,9 @@ Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo p
 | Servidor HTTP sobre libc (`external_call`) | ✅ M7 |
 | Otimizador: dobra, fusão, empurrão, poda | ✅ M8 |
 | Varredura Parquet adiada + pushdown de colunas | ✅ M8 — 1,9× |
+| Leitura por faixa (`pread`) e por row group | ✅ M9 |
+| Agregação em fluxo, memória limitada | ✅ M9 — pico 0,6% do arquivo |
+| Escrita em múltiplos row groups | ✅ M9 |
 
 ### Dívidas concretas identificadas
 
@@ -180,8 +183,8 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M6 | Aggregation + Join | crítica | ✅ feito | group/join como operadores |
 | **M7** | **Painel** | **alta** | **próximo** | dashboard nativo |
 | M8 | Optimizer | crítica | ✅ feito | pushdown + folding + reorder |
-| **M9** | **Out-of-Core** | **alta** | **próximo** | datasets > RAM |
-| M10 | Interop | alta | não iniciado | Arrow (sem Python) + SQL |
+| M9 | Out-of-Core | alta | ✅ feito | datasets > RAM |
+| **M10** | **Interop** | **alta** | **próximo** | Arrow (sem Python) + SQL |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
 | M12 | Excel | baixa | não iniciado | compatibilidade tardia |
 
@@ -710,14 +713,61 @@ Com filtro é mais rápido que sem: o filtro reduz as linhas antes das agregaç�
 
 ---
 
-## M9 — Out-of-Core / Streaming Execution
+## M9 — Out-of-Core / Streaming Execution ✅
 
-Datasets > RAM: chunk → filter/aggregate → merge; spill-to-disk; memória limitada.
+Agregar não exige ter tudo em memória: exige carregar o **estado dos grupos**, que é pequeno, e passar os dados por ele uma fatia de cada vez.
+
+```
+fatia -> filtro / coluna derivada -> estado dos grupos
+                                           |
+                                     (a fatia é liberada)
+```
+
+### Medido
+
+`pixi run bench-m9`, 1 milhão de linhas em 5 colunas, arquivo de 72 MB em 40 row groups:
+
+| | tempo | pico de memória |
+|---|---|---|
+| de uma vez | 416 ms | as colunas inteiras |
+| em fluxo | 442 ms | **467 KiB** — um row group |
+
+**0,6% do arquivo**, por 6% a mais de tempo. E os dois caminhos dão exatamente o mesmo resultado, verificado em teste.
+
+### `Path.read_bytes()` derrota o propósito
+
+Não adianta processar em fatias se a leitura já estourou a memória. `tucano/arquivo.mojo` lê **por faixa**, via `pread` da libc: abre uma vez, lê só o pedaço pedido, e o resto do arquivo nunca entra em memória. `metadados_parquet` passou a usar isso — dá para inspecionar o esquema de um arquivo maior que a RAM.
+
+`VarreduraParquet` lê **row group por row group**, e cada pedaço de coluna na sua própria faixa de bytes: as colunas não pedidas nunca saem do disco.
+
+> Terceira vez que a mesma armadilha aparece: `open`, como `read` e `write`, já é declarado pelo stdlib com outra assinatura, e a redeclaração não chega a linkar. `open64`, `lseek64` e `pread64` são os mesmos pontos de entrada sem a colisão.
+
+### O que atravessa fatias precisa ser combinável
+
+Soma de somas é soma; mínimo de mínimos é mínimo. Média não combina, mas soma e contagem combinam, e a divisão fica para o fim.
+
+`distintos` **não** combina sem guardar todos os valores vistos — e por isso é recusado no fluxo, em vez de fingir que cabe. Ordenação e junção também precisam do conjunto inteiro: o plano é recusado com essa explicação, não executado pela metade.
+
+```
+> plano com ordenacao pode fluir?
+ordenacao precisa do conjunto inteiro — use coletar()
+```
+
+### Escrita em row groups
+
+`para_parquet(tabela, caminho, linhas_por_grupo)` divide o arquivo. Grupos menores dão pico menor na leitura em fluxo. A interoperabilidade continua verificada — com row groups de duas linhas, inclusive.
 
 ### Critério de saída
 
-- [ ] Pipeline bounded-memory em ao menos um workload (groupby ou filter+agg)
-- [ ] Teste com dataset artificial maior que a RAM disponível
+- [x] Pipeline bounded-memory em pelo menos um workload — filter + groupby + agregações
+- [x] Leitura por faixa: o arquivo nunca é carregado inteiro
+- [x] Pico medido: 467 KiB sobre arquivo de 72 MB
+- [x] Equivalência fluxo × execução inteira verificada em teste
+- [x] Escrita em múltiplos row groups, com interop confirmada
+- [x] 162 testes verdes
+- [ ] Spill-to-disk para ordenação — **fora por ora**
+
+> Ordenação em memória limitada exige mesclagem externa com escrita temporária em disco. É um marco por si só, e ordenar não é o gargalo dos workloads que motivam out-of-core — agregar é. Entra quando houver demanda concreta.
 
 ---
 

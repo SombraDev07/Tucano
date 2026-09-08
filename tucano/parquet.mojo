@@ -15,6 +15,7 @@ paginas V1 e V2, sem compressao ou com Snappy.
 
 from std.pathlib import Path
 from .thrift import LeitorThrift, TTipo, CampoThrift, ListaThrift
+from .arquivo import LeitorArquivo
 
 
 struct PTipo:
@@ -424,7 +425,10 @@ def ler_metadados(bytes: List[UInt8]) raises -> MetadadosParquet:
     var inicio = n - 8 - tamanho
     if inicio < 4:
         raise Error("parquet: tamanho de rodape invalido")
+    return _parse_metadados(bytes, inicio)
 
+
+def _parse_metadados(bytes: List[UInt8], inicio: Int) raises -> MetadadosParquet:
     var l = LeitorThrift(inicio)
     var versao = 0
     var num_linhas = 0
@@ -460,8 +464,110 @@ def ler_metadados(bytes: List[UInt8]) raises -> MetadadosParquet:
 
 
 def metadados_parquet(caminho: String) raises -> MetadadosParquet:
-    """Le so o rodape: nao toca em nenhum byte de dado."""
-    return ler_metadados(Path(caminho).read_bytes())
+    """Le so o rodape: nao toca em nenhum byte de dado.
+
+    E leitura por faixa de verdade — o arquivo pode ser maior que a RAM.
+    """
+    var leitor = LeitorArquivo(caminho)
+    var m = _metadados_do_leitor(leitor, caminho)
+    leitor.fechar()
+    return m^
+
+
+def _metadados_do_leitor(
+    leitor: LeitorArquivo, caminho: String
+) raises -> MetadadosParquet:
+    if leitor.tamanho < 12:
+        raise Error("parquet: arquivo curto demais para ser valido: " + caminho)
+    var cabeca = leitor.ler(0, 4)
+    if not (
+        cabeca[0] == UInt8(80) and cabeca[1] == UInt8(65)
+        and cabeca[2] == UInt8(82) and cabeca[3] == UInt8(49)
+    ):
+        raise Error("parquet: magica inicial PAR1 ausente em " + caminho)
+
+    var cauda = leitor.ler(leitor.tamanho - 8, 8)
+    if not (
+        cauda[4] == UInt8(80) and cauda[5] == UInt8(65)
+        and cauda[6] == UInt8(82) and cauda[7] == UInt8(49)
+    ):
+        raise Error("parquet: magica final PAR1 ausente em " + caminho)
+
+    var tamanho = 0
+    for i in range(4):
+        tamanho |= Int(cauda[i]) << (8 * i)
+    var inicio = leitor.tamanho - 8 - tamanho
+    if inicio < 4:
+        raise Error("parquet: tamanho de rodape invalido em " + caminho)
+
+    var rodape = leitor.ler(inicio, tamanho)
+    return _parse_metadados(rodape, 0)
+
+
+def _deslocar(meta: ColunaMeta, base: Int) -> ColunaMeta:
+    """Copia a metadata com os deslocamentos relativos ao buffer local."""
+    var dic = meta.offset_dicionario
+    if dic > 0:
+        dic -= base
+    return ColunaMeta(
+        meta.tipo, meta.codec, meta.num_valores, meta.offset_dados - base, dic,
+        meta.tamanho_comprimido, meta.caminho, meta.codificacoes.copy(),
+    )
+
+
+struct VarreduraParquet(Movable):
+    """Le um Parquet **row group por row group**, sem carregar o arquivo.
+
+    Cada pedaco de coluna e lido na sua propria faixa de bytes: as colunas nao
+    pedidas nunca saem do disco, e o pico de memoria e o de um row group das
+    colunas pedidas — nao o do arquivo.
+    """
+
+    var leitor: LeitorArquivo
+    var metadados: MetadadosParquet
+    var querer: List[Int]
+
+    def __init__(out self, caminho: String, colunas: List[String]) raises:
+        self.leitor = LeitorArquivo(caminho)
+        self.metadados = _metadados_do_leitor(self.leitor, caminho)
+        self.querer = indices_das_colunas(self.metadados, colunas)
+
+    def n_grupos(self) -> Int:
+        return len(self.metadados.grupos)
+
+    def n_linhas(self) -> Int:
+        return self.metadados.num_linhas
+
+    def linhas_do_grupo(self, g: Int) -> Int:
+        return self.metadados.grupos[g].num_linhas
+
+    def ler_grupo(self, g: Int) raises -> List[Coluna]:
+        ref grupo = self.metadados.grupos[g]
+        var saida = List[Coluna]()
+        for c in self.querer:
+            var e = self.metadados.coluna_do_esquema(c)
+            var tipo_tucano = _tipo_tucano(e)
+            var escala = 0
+            if e.convertido == PConvertido.TIMESTAMP_MILLIS:
+                escala = 1
+            elif e.convertido == PConvertido.TIMESTAMP_NANOS:
+                escala = -1
+            var def_max = self.metadados.nivel_definicao_max(c)
+
+            ref cm = grupo.colunas[c]
+            var base = cm.inicio()
+            var bytes = self.leitor.ler(base, cm.tamanho_comprimido)
+            var local = _deslocar(cm, base)
+
+            var acc = _Acumulador()
+            _ler_pedaco_coluna(
+                bytes, local, def_max, tipo_tucano, escala, grupo.num_linhas, acc
+            )
+            saida.append(_montar_coluna(e.nome, tipo_tucano, acc^))
+        return saida^
+
+    def fechar(self):
+        self.leitor.fechar()
 
 
 # ------------------------------------------------------------------ paginas
@@ -474,6 +580,7 @@ from .codecs import (
     bits_para_real32,
 )
 from .coluna import Coluna
+from .executor import coletar_linhas
 from .dtype import DType
 from .schema import Campo, Schema
 from .erros import erro_coluna
@@ -1001,6 +1108,21 @@ def ler_parquet_lote(
     if len(querer) == 0:
         raise Error("parquet: nenhuma coluna selecionada")
 
+    return _ler_faixa(bytes, m, querer, 0, len(m.grupos))
+
+
+def _ler_faixa(
+    bytes: List[UInt8],
+    m: MetadadosParquet,
+    querer: List[Int],
+    grupo_ini: Int,
+    grupo_fim: Int,
+) raises -> List[Coluna]:
+    """Le uma faixa de row groups. Base tanto da leitura inteira quanto do fluxo."""
+    var esperado = 0
+    for g in range(grupo_ini, grupo_fim):
+        esperado += m.grupos[g].num_linhas
+
     var saida = List[Coluna]()
     for c in querer:
         var e = m.coluna_do_esquema(c)
@@ -1012,7 +1134,7 @@ def ler_parquet_lote(
             escala = -1
         var def_max = m.nivel_definicao_max(c)
         var acc = _Acumulador()
-        for g in range(len(m.grupos)):
+        for g in range(grupo_ini, grupo_fim):
             ref grupo = m.grupos[g]
             if c >= len(grupo.colunas):
                 raise Error("parquet: row group com menos colunas que o esquema")
@@ -1020,13 +1142,47 @@ def ler_parquet_lote(
                 bytes, grupo.colunas[c], def_max, tipo_tucano, escala,
                 grupo.num_linhas, acc,
             )
-        if acc.linhas() != m.num_linhas:
+        if acc.linhas() != esperado:
             raise Error(
                 "parquet: coluna '" + e.nome + "' com " + String(acc.linhas())
-                + " linhas, arquivo declara " + String(m.num_linhas)
+                + " linhas, esperado " + String(esperado)
             )
         saida.append(_montar_coluna(e.nome, tipo_tucano, acc^))
     return saida^
+
+
+def indices_das_colunas(
+    m: MetadadosParquet, colunas: List[String]
+) raises -> List[Int]:
+    """Nomes -> posicoes no esquema. Lista vazia significa todas."""
+    var querer = List[Int]()
+    if len(colunas) == 0:
+        for i in range(m.num_colunas()):
+            querer.append(i)
+        return querer^
+    for nome in colunas:
+        var achou = -1
+        for i in range(m.num_colunas()):
+            if m.coluna_do_esquema(i).nome == nome:
+                achou = i
+                break
+        if achou < 0:
+            var disponiveis = List[String]()
+            for i in range(m.num_colunas()):
+                disponiveis.append(m.coluna_do_esquema(i).nome)
+            raise erro_coluna(nome, disponiveis)
+        querer.append(achou)
+    return querer^
+
+
+def ler_parquet_grupo(
+    bytes: List[UInt8],
+    m: MetadadosParquet,
+    querer: List[Int],
+    grupo: Int,
+) raises -> List[Coluna]:
+    """Le um unico row group — a unidade natural de fatia do formato."""
+    return _ler_faixa(bytes, m, querer, grupo, grupo + 1)
 
 
 # ------------------------------------------------------------------ escrita
@@ -1115,6 +1271,13 @@ def _valores_plain(col: Coluna) raises -> List[UInt8]:
     return out^
 
 
+def _fatiar(col: Coluna, ini: Int, fim: Int) raises -> Coluna:
+    var indices = List[Int](capacity=fim - ini)
+    for i in range(ini, fim):
+        indices.append(i)
+    return coletar_linhas(col, indices)
+
+
 def _pagina_de_coluna(col: Coluna) raises -> List[UInt8]:
     """Pagina de dados V1: [tamanho dos niveis][niveis RLE][valores PLAIN]."""
     var n = col.tamanho()
@@ -1152,7 +1315,10 @@ def _cabecalho_de_dados(num_valores: Int, tamanho: Int) raises -> List[UInt8]:
 
 
 def para_parquet_lote(
-    colunas: List[Coluna], nomes: List[String], caminho: String
+    colunas: List[Coluna],
+    nomes: List[String],
+    caminho: String,
+    linhas_por_grupo: Int = 0,
 ) raises:
     """Grava um lote de colunas em Parquet.
 
@@ -1169,17 +1335,40 @@ def para_parquet_lote(
     for b in String("PAR1").as_bytes():
         arquivo.append(b)
 
+    # fronteiras dos row groups
+    var passo = linhas_por_grupo
+    if passo <= 0 or passo > n_linhas:
+        passo = n_linhas
+    if passo <= 0:
+        passo = 1
+    var inicios = List[Int]()
+    var fins = List[Int]()
+    var p = 0
+    while p < n_linhas:
+        var f = p + passo
+        if f > n_linhas:
+            f = n_linhas
+        inicios.append(p)
+        fins.append(f)
+        p = f
+    if len(inicios) == 0:
+        inicios.append(0)
+        fins.append(0)
+
+    # offsets[g * n_col + c]
     var offsets = List[Int]()
     var tamanhos = List[Int]()
-    for c in range(len(colunas)):
-        var pagina = _pagina_de_coluna(colunas[c])
-        var cabecalho = _cabecalho_de_dados(n_linhas, len(pagina))
-        offsets.append(len(arquivo))
-        tamanhos.append(len(cabecalho) + len(pagina))
-        for b in cabecalho:
-            arquivo.append(b)
-        for b in pagina:
-            arquivo.append(b)
+    for g in range(len(inicios)):
+        for c in range(len(colunas)):
+            var fatia = _fatiar(colunas[c], inicios[g], fins[g])
+            var pagina = _pagina_de_coluna(fatia)
+            var cabecalho = _cabecalho_de_dados(fins[g] - inicios[g], len(pagina))
+            offsets.append(len(arquivo))
+            tamanhos.append(len(cabecalho) + len(pagina))
+            for b in cabecalho:
+                arquivo.append(b)
+            for b in pagina:
+                arquivo.append(b)
 
     # ---- FileMetaData
     var w = EscritorThrift()
@@ -1217,31 +1406,34 @@ def para_parquet_lote(
 
     w.campo_i64(3, n_linhas)
 
-    w.campo_lista(4, TTipo.STRUCT, 1)
-    w.entrar()  # RowGroup
-    w.campo_lista(1, TTipo.STRUCT, len(colunas))
-    var total = 0
-    for c in range(len(colunas)):
-        total += tamanhos[c]
-        w.entrar()  # ColumnChunk
-        w.campo_i64(2, offsets[c])
-        w.campo_struct(3)  # ColumnMetaData
-        w.campo_i32(1, _tipo_parquet(colunas[c].tipo))
-        w.campo_lista(2, TTipo.I32, 2)
-        w.zigzag(PCodificacao.PLAIN)
-        w.zigzag(PCodificacao.RLE)
-        w.campo_lista(3, TTipo.BINARIO, 1)
-        w.binario(nomes[c])
-        w.campo_i32(4, PCompressao.NENHUMA)
-        w.campo_i64(5, n_linhas)
-        w.campo_i64(6, tamanhos[c])
-        w.campo_i64(7, tamanhos[c])
-        w.campo_i64(9, offsets[c])
-        w.sair()  # ColumnMetaData
-        w.sair()  # ColumnChunk
-    w.campo_i64(2, total)
-    w.campo_i64(3, n_linhas)
-    w.sair()  # RowGroup
+    w.campo_lista(4, TTipo.STRUCT, len(inicios))
+    for g in range(len(inicios)):
+        var linhas_g = fins[g] - inicios[g]
+        w.entrar()  # RowGroup
+        w.campo_lista(1, TTipo.STRUCT, len(colunas))
+        var total = 0
+        for c in range(len(colunas)):
+            var k = g * len(colunas) + c
+            total += tamanhos[k]
+            w.entrar()  # ColumnChunk
+            w.campo_i64(2, offsets[k])
+            w.campo_struct(3)  # ColumnMetaData
+            w.campo_i32(1, _tipo_parquet(colunas[c].tipo))
+            w.campo_lista(2, TTipo.I32, 2)
+            w.zigzag(PCodificacao.PLAIN)
+            w.zigzag(PCodificacao.RLE)
+            w.campo_lista(3, TTipo.BINARIO, 1)
+            w.binario(nomes[c])
+            w.campo_i32(4, PCompressao.NENHUMA)
+            w.campo_i64(5, linhas_g)
+            w.campo_i64(6, tamanhos[k])
+            w.campo_i64(7, tamanhos[k])
+            w.campo_i64(9, offsets[k])
+            w.sair()  # ColumnMetaData
+            w.sair()  # ColumnChunk
+        w.campo_i64(2, total)
+        w.campo_i64(3, linhas_g)
+        w.sair()  # RowGroup
 
     w.campo_texto(6, "tucano")
     w.sair()

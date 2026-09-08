@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.10.0 — M0 → M8 fechados (paralelismo por thread à parte).
+Versão 0.11.0 — M0 → M9 fechados (paralelismo por thread à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -311,6 +311,27 @@ antes de agregar é outra pergunta, não a mesma mais rápida.
 no `coletar()`, depois que o otimizador decidiu quais colunas o plano usa — é o que torna a
 poda menos I/O em vez de menos cópia.
 
+### Execução em fluxo
+
+`coletar_em_fluxo(linhas_por_fatia)` executa em memória limitada: troca os dados pelo
+**estado dos grupos**, que é proporcional ao número de grupos e não ao de linhas.
+
+Exige que o plano termine em agregação. `pode_fluir()` devolve `""` quando flui, ou a razão
+pela qual não flui:
+
+| Bloqueio | Por quê |
+|---|---|
+| ordenação, junção, concatenação | precisam do conjunto inteiro |
+| `distintos` | não combina entre fatias sem guardar todos os valores vistos |
+| agregação que não é a última etapa | o fluxo termina onde a agregação começa |
+
+Sobre Parquet a fatia é o row group, e o arquivo **nunca é carregado inteiro**:
+`tucano.arquivo` lê por faixa via `pread`, e `VarreduraParquet` lê cada pedaço de coluna na
+sua própria faixa de bytes.
+
+`para_parquet(tabela, caminho, linhas_por_grupo)` divide o arquivo em row groups; grupos
+menores dão pico menor na leitura em fluxo.
+
 ### Painel
 
 ```mojo
@@ -409,6 +430,8 @@ um leitor e um escritor com o mesmo mal-entendido concordam entre si.
 | `Painel` / `tucano.json` | estável |
 | `tucano.otimizador` | **interno**, as regras podem mudar |
 | `varredura_parquet` / `explicar` | estável |
+| `coletar_em_fluxo` / `pode_fluir` | estável |
+| `tucano.arquivo` / `tucano.fluxo` | **interno** |
 | `ler_parquet` / `para_parquet` / `esquema_parquet` | estável |
 | `ler_csv_tipado` / `LeitorCSV` | estável |
 | `ler_csv` / `para_csv` | assinatura estável, implementação refeita em M5 |

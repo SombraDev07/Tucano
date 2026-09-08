@@ -58,6 +58,9 @@ from tucano import (
 )
 from tucano.codecs import decodificar_rle, descomprimir_snappy, largura_de_bits
 from tucano.thrift import LeitorThrift
+from tucano.arquivo import LeitorArquivo
+from tucano.fluxo import plano_flui, EstadoAgregacao
+from tucano.parquet import VarreduraParquet
 from tucano.otimizador import (
     dobrar_constantes,
     mesclar_filtros,
@@ -2031,6 +2034,232 @@ def test_m8_varredura_parquet_alimenta_o_plano() raises:
     )
     assert_equal(q.linhas(), 999)
     assert_true("parquet" in q.explicar())
+
+
+# ------------------------------------------------------------------ M9
+
+
+def _uma_lista(nome: String) -> List[String]:
+    var l = List[String]()
+    l.append(nome)
+    return l^
+
+
+def test_m9_leitor_por_faixa() raises:
+    """Ler faixa e o que permite arquivo maior que a RAM."""
+    var l = LeitorArquivo("tests/fixtures/simples.parquet")
+    assert_true(l.tamanho > 12)
+    var inicio = l.ler(0, 4)
+    assert_equal(inicio[0], UInt8(80))  # P
+    assert_equal(inicio[1], UInt8(65))  # A
+    assert_equal(inicio[2], UInt8(82))  # R
+    assert_equal(inicio[3], UInt8(49))  # 1
+    var fim = l.ler(l.tamanho - 4, 4)
+    assert_equal(fim[0], UInt8(80))
+    assert_equal(len(l.ler(10, 20)), 20)
+    l.fechar()
+
+
+def test_m9_leitor_recusa_faixa_invalida() raises:
+    var l = LeitorArquivo("tests/fixtures/simples.parquet")
+    var pegou = False
+    try:
+        _ = l.ler(l.tamanho - 2, 100)
+    except e:
+        pegou = True
+        assert_true("fora de" in String(e))
+    l.fechar()
+    assert_true(pegou)
+
+
+def test_m9_varredura_por_row_group() raises:
+    var so = List[String]()
+    so.append("grupo")
+    so.append("valor")
+    var v = VarreduraParquet("tests/fixtures/grupos.parquet", so)
+    assert_equal(v.n_grupos(), 3)
+    assert_equal(v.n_linhas(), 3000)
+
+    var total = 0
+    for g in range(v.n_grupos()):
+        var lote = v.ler_grupo(g)
+        assert_equal(len(lote), 2)  # so as colunas pedidas saem do disco
+        total += lote[0].tamanho()
+    v.fechar()
+    assert_equal(total, 3000)
+
+
+def test_m9_plano_flui_ou_explica() raises:
+    var chaves = _uma_lista("g")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("v"))
+
+    var bom = List[Etapa]()
+    bom.append(Etapa.filtro(coluna("v").gt(lit(1.0))))
+    bom.append(Etapa.agregacao(chaves.copy(), aggs.copy()))
+    assert_equal(plano_flui(bom), "")
+
+    var com_ordem = List[Etapa]()
+    com_ordem.append(Etapa.ordenacao(_uma_lista("v"), List[Bool]()))
+    com_ordem.append(Etapa.agregacao(chaves.copy(), aggs.copy()))
+    assert_true("ordenacao" in plano_flui(com_ordem))
+
+    var com_juncao = List[Etapa]()
+    com_juncao.append(Etapa.juncao(List[Coluna](), _uma_lista("g"), 0))
+    com_juncao.append(Etapa.agregacao(chaves.copy(), aggs.copy()))
+    assert_true("juncao" in plano_flui(com_juncao))
+
+    var sem_agregacao = List[Etapa]()
+    sem_agregacao.append(Etapa.filtro(coluna("v").gt(lit(1.0))))
+    assert_true("terminar em uma agregacao" in plano_flui(sem_agregacao))
+
+    # a agregacao tem de ser a ultima
+    var fora_de_ordem = List[Etapa]()
+    fora_de_ordem.append(Etapa.agregacao(chaves.copy(), aggs.copy()))
+    fora_de_ordem.append(Etapa.filtro(coluna("soma_v").gt(lit(1.0))))
+    assert_true("ultima etapa" in plano_flui(fora_de_ordem))
+
+
+def test_m9_distintos_nao_flui() raises:
+    """Nao combina entre fatias sem guardar tudo — e recusado, nao fingido."""
+    var chaves = _uma_lista("g")
+    var aggs = List[Agregacao]()
+    aggs.append(distintos("v"))
+    var etapas = List[Etapa]()
+    etapas.append(Etapa.agregacao(chaves^, aggs^))
+    assert_true("nao combina entre fatias" in plano_flui(etapas))
+
+
+def test_m9_fluxo_bate_com_execucao_inteira() raises:
+    var chaves = _uma_lista("grupo")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    aggs.append(media("valor"))
+    aggs.append(contar())
+    aggs.append(minimo("valor"))
+    aggs.append(maximo("valor"))
+    var q = (
+        varredura_parquet("tests/fixtures/grupos.parquet")
+        .onde(coluna("valor").gt(lit(100.0)))
+        .agrupar(chaves)
+        .agregar(aggs^)
+    )
+    assert_equal(q.pode_fluir(), "")
+
+    var inteiro = q.coletar()
+    var fluindo = q.coletar_em_fluxo()
+    assert_equal(fluindo.linhas(), inteiro.linhas())
+    assert_equal(fluindo.colunas(), inteiro.colunas())
+    for i in range(inteiro.linhas()):
+        assert_equal(
+            fluindo.pegar("grupo").texto_em(i), inteiro.pegar("grupo").texto_em(i)
+        )
+        assert_equal(
+            fluindo.pegar("soma_valor").texto_em(i),
+            inteiro.pegar("soma_valor").texto_em(i),
+        )
+        assert_equal(
+            fluindo.pegar("media_valor").texto_em(i),
+            inteiro.pegar("media_valor").texto_em(i),
+        )
+        assert_equal(
+            fluindo.pegar("minimo_valor").texto_em(i),
+            inteiro.pegar("minimo_valor").texto_em(i),
+        )
+        assert_equal(
+            fluindo.pegar("maximo_valor").texto_em(i),
+            inteiro.pegar("maximo_valor").texto_em(i),
+        )
+
+
+def test_m9_fluxo_em_memoria_com_fatias_pequenas() raises:
+    """Fatia pequena nao muda a resposta — so o pico de memoria."""
+    var t = ler_parquet("tests/fixtures/grupos.parquet")
+    var chaves = _uma_lista("grupo")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    aggs.append(contar())
+    var q = t.agrupar(chaves).agregar(aggs^)
+
+    var inteiro = q.coletar()
+    var em_7 = q.coletar_em_fluxo(7)
+    assert_equal(em_7.linhas(), inteiro.linhas())
+    for i in range(inteiro.linhas()):
+        assert_equal(
+            em_7.pegar("soma_valor").texto_em(i),
+            inteiro.pegar("soma_valor").texto_em(i),
+        )
+        assert_equal(
+            em_7.pegar("contagem").texto_em(i), inteiro.pegar("contagem").texto_em(i)
+        )
+
+
+def test_m9_fluxo_preserva_ausentes() raises:
+    """Grupo sem valor valido continua ausente, tambem no fluxo."""
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var chaves = _uma_lista("cidade")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    aggs.append(contar())
+    var r = t.agrupar(chaves).agregar(aggs^).coletar_em_fluxo(2)
+    assert_equal(r.linhas(), 3)
+    for i in range(r.linhas()):
+        if r.pegar("cidade").texto_em(i) == "BH":
+            assert_true(r.pegar("soma_valor").eh_ausente(i))
+            assert_equal(r.pegar("contagem").texto_em(i), "1")
+
+
+def test_m9_fluxo_com_ordenacao_erra_com_explicacao() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var chaves = _uma_lista("cidade")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    var ordem = _uma_lista("valor")
+    var pegou = False
+    try:
+        _ = t.ordenar(ordem).agrupar(chaves).agregar(aggs^).coletar_em_fluxo()
+    except e:
+        pegou = True
+        assert_true("ordenacao precisa do conjunto inteiro" in String(e))
+        assert_true("use coletar()" in String(e))
+    assert_true(pegou)
+
+
+def test_m9_escrita_em_varios_row_groups() raises:
+    var t = ler_parquet("tests/fixtures/grupos.parquet")
+    var saida = "tests/fixtures/_saida_grupos_rg.parquet"
+    para_parquet(t, saida, 250)
+    var m = metadados_parquet(saida)
+    assert_equal(len(m.grupos), 12)
+    assert_equal(m.num_linhas, 3000)
+    for g in range(len(m.grupos)):
+        assert_equal(m.grupos[g].num_linhas, 250)
+
+    var volta = ler_parquet(saida)
+    assert_equal(volta.linhas(), 3000)
+    assert_equal(volta.soma("id"), t.soma("id"))
+    assert_equal(volta.pegar("grupo").texto_em(1000), "b")
+
+
+def test_m9_fluxo_sobre_muitos_row_groups() raises:
+    var t = ler_parquet("tests/fixtures/grupos.parquet")
+    var saida = "tests/fixtures/_saida_fluxo.parquet"
+    para_parquet(t, saida, 100)  # 30 row groups
+
+    var chaves = _uma_lista("grupo")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    aggs.append(contar())
+    var q = varredura_parquet(saida).agrupar(chaves).agregar(aggs^)
+
+    var fluindo = q.coletar_em_fluxo()
+    var inteiro = q.coletar()
+    assert_equal(fluindo.linhas(), 3)
+    for i in range(3):
+        assert_equal(
+            fluindo.pegar("soma_valor").texto_em(i),
+            inteiro.pegar("soma_valor").texto_em(i),
+        )
 
 
 def main() raises:

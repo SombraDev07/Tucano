@@ -19,7 +19,14 @@ from .erros import erro_coluna
 from .expr import Expr
 from .plano import Etapa, TipoEtapa, descrever_logico, descrever_fisico
 from .agregacao import Agregacao, contar
-from .parquet import ler_parquet_lote, para_parquet_lote, esquema_parquet
+from .parquet import (
+    ler_parquet_lote,
+    para_parquet_lote,
+    esquema_parquet,
+    VarreduraParquet,
+)
+from .fluxo import plano_flui, EstadoAgregacao
+from .schema import Campo
 from .otimizador import otimizar, PlanoOtimizado
 from .executor import (
     executar,
@@ -272,6 +279,82 @@ struct Consulta(Copyable, Movable):
             entrada = self.fonte.copy()
         return Tabela(executar(entrada, self.etapas))
 
+    def pode_fluir(self) raises -> String:
+        """"" se o plano executa em fluxo; a razao, se nao executa."""
+        return plano_flui(self.plano_otimizado().etapas)
+
+    def _esquema_da_entrada(self, colunas_lidas: List[String]) raises -> List[Campo]:
+        var todos = List[Campo]()
+        if self.le_de_arquivo():
+            var e = esquema_parquet(self.caminho)
+            for i in range(e.tamanho()):
+                todos.append(e.campo_em(i))
+        else:
+            for c in self.fonte:
+                todos.append(Campo(c.nome, c.dtype()))
+        if len(colunas_lidas) == 0:
+            return todos^
+        var out = List[Campo]()
+        for nome in colunas_lidas:
+            for c in todos:
+                if c.nome == nome:
+                    out.append(c.copy())
+        return out^
+
+    def coletar_em_fluxo(self, linhas_por_fatia: Int = 200_000) raises -> Tabela:
+        """Executa em memoria limitada, uma fatia de cada vez.
+
+        Exige que o plano termine em agregacao: e o que permite trocar os dados
+        pelo **estado dos grupos**, que e proporcional ao numero de grupos e nao
+        ao de linhas. Sobre Parquet, a fatia e o row group, e o arquivo nunca e
+        carregado inteiro.
+
+        Ordenacao e juncao precisam do conjunto todo. O plano e recusado com essa
+        explicacao, nao executado pela metade.
+        """
+        if len(self.chaves_pendentes) > 0:
+            raise Error("agrupar sem agregar")
+        var plano = self.plano_otimizado()
+        var razao = plano_flui(plano.etapas)
+        if razao != "":
+            raise Error("coletar_em_fluxo: " + razao + " — use coletar()")
+
+        var ultima = plano.etapas[len(plano.etapas) - 1].copy()
+        var pre = List[Etapa]()
+        for i in range(len(plano.etapas) - 1):
+            pre.append(plano.etapas[i].copy())
+
+        var esq_fonte = self._esquema_da_entrada(plano.colunas_lidas)
+        var esq_entrada = esquema_apos(esq_fonte, pre)
+        var estado = EstadoAgregacao(ultima.nomes, ultima.agregacoes, esq_entrada)
+
+        if self.le_de_arquivo():
+            var v = VarreduraParquet(self.caminho, plano.colunas_lidas)
+            for g in range(v.n_grupos()):
+                var lote = v.ler_grupo(g)
+                estado.absorver(executar(lote, pre))
+            v.fechar()
+        else:
+            var entrada = self._lote_de_entrada(plano.colunas_lidas)
+            var n = 0
+            if len(entrada) > 0:
+                n = entrada[0].tamanho()
+            var i = 0
+            while i < n:
+                var fim = i + linhas_por_fatia
+                if fim > n:
+                    fim = n
+                var indices = List[Int](capacity=fim - i)
+                for k in range(i, fim):
+                    indices.append(k)
+                var fatia = List[Coluna]()
+                for c in entrada:
+                    fatia.append(coletar_linhas(c, indices))
+                estado.absorver(executar(fatia, pre))
+                i = fim
+
+        return Tabela(estado.finalizar())
+
     def descrever_otimizado(self) raises -> String:
         """Plano logico depois do otimizador."""
         return descrever_logico(self.plano_otimizado().etapas)
@@ -342,9 +425,15 @@ def ler_parquet(
     return Tabela(ler_parquet_lote(caminho, colunas))
 
 
-def para_parquet(tabela: Tabela, caminho: String) raises:
-    """Grava a tabela em Parquet."""
-    para_parquet_lote(tabela.lote(), tabela.nomes(), caminho)
+def para_parquet(
+    tabela: Tabela, caminho: String, linhas_por_grupo: Int = 0
+) raises:
+    """Grava a tabela em Parquet.
+
+    `linhas_por_grupo` divide o arquivo em row groups. Grupos menores permitem
+    leitura em fluxo com pico de memoria menor.
+    """
+    para_parquet_lote(tabela.lote(), tabela.nomes(), caminho, linhas_por_grupo)
 
 
 def varredura_parquet(caminho: String) -> Consulta:
