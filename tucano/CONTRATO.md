@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.21.1 — M0 → M10.13 + leitura .xlsx; HTTP do painel fora do caminho crítico.
+Versão 0.22.0 — M0 → M13; leitura multithread; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -459,6 +459,22 @@ fronteiras dos campos ficam inteiros em memória. E/S com memória limitada é M
 **`.xlsx`**: `ler_xlsx(caminho)` lê a primeira planilha; `planilha="Nome"` escolhe a aba.
 Primeira linha é cabeçalho, como no CSV. Data no serial do Excel vira `data` quando o
 estilo da célula é data. `.xls` antigo (BIFF) é recusado. Não há escritor.
+
+### Threads
+
+A leitura de Parquet usa **uma thread por coluna** quando há mais de uma coluna a ler e ao
+menos 10 mil linhas — abaixo disso a thread custa mais do que rende, medido. Nada mais na
+biblioteca cria thread: filtro, groupby, junção e ordenação são de uma thread só.
+
+Nenhuma tarefa escreve onde outra lê. Cada coluna abre o próprio descritor, lê o próprio
+rodapé e escreve no próprio destino; o encontro é depois do `join`. Não há mutex no caminho
+quente porque não há estado compartilhado a proteger.
+
+`TUCANO_THREADS=n` fixa o teto de threads; `TUCANO_THREADS=1` desliga o paralelismo por
+completo. Valor ausente ou inválido usa os núcleos do sistema. É a saída para quem embute o
+Tucano onde já existe um conjunto de threads.
+
+O resultado não depende disso: paralelo e sequencial produzem a mesma tabela, valor a valor.
 
 ### Parquet
 

@@ -67,6 +67,8 @@ o que for mais conveniente na hora.
   `SELECT DISTINCT` é o `agrupar` sem agregação. Não há um segundo interpretador.
 - **Excel `.xlsx`** — `ler_xlsx` abre a planilha como `Tabela`. Primeira aba, ou
   `planilha="Nome"`. Sem `.xls` antigo, sem escrita.
+- **Leitura em várias threads** — uma por coluna, acima de 10 mil linhas. `TUCANO_THREADS`
+  fixa quantas, para quem embute o Tucano onde já existe um conjunto de threads.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
 
 ## Instalação
@@ -459,17 +461,16 @@ pixi run -e comparativo referencia-1t   # pipeline, uma thread
 
 | | ler tudo | ler 2 de 5 colunas |
 |---|---|---|
-| Tucano | 102 ms | 46 ms |
-| pandas 3.0.5 | **90 ms** | **34 ms** |
-| pyarrow | 48 ms | 23 ms |
-| Polars 1.44 | 31 ms | 13 ms |
-| DuckDB 1.5.5 | 5 ms | 3 ms |
+| Tucano | **70 ms** | 42 ms |
+| pandas 3.0.5 | 98 ms | **36 ms** |
+| pyarrow | 54 ms | 28 ms |
+| Polars 1.44 | 31 ms | 14 ms |
+| DuckDB 1.5.5 | 5 ms | 2 ms |
 
 O arquivo é o que o próprio Tucano escreve com o padrão de hoje: texto repetido
-em `RLE_DICTIONARY`, páginas em Snappy. Na leitura pura o Tucano está **1,1×
-atrás do pandas** — descomprimir 124 MiB de saída custa ~40 ms. Escrito com
-`compressao="nenhuma"`, o mesmo dado é lido em 60 ms, mas o padrão é comprimido
-e é o padrão que se publica.
+em `RLE_DICTIONARY`, páginas em Snappy. A leitura usa **uma thread por coluna** —
+com `TUCANO_THREADS=1` as mesmas 5 colunas levam 105 ms. O caso podado ganha
+menos porque duas colunas só dão duas threads.
 
 **Pipeline completo — Parquet → filtro → groupby → 3 agregações, 5M linhas:**
 
@@ -483,7 +484,8 @@ e é o padrão que se publica.
 | DuckDB (16 threads) | 13 ms | 9,0× |
 
 Uma thread contra uma thread: o Tucano passa pandas e Polars neste workload.
-O que resta para DuckDB em 16 núcleos é paralelismo, ainda bloqueado no Mojo 1.0.
+O que resta para DuckDB em 16 núcleos é paralelismo nos **operadores** — a leitura já usa
+várias threads; filtro, groupby e junção ainda não.
 
 Publicar o número desfavorável continua valendo. Foi assim que se descobriu que
 ligar Snappy por padrão tinha deixado a leitura 4,3× mais lenta sem que nenhum
@@ -526,11 +528,12 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Excel `.xlsx`: leitura | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-223 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+226 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
-Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do
-Mojo 1.0 não expõe primitiva de paralelismo de dados. O roadmap explica.
+Por muitos marcos o roadmap registrou paralelismo como bloqueado pela linguagem. **Estava
+errado** — a leitura passou a usar uma thread por coluna, e o erro de raciocínio está
+preservado no roadmap junto com o conserto. Falta paralelizar os operadores de execução.
 
 A interoperabilidade de Parquet e Arrow é verificada **nos dois sentidos**: outra
 implementação lê o que o Tucano escreve, e o Tucano lê arquivos que ela escreveu.

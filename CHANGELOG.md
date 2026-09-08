@@ -3,6 +3,51 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.22.0] — Leitura em varias threads
+
+O roadmap registrava paralelismo como **bloqueado pela linguagem** desde o M4. A
+conclusao estava errada, e o erro de raciocinio ficou preservado la junto com o
+conserto.
+
+| 5M linhas x 5 colunas, 44 MiB | uma thread | com threads | |
+|---|---|---|---|
+| ler tudo | 105 ms | **69 ms** | 1,5x |
+| ler 2 de 5 colunas | 48 ms | 42 ms | 1,1x |
+| pipeline completo | 117 ms | 110 ms | 1,06x |
+
+Contra o pandas em uma thread, a leitura completa passa de 98 ms para 70.
+
+### Adicionado
+
+- **Leitura de Parquet com uma thread por coluna**, acima de 10 mil linhas. O
+  limiar e medido: abaixo de 5 mil a thread e perda, a virada e entre 5 e 10 mil.
+  A primeira versao chutou 50 mil e errou por cinco vezes.
+- **`TUCANO_THREADS`** fixa o teto de threads; `=1` desliga. Ausente ou invalido
+  usa os nucleos do sistema. E a saida para quem embute o Tucano onde ja existe
+  um conjunto de threads.
+- **`tucano/paralelo.mojo`** — so a politica: quantas threads, e quando vale.
+
+### Corrigido
+
+- **`esquema_previsto()` em plano que le de arquivo** ja tinha sido corrigido no
+  [0.21.0]; aqui ele passou a ser exercitado tambem pelo caminho paralelo.
+
+### O que nao mudou
+
+Filtro, groupby, juncao e ordenacao continuam em uma thread. E por isso que o
+pipeline completo ganha 6% e a leitura pura ganha 50%. Paralelizar os operadores
+e a proxima peca, e e maior: exige tarefas escrevendo em fatias do mesmo
+destino, que e justamente o que este desenho evitou.
+
+### Nota de metodo
+
+O que o Mojo 1.0 permite, verificado antes de escrever biblioteca:
+`pthread_create` aceita uma `def` comum como rotina de entrada, sem `@export`;
+o parametro precisa de origem fixada (`origin=AnyOrigin[mut=True]`), porque solta
+a funcao vira parametrica e nao tem endereco; o alocador aguenta oito threads
+alocando sem parar; carga aritmetica em oito threads mede 7,75x, entao nao ha
+lock global.
+
 ## [0.21.1] — SELECT ALL
 
 Fecha o outro lado do `DISTINCT`. `ALL` era engolido como nome de coluna e o erro

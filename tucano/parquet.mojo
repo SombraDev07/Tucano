@@ -18,6 +18,7 @@ from std.ffi import external_call
 from std.memory import UnsafePointer
 from .thrift import LeitorThrift, TTipo, CampoThrift, ListaThrift
 from .arquivo import LeitorArquivo
+from .paralelo import threads_para
 from .expr import Expr, ExprNode, Kind
 from .codecs import bits_para_real64, bits_para_real32
 
@@ -1922,6 +1923,99 @@ def esquema_parquet(caminho: String) raises -> Schema:
     return Schema(campos^)
 
 
+def _decodificar_coluna(
+    caminho: String, c: Int, filtro: Expr
+) raises -> Coluna:
+    """Decodifica **uma** coluna do arquivo, do zero ao `Coluna` pronto.
+
+    Abre o proprio descritor e le o proprio rodape em vez de receber os
+    metadados de fora. Custa ~130 us, contra dezenas de milissegundos de
+    decodificacao — e em troca a funcao nao compartilha nada com ninguem, o que
+    e o que permite chama-la de dentro de uma thread sem um unico mutex.
+    """
+    var leitor = LeitorArquivo(caminho)
+    var m = _metadados_do_leitor(leitor, caminho)
+    var grupos = _grupos_a_ler(m, filtro)
+    var esperado = 0
+    for g in grupos:
+        esperado += m.grupos[g].num_linhas
+
+    var e = m.coluna_do_esquema(c)
+    var tipo_tucano = _tipo_tucano(e)
+    var escala = 0
+    if e.convertido == PConvertido.TIMESTAMP_MILLIS:
+        escala = 1
+    elif e.convertido == PConvertido.TIMESTAMP_NANOS:
+        escala = -1
+    var def_max = m.nivel_definicao_max(c)
+
+    var acc = _Acumulador()
+    acc.reservar(esperado, tipo_tucano)
+    var dic = DicionarioBytes()
+    var usou = False
+    for g in grupos:
+        ref grupo = m.grupos[g]
+        if c >= len(grupo.colunas):
+            leitor.fechar()
+            raise Error("parquet: row group com menos colunas que o esquema")
+        ref cm = grupo.colunas[c]
+        var base = cm.inicio()
+        var bytes = leitor.ler(base, cm.tamanho_comprimido)
+        var local = _deslocar(cm, base)
+        _ler_pedaco_coluna(
+            bytes, local, def_max, tipo_tucano, escala, grupo.num_linhas,
+            acc, dic, usou,
+        )
+    leitor.fechar()
+    if acc.linhas() != esperado:
+        raise Error(
+            "parquet: coluna '" + e.nome + "' com " + String(acc.linhas())
+            + " linhas, arquivo declara " + String(esperado)
+            + " apos poda de row group"
+        )
+    return _montar_coluna(e.nome, tipo_tucano, acc^, dic^, usou)
+
+
+struct _TarefaColuna(Movable):
+    """Uma coluna para decodificar, e o lugar onde a resposta volta.
+
+    `saida` e uma lista de zero ou um elemento porque `Coluna` nao tem valor
+    vazio que signifique "ainda nao": lista de um diz "pronta" sem inventar uma
+    coluna de mentira. `erro` guarda o que a thread nao pode lancar.
+    """
+
+    var caminho: String
+    var indice: Int
+    var filtro: Expr
+    var saida: List[Coluna]
+    var erro: String
+
+    def __init__(out self, caminho: String, indice: Int, filtro: Expr):
+        self.caminho = caminho
+        self.indice = indice
+        self.filtro = filtro.copy()
+        self.saida = List[Coluna]()
+        self.erro = ""
+
+
+def _trabalhador_coluna(
+    p: UnsafePointer[_TarefaColuna, origin=AnyOrigin[mut=True]]
+) -> Int:
+    """Rotina de entrada da thread. Nao propaga excecao: guarda e volta.
+
+    A origin fica fixada em `AnyOrigin[mut=True]` porque solta (`_`) tornaria a
+    funcao parametrica, e funcao parametrica nao tem endereco para dar ao
+    `pthread_create`.
+    """
+    try:
+        p[].saida.append(
+            _decodificar_coluna(p[].caminho, p[].indice, p[].filtro)
+        )
+    except e:
+        p[].erro = String(e)
+    return 0
+
+
 def ler_parquet_lote(
     caminho: String,
     colunas: List[String] = List[String](),
@@ -1939,59 +2033,71 @@ def ler_parquet_lote(
     o grupo e lido. O operador de filtro no plano continua rodando — pular
     grupo e so I/O, nao substitui a selecao.
 
+    **Uma coluna por thread** quando ha mais de uma e o arquivo e grande o
+    bastante. Colunas nao dependem umas das outras: cada uma le a sua faixa de
+    bytes com `pread`, que nao usa o cursor do arquivo, e escreve no seu proprio
+    destino. Nao ha mutex no caminho quente porque nao ha estado compartilhado —
+    a decisao de projeto que torna isso verdade e cada tarefa reler o rodape em
+    vez de dividir os metadados.
+
     Devolve lote, nao `Tabela`: assim o leitor pode ser chamado de dentro do
     `coletar()`, depois que o otimizador ja decidiu quais colunas o plano usa.
     """
     var leitor = LeitorArquivo(caminho)
     var m = _metadados_do_leitor(leitor, caminho)
     var querer = indices_das_colunas(m, colunas)
+    leitor.fechar()
     if len(querer) == 0:
-        leitor.fechar()
         raise Error("parquet: nenhuma coluna selecionada")
 
     var grupos = _grupos_a_ler(m, filtro)
-    var esperado = 0
+    var linhas = 0
     for g in grupos:
-        esperado += m.grupos[g].num_linhas
+        linhas += m.grupos[g].num_linhas
+
+    if threads_para(len(querer), linhas) <= 1:
+        var saida = List[Coluna]()
+        for c in querer:
+            saida.append(_decodificar_coluna(caminho, c, filtro))
+        return saida^
+
+    var tarefas = List[_TarefaColuna]()
+    for c in querer:
+        tarefas.append(_TarefaColuna(caminho, c, filtro))
+
+    var n = len(tarefas)
+    var tids = List[Int]()
+    tids.resize(n, 0)
+    var criadas = 0
+    for i in range(n):
+        var rc = external_call["pthread_create", Int32](
+            tids.unsafe_ptr().unsafe_offset(i), Int(0),
+            _trabalhador_coluna, tarefas.unsafe_ptr().unsafe_offset(i),
+        )
+        if rc != 0:
+            break
+        criadas += 1
+
+    for i in range(criadas):
+        _ = external_call["pthread_join", Int32](tids[i], Int(0))
+
+    # o que nao coube em thread sai aqui, na mesma funcao que a thread chamaria
+    for i in range(criadas, n):
+        tarefas[i].saida.append(
+            _decodificar_coluna(tarefas[i].caminho, tarefas[i].indice, filtro)
+        )
 
     var saida = List[Coluna]()
-    for c in querer:
-        var e = m.coluna_do_esquema(c)
-        var tipo_tucano = _tipo_tucano(e)
-        var escala = 0
-        if e.convertido == PConvertido.TIMESTAMP_MILLIS:
-            escala = 1
-        elif e.convertido == PConvertido.TIMESTAMP_NANOS:
-            escala = -1
-        var def_max = m.nivel_definicao_max(c)
-
-        var acc = _Acumulador()
-        acc.reservar(esperado, tipo_tucano)
-        var dic = DicionarioBytes()
-        var usou = False
-        for g in grupos:
-            ref grupo = m.grupos[g]
-            if c >= len(grupo.colunas):
-                leitor.fechar()
-                raise Error("parquet: row group com menos colunas que o esquema")
-            ref cm = grupo.colunas[c]
-            var base = cm.inicio()
-            var bytes = leitor.ler(base, cm.tamanho_comprimido)
-            var local = _deslocar(cm, base)
-            _ler_pedaco_coluna(
-                bytes, local, def_max, tipo_tucano, escala, grupo.num_linhas,
-                acc, dic, usou,
-            )
-        if acc.linhas() != esperado:
-            leitor.fechar()
+    for i in range(n):
+        if tarefas[i].erro != "":
+            raise Error(tarefas[i].erro)
+        if len(tarefas[i].saida) != 1:
             raise Error(
-                "parquet: coluna '" + e.nome + "' com " + String(acc.linhas())
-                + " linhas, arquivo declara " + String(esperado)
-                + " apos poda de row group"
+                "parquet: a coluna '"
+                + m.coluna_do_esquema(tarefas[i].indice).nome
+                + "' nao voltou da decodificacao"
             )
-        saida.append(_montar_coluna(e.nome, tipo_tucano, acc^, dic^, usou))
-
-    leitor.fechar()
+        saida.append(tarefas[i].saida[0].copy())
     return saida^
 
 

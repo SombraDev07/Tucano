@@ -124,13 +124,13 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M10.13 fechados, leitura .xlsx no M12.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
 | O que falta | Por quê |
 |---|---|
-| **Paralelismo por thread** | Fechado por construção no Mojo 1.0 — a linguagem proíbe o apagamento de origem que um payload de thread exige. É o que ainda separa o Tucano do DuckDB em 16 núcleos. Detalhes no M4. |
+| ~~**Paralelismo por thread**~~ | Feito no M13: leitura usa uma thread por coluna, 105 → 69 ms. Os operadores de execução ainda são de uma thread — é o que separa o Tucano do DuckDB em 16 núcleos. |
 | **Publicação em canal conda** | `recipe.yaml` está pronto; falta um canal (prefix.dev ou equivalente). Decisão de projeto. |
 | **Slab de data em Int32** | Dívida rastreada com gatilho explícito — ver abaixo. |
 
@@ -188,7 +188,8 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Escr
 | SQL `HAVING` + `COUNT(DISTINCT)` | ✅ M10.11 |
 | Leitura `.xlsx` | ✅ M12 |
 | SQL `SELECT DISTINCT` / `SELECT ALL` | ✅ M10.13 |
-| Paralelismo por chunk | ❌ **bloqueado** — fechado por construção no Mojo 1.0 |
+| Paralelismo na leitura (uma thread por coluna) | ✅ M13 |
+| Paralelismo nos operadores de execução | ⏳ próximo — filtro, groupby e junção ainda em uma thread |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
 
@@ -230,6 +231,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M10.10 | Snappy na escrita | crítica | ✅ feito | páginas comprimidas por padrão |
 | M10.11 | SQL HAVING + COUNT(DISTINCT) | crítica | ✅ feito | mesmo `onde` / `distintos` |
 | M12 | Excel (leitura) | alta | ✅ feito | `ler_xlsx`, primeira aba ou pelo nome |
+| M13 | Paralelismo por thread | crítica | ✅ feito | leitura 105 → 69 ms; operadores ainda em uma thread |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
@@ -427,7 +429,7 @@ otimizador do M8.
 
 ---
 
-## M4 — SIMD ✅ (+ Parallel ⛔ bloqueado)
+## M4 — SIMD ✅ (+ Parallel: conclusão errada, ver M13)
 
 A justificativa de usar Mojo: kernels especializados que uma biblioteca com runtime interpretado não pode ter.
 
@@ -474,43 +476,33 @@ ponteiros de objeto, um por vez.
 No M6 a mesma estrutura faz groupby por chave dicionarizada virar **indexação direta de
 array**, sem hash.
 
-### Paralelismo — bloqueado, e agora se sabe por quê
+### Paralelismo — a conclusão de bloqueio estava errada
 
-**O stdlib do Mojo 1.0 não expõe `parallelize`.** `TaskGroup` e `create_task` existem em
-`std.runtime.asyncrt`, mas um `TaskGroup()` destruído sem uso já aborta o processo
-(`destroying a non-available AsyncValue isn't implemented`).
+> **Esta seção ficou errada por vários marcos, e o erro está preservado aqui de
+> propósito.** A conclusão era que paralelismo de dados estava "fechado por
+> construção no Mojo 1.0". Não estava. O conserto e a medição estão no M13.
 
-Com `external_call` funcionando bem em outros pontos (sockets no M7, `pread` no M9), a rota
-óbvia era pthreads direto. **E ela chega surpreendentemente longe:** `pthread_create` aceita
-um ponteiro de função produzido pelo Mojo e devolve 0.
-
-O que fecha a porta é outra coisa, e é uma decisão de linguagem, não uma lacuna de
-biblioteca:
+O que se mediu na época era verdade: o stdlib não expõe `parallelize`, e
+`pthread_create` aceita um ponteiro de função do Mojo e devolve 0. O erro foi na
+inferência a partir do erro seguinte:
 
 ```
 error: struct fields cannot expose AnyOrigin in their type
 ```
 
-Um payload de thread ao estilo C é um `void*` — um ponteiro com a origem apagada. O Mojo 1.0
-**proíbe deliberadamente** guardar um ponteiro de origem apagada num campo de struct, que é
-exatamente o que marshalar parâmetros para uma thread exige. Não há como contrabandear os
-ponteiros para dentro da thread sem furar a regra que existe justamente para impedir isso.
+Daí se concluiu que "marshalar parâmetros para uma thread exige guardar um
+ponteiro de origem apagada num campo de struct". **Não exige.** O ponteiro de
+origem apagada aparece uma vez só, como o **tipo do parâmetro da função
+trabalhadora** — `UnsafePointer[T, origin=AnyOrigin[mut=True]]` — e ali é
+permitido. A struct de tarefa guarda dados comuns: `String`, `Int`, a lista onde
+a resposta volta. Nenhum campo precisa de `AnyOrigin`.
 
-Ou seja: não é falta de esforço nem de primitiva conveniente. **Paralelismo de dados em
-espaço de usuário está fechado por construção no Mojo 1.0**, e a saída tem de vir de uma
-primitiva de primeira classe. É isso que se espera do compilador — e enquanto não vem, a
-suíte comparativa mede exatamente quanto isso custa: de metade a dois terços da distância
-para os engines de referência.
+A lição não é sobre threads. É que **"a linguagem proíbe" é uma afirmação forte,
+e uma mensagem de erro sozinha não a sustenta.** O erro dizia o que não se pode
+pôr num campo de struct; a conclusão foi sobre o que não se pode fazer com
+threads. Entre uma coisa e outra faltou o passo que só se dá tentando.
 
-### Critério de saída
-
-- [x] Kernels SIMD nas ops numéricas críticas
-- [x] Dictionary encoding automático por cardinalidade
-- [x] Kernel de calendário (em Int32, pelo motivo acima)
-- [x] Speedup mensurável contra laço escalar equivalente — tabela acima
-- [x] `avisos()` vazio para extrator de data e texto dicionarizado
-- [x] 60 testes verdes, incluindo equivalência SIMD × escalar
-- [ ] Paralelismo por chunks — **bloqueado**, trilha própria
+- [x] ~~Paralelismo por chunks — **bloqueado**~~ — a conclusão estava errada; ver M13
 - [ ] Estreitar o slab de data para Int32 — adiado para M5
 
 > O slab de data continua Int64. O motivo que fazia isso urgente era o **cálculo**, e esse já
@@ -994,11 +986,9 @@ de volta, e era isso que fazia as colunas de texto custarem 152 dos 230 ms. Fico
 de fora de propósito: mudança de escritor, com risco de formato próprio, não entra
 junto com mudança de leitor. **Feito no M10.6.**
 
-Paralelismo continua fora: `pthread_create` funciona via FFI, mas a regra de
-posse do Mojo (`struct fields cannot expose AnyOrigin in their type`) impede
-carregar as estruturas do Tucano por thread. `fork()` foi testado e funciona,
-com custo de ~9,4 ms por processo em espaço de 320 MB — mas uma biblioteca que
-bifurca processo sem o usuário pedir é surpresa, não recurso.
+Paralelismo ficou fora deste marco. A justificativa registrada aqui na época —
+que a regra de posse do Mojo impediria carregar as estruturas do Tucano por
+thread — **estava errada**, e o conserto veio no M13.
 
 ### Critério de saída
 
@@ -1389,6 +1379,104 @@ compatibilidade tardia, não o caminho do engine.
 
 ---
 
+## M13 — Paralelismo por thread ✅
+
+Registrado como bloqueado desde o M4, com a justificativa de que a linguagem
+proibia. Não proibia. Tudo o que segue foi verificado nesta máquina, no Mojo
+1.0.0 (`ed45d567`), antes de escrever uma linha de biblioteca.
+
+### O que o Mojo permite, medido em vez de suposto
+
+- `pthread_create` aceita uma `def` comum do Mojo como rotina de entrada. Sem
+  `@export`, sem `abi("C")`.
+- O parâmetro precisa ser um ponteiro com a origem **fixada**:
+  `UnsafePointer[T, origin=AnyOrigin[mut=True]]`. Deixá-la solta com `_` torna a
+  função paramétrica, e função paramétrica não tem endereço:
+  *"cannot use parametric function as a runtime closure"*.
+- O alocador aguenta. Oito threads criando `List` e `String` sem parar
+  devolveram todos os resultados corretos.
+- Escala de verdade: carga aritmética idêntica em oito threads mediu **7,75×**.
+  Não há lock global no runtime.
+- `try`/`except` dentro do trabalhador funciona, e é por ali que o erro volta —
+  a rotina de entrada não pode propagar exceção para quem deu `join`.
+
+### Onde o raciocínio antigo errou
+
+O erro `struct fields cannot expose AnyOrigin in their type` é real, e a
+conclusão tirada dele foi que passar dados para uma thread exigiria justamente
+isso. Não exige. A struct de tarefa guarda dados comuns — `String`, `Int`, a
+lista onde a resposta volta. O ponteiro de origem apagada aparece **uma vez**,
+como tipo do parâmetro da função trabalhadora, e ali é permitido.
+
+### Uma coluna por thread
+
+Colunas não dependem umas das outras, então o desenho não precisa de nenhum
+mutex — precisa que **nenhuma tarefa escreva onde outra lê**. Cada tarefa abre
+o próprio descritor, lê o próprio rodapé e escreve no próprio destino. O
+encontro é depois do `join`.
+
+Reler o rodapé por tarefa custa ~130 µs contra dezenas de milissegundos de
+decodificação, e em troca não sobra nada compartilhado para proteger. Foi a
+troca deliberada: 0,3% do tempo por zero estado comum.
+
+`pread` é o que torna isso simples. Ler por faixa não usa o cursor do arquivo,
+então duas threads no mesmo descritor não disputam nada. O Tucano já lia assim
+desde o M9, por causa de memória — o paralelismo veio de graça em cima disso.
+
+### O limiar foi chutado, e o chute estava errado
+
+A primeira versão exigia 50 mil linhas por tarefa para valer uma thread. Número
+inventado. Medindo com o limiar desligado, num Parquet de 4 colunas:
+
+| linhas | sequencial | paralelo | ganho |
+|---|---|---|---|
+| 1.000 | 64 µs | 110 µs | 0,58× |
+| 5.000 | 104 µs | 113 µs | 0,92× |
+| 10.000 | 172 µs | 140 µs | **1,23×** |
+| 25.000 | 392 µs | 256 µs | 1,53× |
+| 100.000 | 1498 µs | 868 µs | 1,73× |
+
+A virada é entre 5 e 10 mil, não em 50 mil — o chute errou por cinco vezes. O
+limiar é 10.000, e o ganho satura perto de 1,7× com 4 colunas, **não 4×**: as
+colunas custam coisas diferentes, e o total é o da mais cara, não a média.
+
+### Resultado
+
+| 5M linhas × 5 colunas, 44 MiB | uma thread | com threads | |
+|---|---|---|---|
+| ler tudo | 105 ms | **69 ms** | 1,5× |
+| ler 2 de 5 colunas | 48 ms | 42 ms | 1,1× |
+| pipeline completo | 117 ms | 110 ms | 1,06× |
+
+Contra o pandas em uma thread, a leitura completa passa de 98 ms para 70 — e o
+pyarrow, que fazia 54, fica ao alcance.
+
+O caso podado ganha pouco porque duas colunas só dão duas threads. O pipeline
+ganha 6% porque a leitura é parte dele e o resto — filtro, groupby, junção —
+continua em uma thread. **Paralelizar os operadores é a próxima peça**, e ela é
+maior: exige que tarefas escrevam em fatias do mesmo destino, que é exatamente o
+que este desenho evitou de propósito.
+
+### `TUCANO_THREADS`
+
+Quem embute o Tucano num servidor que já tem o próprio conjunto de threads
+precisa poder dizer "uma só". A variável de ambiente é o lugar certo: não
+acrescenta parâmetro em toda função de leitura, e é onde quem opera o processo
+já procura esse tipo de ajuste. Valor inválido ou ausente cai nos núcleos do
+sistema.
+
+### Critério de saída
+
+- [x] leitura usa uma thread por coluna acima do limiar medido
+- [x] paralelo e sequencial conferidos **valor a valor**: 25 milhões de valores,
+      zero divergências
+- [x] o caminho de thread é exercitado por teste — as fixtures do resto da suíte
+      ficam abaixo do limiar e não o alcançariam
+- [x] `TUCANO_THREADS` desliga; a suíte passa igual com ela em 1
+- [x] 226 testes verdes, interoperabilidade nos dois formatos
+
+---
+
 ## M11 — GPU [experimental]
 
 Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / Aggregate / Sort estarem maduros na CPU, e só onde o workload justificar.
@@ -1415,7 +1503,7 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **SQL** — SELECT/WHERE/GROUP BY/HAVING/ORDER BY/LIMIT, JOIN (`USING`) e COUNT(DISTINCT), sobre o mesmo planner
 
-**Performance** — SIMD, dictionary encoding (leitura e escrita), streaming, predicate pushdown, benchmarks públicos. Multithreading quando o Mojo 1.0 expuser primitiva.
+**Performance** — SIMD, dictionary encoding (leitura e escrita), streaming, predicate pushdown, benchmarks públicos, leitura multithread.
 
 **Distribuição** — pacote instalável, README, documentação de API
 
@@ -1465,7 +1553,7 @@ tempo, RAM, throughput, **startup**, scaling por cores, I/O
 8. ~~**M6**: groupby e join como operadores~~
 9. ~~Decidir sobre `pyarrow` como dependência **de fixture** para destravar Parquet~~
 10. ~~**Escritor**: emitir texto em `RLE_DICTIONARY`~~ — 245 → 124 MiB; leitura 230 → 62 ms
-11. ~~Reavaliar paralelismo~~ — reavaliado: continua bloqueado (`struct fields cannot expose AnyOrigin`). Entra quando o stdlib expuser primitiva.
+11. ~~Reavaliar paralelismo~~ — reavaliado de novo, e **a conclusão de bloqueio estava errada**: M13
 12. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5
 13. ~~**Próximo com retorno:** estatísticas de row group + predicate pushdown~~ — M10.7
 14. ~~**Próximo com retorno:** `distinct_count` em coluna dicionarizada + reordenação de junção~~ — M10.8

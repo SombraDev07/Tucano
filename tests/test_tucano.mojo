@@ -1,4 +1,7 @@
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.time import perf_counter_ns
+from std.ffi import external_call
+from std.memory import UnsafePointer
 from tucano import (
     Coluna,
     Tabela,
@@ -79,7 +82,13 @@ from tucano.thrift import LeitorThrift
 from tucano.arquivo import LeitorArquivo
 from tucano.flatbuf import ConstrutorFlat, raiz_flat, campo_flat, ler_i32, texto_flat
 from tucano.fluxo import plano_flui, EstadoAgregacao
-from tucano.parquet import VarreduraParquet, grupo_impossivel, n_grupos_possiveis
+from tucano.parquet import (
+    VarreduraParquet,
+    grupo_impossivel,
+    n_grupos_possiveis,
+    ler_parquet_lote,
+)
+from tucano.paralelo import threads_para, nucleos, LINHAS_MINIMAS_POR_TAREFA
 from tucano.otimizador import (
     dobrar_constantes,
     mesclar_filtros,
@@ -3043,6 +3052,101 @@ def test_sql_count_distinct_estrela_erra() raises:
     except e:
         pegou = True
         assert_true("COUNT(DISTINCT *)" in String(e))
+    assert_true(pegou)
+
+
+def test_paralelo_politica() raises:
+    """Uma tarefa nao vira thread; tarefa pequena tambem nao."""
+    assert_true(nucleos() >= 1)
+    # uma coluna so: dividir exigiria duas threads escrevendo no mesmo destino
+    assert_equal(threads_para(1, 1_000_000), 1)
+    assert_equal(threads_para(0, 1_000_000), 1)
+    # trabalho pequeno demais nao paga a criacao da thread
+    assert_equal(threads_para(8, LINHAS_MINIMAS_POR_TAREFA - 1), 1)
+    # com trabalho de sobra, uma thread por tarefa ate o numero de nucleos
+    var t = threads_para(4, 1_000_000)
+    assert_true(t == 4 or t == nucleos())
+    assert_true(threads_para(4096, 1_000_000) <= nucleos())
+
+
+def test_paralelo_le_igual_ao_sequencial() raises:
+    """O caminho de thread tem de dar exatamente o mesmo que o de uma thread so.
+
+    As fixtures do resto da suite tem 3 mil linhas e caem abaixo do limiar, ou
+    seja: sem este teste, o caminho paralelo nao seria exercitado por nada. Foi
+    assim que o Snappy passou verde estando 4x mais lento — regua de correcao
+    nao ve o que nao executa.
+
+    A comparacao e contra a leitura **de uma coluna por vez**, que por ter uma
+    tarefa so cai no caminho sequencial. Os dois lados leem o mesmo arquivo.
+    """
+    var n = LINHAS_MINIMAS_POR_TAREFA + 500
+    var ids = List[Int64](capacity=n)
+    var vals = List[Float64](capacity=n)
+    var aus = List[Bool](capacity=n)
+    var txt = List[String](capacity=n)
+    var txt_aus = List[Bool](capacity=n)
+    for i in range(n):
+        ids.append(Int64(i * 3 - 7))
+        vals.append(Float64(i % 977) * 0.25)
+        aus.append(i % 101 == 0)
+        txt.append("g" + String(i % 37))
+        txt_aus.append(i % 53 == 0)
+
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("id", ids^))
+    cols.append(Coluna.de_reais("valor", vals^, aus^))
+    cols.append(Coluna.de_textos("grupo", txt^, txt_aus^))
+    var caminho = String("tests/fixtures/_saida_paralelo.parquet")
+    para_parquet(Tabela(cols^), caminho, 2_000)
+
+    var juntas = ler_parquet(caminho)
+    assert_equal(juntas.linhas(), n)
+    assert_equal(juntas.colunas(), 3)
+
+    for nome in juntas.nomes():
+        var so = List[String]()
+        so.append(nome)
+        var sozinha = ler_parquet_lote(caminho, so)
+        assert_equal(len(sozinha), 1)
+        ref a = sozinha[0]
+        var b = juntas.pegar(nome)
+        assert_equal(a.tamanho(), b.tamanho())
+        # conta e afirma uma vez: um laco que falha 11 mil vezes nao informa
+        # mais que um que falha uma, e o relatorio fica ilegivel
+        var difs = 0
+        var primeira = -1
+        for i in range(a.tamanho()):
+            var igual = a.eh_ausente(i) == b.eh_ausente(i)
+            if igual and not a.eh_ausente(i):
+                igual = a.texto_em(i) == b.texto_em(i)
+            if not igual:
+                difs += 1
+                if primeira < 0:
+                    primeira = i
+        if difs != 0:
+            raise Error(
+                "coluna '" + nome + "': " + String(difs) + " divergencias entre"
+                + " paralelo e sequencial, a primeira na linha "
+                + String(primeira)
+            )
+
+
+def test_paralelo_erro_de_thread_chega_a_quem_chamou() raises:
+    """A rotina de entrada nao pode lancar — o erro volta pelo lugar dele.
+
+    Sem isso, uma coluna que falha dentro da thread viraria resultado faltando
+    em silencio.
+    """
+    var pegou = False
+    try:
+        var pedidas = List[String]()
+        pedidas.append("nao_existe_essa")
+        pedidas.append("nem_essa")
+        _ = ler_parquet_lote("tests/fixtures/grupos.parquet", pedidas)
+    except e:
+        pegou = True
+        assert_true("nao_existe_essa" in String(e))
     assert_true(pegou)
 
 
