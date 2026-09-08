@@ -120,7 +120,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M10.11 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. O servidor HTTP do painel está estacionado.
+**M0 → M10.11 fechados, leitura .xlsx no M12.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -130,7 +130,7 @@ Falta para o 1.0, e nada disso é questão de escopo:
 | **Publicação em canal conda** | `recipe.yaml` está pronto; falta um canal (prefix.dev ou equivalente). Decisão de projeto. |
 | **Slab de data em Int32** | Dívida rastreada com gatilho explícito — ver abaixo. |
 
-GPU (M11), Excel (M12) e o servidor HTTP do painel (M7) seguem fora do caminho crítico.
+GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Escrita de Excel fica para depois da leitura.
 
 | Peça | Status |
 |------|--------|
@@ -181,6 +181,7 @@ GPU (M11), Excel (M12) e o servidor HTTP do painel (M7) seguem fora do caminho c
 | SQL `JOIN` / `LEFT JOIN` com `USING` | ✅ M10.9 |
 | Escritor emite Snappy | ✅ M10.10 |
 | SQL `HAVING` + `COUNT(DISTINCT)` | ✅ M10.11 |
+| Leitura `.xlsx` | ✅ M12 |
 | Paralelismo por chunk | ❌ **bloqueado** — fechado por construção no Mojo 1.0 |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
@@ -222,8 +223,9 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M10.9 | SQL JOIN | crítica | ✅ feito | `USING` sobre o mesmo `unir` |
 | M10.10 | Snappy na escrita | crítica | ✅ feito | páginas comprimidas por padrão |
 | M10.11 | SQL HAVING + COUNT(DISTINCT) | crítica | ✅ feito | mesmo `onde` / `distintos` |
+| M12 | Excel (leitura) | alta | ✅ feito | `ler_xlsx`, primeira aba ou pelo nome |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
-| M12 | Excel | baixa | não iniciado | compatibilidade tardia |
+| M12b | Excel (escrita) | baixa | não iniciado | compatibilidade tardia |
 
 ```
 M0 Fundação
@@ -262,8 +264,10 @@ M10.10 Snappy na escrita
  ↓
 M10.11 SQL HAVING + COUNT(DISTINCT)
  ↓
+M12 Excel leitura (`.xlsx`)
+ ↓
 Tucano 1.0
-   └── M11 GPU [experimental]   M12 Excel [depois]
+   └── M11 GPU [experimental]   escrita Excel [depois]
        M7 Painel HTTP [estacionado]
 ```
 
@@ -1194,15 +1198,35 @@ e sem `GROUP BY` é recusado. `COUNT(DISTINCT *)` também.
 
 ---
 
+## M12 — Ler .xlsx ✅
+
+Abrir a planilha é o que o analista pede. `.xlsx` é ZIP de XML; o Tucano passa a
+descomprimir DEFLATE cru, achar o membro e montar uma `Tabela`. Uma forma:
+`ler_xlsx(caminho)` é a primeira aba; `planilha="Nome"` escolhe. Cabeçalho na
+primeira linha, como no CSV. Serial de data do Excel vira `data` quando o estilo
+da célula é data.
+
+`.xls` antigo (BIFF) é recusado com a correção. Não há escritor — isso continua
+compatibilidade tardia, não o caminho do engine.
+
+### Critério de saída
+
+- [x] `ler_xlsx` lê a primeira planilha; `planilha=` escolhe a aba
+- [x] tipos inferidos; data pelo estilo; ausente vira NA
+- [x] `.xls` recusado
+- [x] 212 testes verdes
+
+---
+
 ## M11 — GPU [experimental]
 
 Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / Aggregate / Sort estarem maduros na CPU, e só onde o workload justificar.
 
 ---
 
-## M12 — Excel [baixa]
+## Escrita Excel [baixa]
 
-Último. Compatibilidade, não inovação.
+Último. Compatibilidade, não inovação. A leitura já existe; gravar `.xlsx` não é o engine.
 
 ---
 
@@ -1216,7 +1240,7 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **Analytics** — groupby, join, concat, resumo, estatísticas básicas
 
-**I/O** — CSV, Parquet (column pruning + predicate pushdown + distinct_count + Snappy na escrita)
+**I/O** — CSV, Parquet (column pruning + predicate pushdown + distinct_count + Snappy na escrita), leitura `.xlsx`
 
 **SQL** — SELECT/WHERE/GROUP BY/HAVING/ORDER BY/LIMIT, JOIN (`USING`) e COUNT(DISTINCT), sobre o mesmo planner
 
@@ -1224,7 +1248,7 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **Distribuição** — pacote instalável, README, documentação de API
 
-**Fora do 1.0** — Python, Excel, clonagem de API alheia, GPU obrigatória, servidor HTTP / dashboard nativo
+**Fora do 1.0** — Python, escrita Excel, clonagem de API alheia, GPU obrigatória, servidor HTTP / dashboard nativo
 
 ---
 
@@ -1278,4 +1302,5 @@ tempo, RAM, throughput, **startup**, scaling por cores, I/O
 16. Painel HTTP — **fora por ora.** Reavalia quando o Mojo expuser `std.net`.
 17. ~~**Próximo com retorno:** Snappy na escrita~~ — M10.10
 18. ~~**Próximo com retorno:** `HAVING` + `COUNT(DISTINCT)` no SQL~~ — M10.11
-19. **Próximo com retorno:** `SELECT DISTINCT` (`unicos`) — o operador existe; o dialeto ainda não chega
+19. ~~**Próximo com retorno:** abrir `.xlsx`~~ — M12
+20. **Próximo com retorno:** `SELECT DISTINCT` (`unicos`) — o operador existe; o dialeto ainda não chega

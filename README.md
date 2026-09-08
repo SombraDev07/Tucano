@@ -65,8 +65,8 @@ o que for mais conveniente na hora.
 - **SQL sobre o mesmo motor** — `SELECT` vira as mesmas etapas da API fluente e passa pelo
   mesmo otimizador. `JOIN ... USING` é o `unir`; `HAVING` é o `onde` depois de agregar;
   `COUNT(DISTINCT)` é o `distintos`. Não há um segundo interpretador.
-- **Arrow e Parquet nativos** — leitura e escrita, com interoperabilidade verificada contra
-  outra implementação nos dois sentidos.
+- **Excel `.xlsx`** — `ler_xlsx` abre a planilha como `Tabela`. Primeira aba, ou
+  `planilha="Nome"`. Sem `.xls` antigo, sem escrita.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
 
 ## Instalação
@@ -363,6 +363,9 @@ ler_csv("vendas.csv")                       # infere o tipo de cada coluna
 ler_csv_tipado("vendas.csv", meu_schema)    # schema explícito, sem adivinhação
 ler_csv("vendas.csv", nrows=1000, pular=2)  # recorte
 para_csv(tabela, "saida.csv")               # cita o que precisar ser citado
+
+ler_xlsx("vendas.xlsx")                     # primeira planilha
+ler_xlsx("vendas.xlsx", "Cidades")         # aba pelo nome
 ```
 
 Aspas RFC 4180 valem na leitura e na escrita: delimitador e quebra de linha dentro do campo,
@@ -505,9 +508,10 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Execução em fluxo com memória limitada | ✅ |
 | SQL sobre o mesmo planner | ✅ |
 | Arrow IPC: leitura e escrita, interop verificada | ✅ |
+| Excel `.xlsx`: leitura | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-205 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+212 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do

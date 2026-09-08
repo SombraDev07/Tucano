@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.19.0 — M0 → M10.11 fechados; HTTP do painel fora do caminho crítico.
+Versão 0.20.0 — M0 → M10.11 + leitura .xlsx; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -421,6 +421,7 @@ pública.
 | `ler_csv_tipado(caminho, schema, …)` | schema explícito, sem inferência |
 | `LeitorCSV(caminho, …)` | leitura em fatias: `.proximo(n)`, `.fim()`, `.restantes()` |
 | `para_csv(tabela, caminho, delimitador)` | escrita |
+| `ler_xlsx(caminho, planilha, tem_cabecalho)` | primeira aba, ou `planilha="Nome"` |
 
 O caminho é `bytes → scanner → parser tipado → buffers`: nenhuma `String` por célula. Só
 coluna de texto materializa `String`, e no fim.
@@ -436,6 +437,10 @@ correto por construção enquanto mantissa ≤ 2⁵³ e casas ≤ 22; fora disso
 
 `LeitorCSV` limita a **tabela materializada**, não a memória total: o buffer de bytes e as
 fronteiras dos campos ficam inteiros em memória. E/S com memória limitada é M9.
+
+**`.xlsx`**: `ler_xlsx(caminho)` lê a primeira planilha; `planilha="Nome"` escolhe a aba.
+Primeira linha é cabeçalho, como no CSV. Data no serial do Excel vira `data` quando o
+estilo da célula é data. `.xls` antigo (BIFF) é recusado. Não há escritor.
 
 ### Parquet
 
@@ -487,6 +492,7 @@ precisa sobreviver.
 | `tucano.arquivo` / `tucano.fluxo` | **interno** |
 | `tucano.flatbuf` / `tucano.sql` | **interno** |
 | `ler_arrow` / `para_arrow` / `consultar_sql` | estável |
+| `ler_xlsx` | estável — leitura; sem escrita |
 | `ler_parquet` / `para_parquet` / `esquema_parquet` | estável |
 | `ler_csv_tipado` / `LeitorCSV` | estável |
 | `ler_csv` / `para_csv` | assinatura estável, implementação refeita em M5 |

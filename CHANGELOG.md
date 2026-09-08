@@ -3,6 +3,19 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.20.0] — Ler .xlsx
+
+`ler_xlsx(caminho)` devolve a primeira planilha como `Tabela`. `planilha="Nome"`
+escolhe a aba. Primeira linha e cabecalho, como no CSV. Data no formato Excel
+(serial) vira `data` quando o estilo da celula e data. `.xls` antigo e recusado.
+
+Nao ha escritor. Formula nao e recalculada: entra o valor em cache no XML.
+
+### Adicionado
+
+- **`ler_xlsx(caminho, planilha="", tem_cabecalho=True)`**
+- Inflate DEFLATE cru e leitor ZIP, so o que o Office Open XML precisa.
+
 ## [0.19.0] — SQL HAVING e COUNT(DISTINCT)
 
 O dialeto chega no que o executor ja fazia: `HAVING` e o `onde` depois da

@@ -64,6 +64,7 @@ from tucano import (
     Etapa,
     TipoEtapa,
     Consulta,
+    ler_xlsx,
 )
 from tucano.codecs import (
     decodificar_rle,
@@ -73,6 +74,7 @@ from tucano.codecs import (
     comprimir_snappy,
     largura_de_bits,
 )
+from tucano.deflate import inflar
 from tucano.thrift import LeitorThrift
 from tucano.arquivo import LeitorArquivo
 from tucano.flatbuf import ConstrutorFlat, raiz_flat, campo_flat, ler_i32, texto_flat
@@ -3095,6 +3097,95 @@ def test_arrow_alimenta_o_executor() raises:
     assert_equal(r.linhas(), 3)
     assert_equal(r.pegar("cidade").texto_em(0), "SP")
     assert_equal(r.pegar("soma_valor").texto_em(0), "90.625")
+
+
+def _nibble_hex(c: UInt8) raises -> Int:
+    if c >= UInt8(48) and c <= UInt8(57):
+        return Int(c) - 48
+    if c >= UInt8(97) and c <= UInt8(102):
+        return Int(c) - 87
+    raise Error("hex invalido")
+
+
+def _de_hex(s: String) raises -> List[UInt8]:
+    var b = s.as_bytes()
+    var out = List[UInt8]()
+    var i = 0
+    while i + 1 < len(b):
+        out.append(UInt8(_nibble_hex(b[i]) * 16 + _nibble_hex(b[i + 1])))
+        i += 2
+    return out^
+
+
+def test_deflate_hello() raises:
+    var o = inflar(_de_hex("cb48cdc9c95728294d4ecccb0700"))
+    assert_equal(String(from_utf8=Span(o)), "hello tucano")
+
+
+def test_deflate_vazio_e_repeticao() raises:
+    var vazio = inflar(_de_hex("0300"))
+    assert_equal(len(vazio), 0)
+    var as_rep = inflar(_de_hex("4b4c1c1e0000"))
+    assert_equal(len(as_rep), 200)
+    for b in as_rep:
+        assert_equal(Int(b), 97)
+
+
+def test_deflate_bloco_armazenado() raises:
+    """BTYPE=00: o mix incompressivel do zlib cai neste bloco."""
+    var o = inflar(
+        _de_hex(
+            "011401ebfe000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff6369646164653d53500a76616c6f723d31302e35"
+        )
+    )
+    assert_equal(len(o), 276)
+    assert_equal(Int(o[0]), 0)
+    assert_equal(Int(o[255]), 255)
+
+
+def test_xlsx_primeira_planilha() raises:
+    var t = ler_xlsx("tests/fixtures/vendas.xlsx")
+    assert_equal(t.linhas(), 5)
+    assert_equal(t.colunas(), 3)
+    assert_equal(t.dtype_de("data").codigo, DType.DATA)
+    assert_equal(t.pegar("data").texto_em(0), "2024-01-15")
+    assert_equal(t.pegar("cidade").texto_em(0), "SP")
+    assert_equal(t.pegar("valor").texto_em(0), "1200.0")
+    assert_true(t.pegar("valor").eh_ausente(3))
+    assert_equal(t.pegar("cidade").texto_em(3), "BH")
+
+
+def test_xlsx_planilha_por_nome() raises:
+    var t = ler_xlsx("tests/fixtures/vendas.xlsx", "Cidades")
+    assert_equal(t.linhas(), 2)
+    assert_equal(t.colunas(), 4)
+    assert_equal(t.dtype_de("ativo").codigo, DType.LOGICO)
+    assert_equal(t.pegar("nome").texto_em(0), "Ana")
+    assert_equal(t.pegar("ativo").texto_em(0), "True")
+    assert_equal(t.pegar("n").texto_em(1), "2")
+    assert_equal(t.pegar("A&B").texto_em(0), "A&B")
+    assert_equal(t.pegar("A&B").texto_em(1), "  x  ")
+
+
+def test_xlsx_planilha_inexistente_erra() raises:
+    var pegou = False
+    try:
+        _ = ler_xlsx("tests/fixtures/vendas.xlsx", "NaoExiste")
+    except e:
+        pegou = True
+        assert_true("nao existe" in String(e))
+        assert_true("Vendas" in String(e))
+    assert_true(pegou)
+
+
+def test_xlsx_nao_e_planilha_erra() raises:
+    var pegou = False
+    try:
+        _ = ler_xlsx("tests/fixtures/vendas.csv")
+    except e:
+        pegou = True
+        assert_true("Office Open XML" in String(e))
+    assert_true(pegou)
 
 
 def main() raises:
