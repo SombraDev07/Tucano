@@ -2758,6 +2758,83 @@ def test_sql_limite_como_operador() raises:
     assert_true("LIMIT 2" in t.limite(2).descrever())
 
 
+def test_sql_analise_juncao() raises:
+    var c = analisar(
+        "SELECT cidade, estado FROM vendas JOIN cidades USING (cidade)"
+    )
+    assert_true(c.tem_juncao)
+    assert_equal(c.fonte, "vendas")
+    assert_equal(c.fonte_dir, "cidades")
+    assert_equal(c.tipo_juncao, "interno")
+    assert_equal(len(c.chaves_juncao), 1)
+    assert_equal(c.chaves_juncao[0], "cidade")
+
+    var e = analisar(
+        "SELECT * FROM vendas LEFT JOIN cidades USING (cidade)"
+    )
+    assert_equal(e.tipo_juncao, "esquerda")
+
+    var i = analisar(
+        "SELECT * FROM vendas INNER JOIN cidades USING (cidade)"
+    )
+    assert_equal(i.tipo_juncao, "interno")
+
+
+def test_sql_juncao_interna() raises:
+    """JOIN vira o mesmo `unir` da API fluente."""
+    var cat = Catalogo()
+    cat.registrar("vendas", ler_csv("tests/fixtures/vendas.csv"))
+    cat.registrar("cidades", _tabela_cidades())
+    var r = consultar_sql_em(
+        "SELECT cidade, estado FROM vendas JOIN cidades USING (cidade)",
+        cat,
+    )
+    assert_equal(r.linhas(), 4)
+    assert_equal(r.colunas(), 2)
+    var plano = plano_do_sql(
+        "SELECT cidade, estado FROM vendas JOIN cidades USING (cidade)",
+        cat,
+    ).descrever()
+    assert_true("JOIN interno por [cidade]" in plano)
+
+
+def test_sql_juncao_esquerda() raises:
+    var cat = Catalogo()
+    cat.registrar("vendas", ler_csv("tests/fixtures/vendas.csv"))
+    cat.registrar("cidades", _tabela_cidades())
+    var r = consultar_sql_em(
+        "SELECT cidade, estado FROM vendas LEFT JOIN cidades USING (cidade)",
+        cat,
+    )
+    assert_equal(r.linhas(), 5)
+    var viu_bh = False
+    for i in range(r.linhas()):
+        if r.pegar("cidade").texto_em(i) == "BH":
+            viu_bh = True
+            assert_true(r.pegar("estado").eh_ausente(i))
+    assert_true(viu_bh)
+
+
+def test_sql_juncao_on_erra() raises:
+    var pegou = False
+    try:
+        _ = analisar("SELECT * FROM a JOIN b ON cidade")
+    except e:
+        pegou = True
+        assert_true("USING" in String(e))
+    assert_true(pegou)
+
+
+def test_sql_juncao_direita_erra() raises:
+    var pegou = False
+    try:
+        _ = analisar("SELECT * FROM a RIGHT JOIN b USING (cidade)")
+    except e:
+        pegou = True
+        assert_true("LEFT JOIN" in String(e))
+    assert_true(pegou)
+
+
 # ----------------------------------------------------------- M10 Arrow
 
 

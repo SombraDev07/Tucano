@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.16.0 — M0 → M10.8 fechados; leitura e pipeline acima do pandas (paralelismo por thread à parte).
+Versão 0.17.0 — M0 → M10.9 fechados; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -357,6 +357,7 @@ dá para chamar `explicar()` nela.
 |---|---|
 | `SELECT` | colunas, `SUM`/`AVG`/`COUNT`/`MIN`/`MAX`, `AS` |
 | `FROM` | `'arquivo.parquet'`, `'arquivo.csv'`, ou nome num `Catalogo` |
+| `JOIN` / `LEFT JOIN` | `USING (colunas)` — as chaves existem nos dois lados com o mesmo nome. Vira `unir`. |
 | `WHERE` | comparações, `AND`/`OR`/`NOT`, parênteses, literais |
 | `GROUP BY`, `ORDER BY` (`ASC`/`DESC`), `LIMIT` | |
 
@@ -378,7 +379,11 @@ implementação usa em RAM. Tipos cobertos: inteiro, real, lógico, texto, `date
 > A validade do Arrow é **invertida** em relação à do Tucano: lá bit 1 significa presente,
 > aqui o bitmap marca o ausente.
 
-### Painel
+### Painel (protótipo, fora do caminho)
+
+O M7 existe. `json_painel()` e `json_dados()` geram o payload sem subir servidor.
+`servir()` sobe um HTTP sequencial sobre libc — **não é garantia de 1.0**. Sem `std.net`,
+não investimos mais nisso.
 
 ```mojo
 var p = Painel("Vendas", tabela)
@@ -386,18 +391,11 @@ p.kpi("Faturamento", soma("valor"))
 p.grafico("Por cidade", "cidade", soma("valor"), "barra")   # barra, linha, pizza
 p.tabela("Detalhe", ["data", "cidade", "valor"], 50)
 p.filtro("cidade")
-p.servir(8080)
+print(p.json_dados(""))
 ```
 
-**Cada widget guarda uma `Consulta`, não uma `Tabela`.** Mexer num filtro muda o plano e
-reexecuta; o navegador recebe só o resultado agregado, e a página mostra quantos bytes
-trafegaram.
-
-Eixo derivado (mês, ano) sai de `com_coluna` antes do painel — não há uma segunda linguagem
-para o dashboard. O eixo do gráfico sai ordenado.
-
-Servidor sequencial, sem dependência externa no frontend. `json_painel()` e `json_dados()`
-são públicos: dá para gerar o payload sem subir servidor.
+Cada widget guarda uma `Consulta`, não uma `Tabela`. Eixo derivado sai de `com_coluna`
+antes do painel. O eixo do gráfico sai ordenado.
 
 ### Avisos
 
@@ -478,8 +476,8 @@ precisa sobreviver.
 | `tucano.executor` / `tucano.vetor` / `tucano.plano` | **interno**, muda no M6 |
 | `tucano.kernels` | **interno**, contrato de ponteiros pode mudar |
 | `tucano.scanner` / `tucano.thrift` / `tucano.codecs` | **interno** |
-| `tucano.http` / `tucano.painel_web` | **interno** |
-| `Painel` / `tucano.json` | estável |
+| `tucano.http` / `tucano.painel_web` | **interno**, estacionado |
+| `Painel` / `tucano.json` | experimental — `json_*` estável; `servir()` não é 1.0 |
 | `tucano.otimizador` | **interno**, as regras podem mudar |
 | `varredura_parquet` / `explicar` | estável |
 | `coletar_em_fluxo` / `pode_fluir` | estável |

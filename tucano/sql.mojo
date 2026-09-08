@@ -9,6 +9,10 @@ fluente produz, passa pelo mesmo otimizador e pelo mesmo executor:
     GROUP BY cidade
     ORDER BY total DESC
 
+    SELECT cidade, estado
+    FROM vendas
+    JOIN cidades USING (cidade)
+
 vira
 
     SCAN -> FILTER (coluna(valor) > lit(1000)) -> AGGREGATE [cidade] -> [soma(valor)]
@@ -18,8 +22,9 @@ Isso e um teste da arquitetura, nao so um recurso: se o plano nao fosse um valor
 manipulavel, seria preciso um interpretador separado para SQL.
 
 Suportado: `SELECT` com colunas e agregacoes (`SUM`, `AVG`, `COUNT`, `MIN`,
-`MAX`), `AS`, `FROM` (arquivo ou tabela registrada), `WHERE`, `GROUP BY`,
-`ORDER BY` com `ASC`/`DESC`, `LIMIT`. O resto e recusado com a posicao do erro.
+`MAX`), `AS`, `FROM` (arquivo ou tabela registrada), `JOIN` / `LEFT JOIN`
+com `USING (colunas)`, `WHERE`, `GROUP BY`, `ORDER BY` com `ASC`/`DESC`,
+`LIMIT`. O resto e recusado com a posicao do erro.
 """
 
 from std.collections import Dict
@@ -149,6 +154,10 @@ struct ConsultaSQL(Movable):
     var tudo: Bool
     var itens: List[ItemSelecao]
     var fonte: String
+    var tem_juncao: Bool
+    var fonte_dir: String
+    var tipo_juncao: String
+    var chaves_juncao: List[String]
     var tem_onde: Bool
     var onde: Expr
     var agrupar: List[String]
@@ -160,6 +169,10 @@ struct ConsultaSQL(Movable):
         self.tudo = False
         self.itens = List[ItemSelecao]()
         self.fonte = ""
+        self.tem_juncao = False
+        self.fonte_dir = ""
+        self.tipo_juncao = "interno"
+        self.chaves_juncao = List[String]()
         self.tem_onde = False
         self.onde = Expr()
         self.agrupar = List[String]()
@@ -410,6 +423,49 @@ def analisar(texto: String) raises -> ConsultaSQL:
         var erro = a._erro("um caminho entre aspas ou um nome de tabela")
         raise erro^
     c.fonte = a.avancar().texto
+
+    if a.eh_palavra("RIGHT"):
+        var erro = Error(
+            "SQL: juncao a direita nao existe — inverta as tabelas ou use LEFT JOIN"
+            + " na posicao " + String(a.atual().posicao)
+        )
+        raise erro^
+    var tipo_j = String("")
+    if a.aceitar_palavra("LEFT"):
+        _ = a.aceitar_palavra("OUTER")
+        a.consumir_palavra("JOIN")
+        tipo_j = "esquerda"
+    elif a.aceitar_palavra("INNER"):
+        a.consumir_palavra("JOIN")
+        tipo_j = "interno"
+    elif a.aceitar_palavra("JOIN"):
+        tipo_j = "interno"
+
+    if tipo_j != "":
+        var t2 = a.atual()
+        if t2.tipo != TipoToken.TEXTO and t2.tipo != TipoToken.NOME:
+            var erro = a._erro("um caminho entre aspas ou um nome de tabela")
+            raise erro^
+        c.fonte_dir = a.avancar().texto
+        c.tem_juncao = True
+        c.tipo_juncao = tipo_j
+        if a.eh_palavra("ON"):
+            var erro = Error(
+                "SQL: juncao usa USING (coluna), nao ON expressao"
+                + " — as chaves existem nos dois lados com o mesmo nome"
+                + " na posicao " + String(a.atual().posicao)
+            )
+            raise erro^
+        a.consumir_palavra("USING")
+        a.consumir_simbolo("(")
+        while True:
+            c.chaves_juncao.append(a.nome())
+            if not a.aceitar_simbolo(","):
+                break
+        a.consumir_simbolo(")")
+        if len(c.chaves_juncao) == 0:
+            var erro = Error("SQL: USING exige pelo menos uma coluna")
+            raise erro^
 
     if a.aceitar_palavra("WHERE"):
         c.onde = a.expressao()

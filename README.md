@@ -56,15 +56,13 @@ o que for mais conveniente na hora.
 - **Agrupamento e junção como operadores** — não funções soltas. Chave de texto repetida
   agrupa por indexação direta de array, sem hash: 14,7× mais rápido que chave composta.
   Junção interna hasheia o lado de menor custo (NDV ou número de linhas).
-- **Painel embutido** — KPIs, gráficos e filtros servidos pela própria biblioteca. Cada
-  widget guarda uma *consulta*, não uma tabela: o filtro reexecuta e só o agregado atravessa.
 - **Otimizador de consultas** — o filtro sobe no plano, constantes dobram, a coluna que
   ninguém usa não sai do disco, e o row group cujo min/max não casa com o predicado
   também não. `explicar()` mostra o plano antes e depois.
 - **Execução em memória limitada** — agregar não exige ter tudo em RAM. Sobre Parquet, o
   arquivo é lido row group por row group e nunca entra inteiro em memória.
 - **SQL sobre o mesmo motor** — `SELECT` vira as mesmas etapas da API fluente e passa pelo
-  mesmo otimizador. Não há um segundo interpretador.
+  mesmo otimizador. `JOIN ... USING` é o `unir`. Não há um segundo interpretador.
 - **Arrow e Parquet nativos** — leitura e escrita, com interoperabilidade verificada contra
   outra implementação nos dois sentidos.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
@@ -297,7 +295,12 @@ distintos(x) nao combina entre fatias sem guardar todos os valores vistos
 Ordenação e junção precisam do conjunto todo, e `distintos` não combina entre fatias. O
 plano é recusado com essa explicação, não executado pela metade.
 
-## Painel
+## Painel (protótipo, fora do caminho)
+
+O M7 existe: widget guarda uma **consulta**, não uma tabela, e o payload é JSON
+agregado. O servidor HTTP sobre libc **não é o produto** — o Mojo 1.0 não tem
+`std.net`. `json_painel()` / `json_dados()` geram o payload sem subir socket.
+Reavalia quando o stdlib expuser sockets.
 
 ```mojo
 var p = Painel("Vendas", vendas)
@@ -305,24 +308,8 @@ p.kpi("Faturamento", soma("valor"))
 p.grafico("Por cidade", "cidade", soma("valor"), "barra")
 p.tabela("Detalhe", ["data", "cidade", "valor"], 50)
 p.filtro("cidade")
-p.servir(8080)
+print(p.json_dados(""))
 ```
-
-```bash
-pixi run painel
-```
-
-Cada widget guarda uma **consulta**, não uma tabela. Mexer no filtro muda o plano e
-reexecuta no servidor; o navegador recebe o resultado agregado. Um gráfico de doze meses
-recebe doze pontos, mesmo que a fonte tenha milhões de linhas — e o rodapé da página mostra
-quantos bytes de fato atravessaram:
-
-```
-3.000 linhas na fonte · 1.000 após os filtros · 2.331 bytes trafegados
-```
-
-A página é servida pela própria biblioteca, com os gráficos em SVG desenhado à mão. Sem CDN,
-sem biblioteca de terceiros: o painel roda em rede local ou sem rede nenhuma.
 
 ## Semântica
 
@@ -436,8 +423,6 @@ E `pixi run bench-m8`, sobre 500 mil linhas em 5 colunas:
 | agrupar sobre Parquet (lê 2 de 5 colunas) | 288 ms | **152 ms** | **1,90×** |
 | ordenar e filtrar (25k de 500k linhas) | 351 ms | **30 ms** | **11,5×** |
 
-Painel sobre **10 milhões de linhas**: 186 ms com filtro, 336 bytes de payload.
-
 E `pixi run bench-m3` mostra que o executor escala linear — ns/linha praticamente constante
 de 25 mil a 200 mil linhas.
 
@@ -513,14 +498,13 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | I/O tipado: scanner CSV, datahora, leitura em fatias | ✅ |
 | Parquet: leitura, escrita, column pruning, predicate pushdown | ✅ |
 | Agregação, junção, ordenação e verbos de análise | ✅ |
-| Painel: KPI, gráfico, tabela, filtro | ✅ |
 | Otimizador: dobra, fusão, empurrão, poda de colunas | ✅ |
 | Execução em fluxo com memória limitada | ✅ |
 | SQL sobre o mesmo planner | ✅ |
 | Arrow IPC: leitura e escrita, interop verificada | ✅ |
-| Painel de visualização | planejado |
+| Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-189 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+197 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do
@@ -536,7 +520,6 @@ concordam entre si.
 ```bash
 pixi run test      # suíte de testes
 pixi run exemplo   # exemplo executável
-pixi run painel    # painel em http://127.0.0.1:8080
 pixi run bench     # benchmarks de fundação
 pixi run bench-m3  # escala do executor
 pixi run bench-m4  # SIMD contra o laço escalar

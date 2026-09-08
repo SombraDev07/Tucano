@@ -9,7 +9,7 @@ executor.
     t.mostrar()
 """
 
-from .tabela import Tabela, Consulta, varredura_parquet
+from .tabela import Tabela, Consulta, varredura_parquet, ler_parquet
 from .csv import ler_csv
 from .agregacao import Agregacao
 from .sql import ConsultaSQL, ItemSelecao, analisar
@@ -60,15 +60,29 @@ def _termina_com(texto: String, sufixo: String) -> Bool:
     return True
 
 
-def _fonte_do_sql(c: ConsultaSQL, catalogo: Catalogo) raises -> Consulta:
-    if catalogo.tem(c.fonte):
-        return Consulta(catalogo.obter(c.fonte).lote())
-    if _termina_com(c.fonte, ".parquet"):
-        return varredura_parquet(c.fonte)
-    if _termina_com(c.fonte, ".csv"):
-        return Consulta(ler_csv(c.fonte).lote())
+def _consulta_da_fonte(fonte: String, catalogo: Catalogo) raises -> Consulta:
+    if catalogo.tem(fonte):
+        return Consulta(catalogo.obter(fonte).lote())
+    if _termina_com(fonte, ".parquet"):
+        return varredura_parquet(fonte)
+    if _termina_com(fonte, ".csv"):
+        return Consulta(ler_csv(fonte).lote())
     raise Error(
-        "SQL: FROM '" + c.fonte + "' nao e tabela registrada nem arquivo"
+        "SQL: FROM '" + fonte + "' nao e tabela registrada nem arquivo"
+        + " .csv/.parquet"
+    )
+
+
+def _tabela_da_fonte(fonte: String, catalogo: Catalogo) raises -> Tabela:
+    """Lado direito da juncao: `unir` recebe `Tabela`, nao consulta."""
+    if catalogo.tem(fonte):
+        return catalogo.obter(fonte)
+    if _termina_com(fonte, ".parquet"):
+        return ler_parquet(fonte)
+    if _termina_com(fonte, ".csv"):
+        return ler_csv(fonte)
+    raise Error(
+        "SQL: JOIN '" + fonte + "' nao e tabela registrada nem arquivo"
         + " .csv/.parquet"
     )
 
@@ -84,7 +98,14 @@ def _nome_de_saida(item: ItemSelecao) raises -> String:
 def plano_do_sql(texto: String, catalogo: Catalogo) raises -> Consulta:
     """Texto SQL -> `Consulta`, pronta para otimizar e executar."""
     var c = analisar(texto)
-    var q = _fonte_do_sql(c, catalogo)
+    var q = _consulta_da_fonte(c.fonte, catalogo)
+
+    if c.tem_juncao:
+        var dir = _tabela_da_fonte(c.fonte_dir, catalogo)
+        var chaves = List[String]()
+        for k in c.chaves_juncao:
+            chaves.append(k)
+        q = q^.unir(dir, chaves^, c.tipo_juncao)
 
     if c.tem_onde:
         q = q^.onde(c.onde.copy())

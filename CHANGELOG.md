@@ -3,6 +3,24 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.17.0] — SQL JOIN; painel HTTP estacionado
+
+O `SELECT` passa a juntar: `JOIN` / `LEFT JOIN ... USING (colunas)` vira o mesmo
+`unir` da API fluente. `ON` e `RIGHT JOIN` sao recusados com explicacao.
+
+O servidor HTTP do painel sai do caminho critico. Sem `std.net` no Mojo 1.0,
+continuar nisso e escrever servidor em vez de engine. `json_painel()` /
+`json_dados()` continuam gerando o payload sem subir socket.
+
+### Adicionado
+
+- **`JOIN` / `INNER JOIN` / `LEFT JOIN` com `USING`** no dialeto SQL. Uma forma,
+  as mesmas chaves do `unir`.
+
+### Alterado
+
+- **Painel HTTP estacionado.** Fora do 1.0. Reavalia quando o stdlib expuser sockets.
+
 ## [0.16.0] — distinct_count e reordenacao de juncao
 
 O escritor passa a gravar `distinct_count` (campo 4 de `Statistics`) em coluna

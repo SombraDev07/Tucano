@@ -9,16 +9,16 @@ Três objetivos, nesta ordem de dependência:
 
 1. **Biblioteca instalável** — o usuário baixa, importa e analisa. Sem `-I .`, sem clonar repo.
 2. **Análise tabular com verbos familiares** — `onde`, `selecionar`, `agrupar`, `unir`. Reconhecível em 5 minutos.
-3. **Dashboard nativo** — visualização como camada da biblioteca, não como ecossistema separado.
+
+O terceiro objetivo original — **dashboard nativo via HTTP** — está **fora do caminho crítico**. O M7 existe como protótipo (`Painel`, JSON agregado, servidor sequencial sobre libc). Sem `std.net` no Mojo 1.0, continuar nisso é escrever servidor em vez de engine. Reavalia quando o stdlib expuser sockets.
 
 ```
 API (eager na aparência)
   → Expression → Logical Plan → Optimizer → Physical Plan
   → SIMD / Parallel / Streaming → Memory Engine → CPU
-                                                    ↘ Painel (HTTP/JSON)
 ```
 
-Polars, DuckDB e DataFusion já cobrem DataFrame/SQL moderno. A oportunidade do Tucano é outra: **aproveitar Mojo 1.x (estável, Apache 2.0) do buffer ao kernel**, com especialização em compile-time, ownership explícito e um caminho curto do dado ao painel.
+Polars, DuckDB e DataFusion já cobrem DataFrame/SQL moderno. A oportunidade do Tucano é outra: **aproveitar Mojo 1.x (estável, Apache 2.0) do buffer ao kernel**, com especialização em compile-time, ownership explícito e um caminho curto do dado ao resultado.
 
 ---
 
@@ -87,9 +87,9 @@ Toda mensagem de erro diz o que aconteceu, onde, e qual é a correção prováve
 
 Sem `std.python`, sem biblioteca de dados em Python no runtime.
 
-### 7. Frontend não é Mojo
+### 7. Frontend não é Mojo — estacionado
 
-Mojo faz dado e execução. Navegador faz gráfico, layout e interação. O painel troca **JSON agregado**, nunca o dataset.
+O M7 deixou o gráfico no navegador e o motor em Mojo, trocando JSON agregado. Isso continua válido como protótipo. **O servidor HTTP sobre libc não é o produto**: não há `std.net`, e o caminho crítico é o engine, não o socket. `json_painel()` / `json_dados()` continuam gerando o payload sem subir servidor.
 
 ---
 
@@ -100,7 +100,7 @@ Mojo faz dado e execução. Navegador faz gráfico, layout e interação. O pain
 São três provas, em ordem de honestidade:
 
 1. **Usabilidade** — um analista acostumado a bibliotecas tabulares resolve uma tarefa real (ler, filtrar, derivar coluna, agrupar, exportar) sem consultar documentação além do README.
-2. **Query interativa** — filtro de painel sobre 10M linhas responde em tempo de interação. Aqui pesam startup e replanejamento, onde binário AOT bate stack Python de verdade.
+2. **Query interativa** — filtro + agregação sobre 10M linhas responde em tempo de interação. Aqui pesam startup e replanejamento, onde binário AOT bate stack Python de verdade. (O filtro de painel via HTTP mediu isso no M7; a prova agora é o mesmo plano sem o servidor.)
 3. **Escala** — suíte pública contra os engines tabulares de referência. **Feita e medida** — números abaixo.
 
 ### Onde o Tucano está (medido)
@@ -120,7 +120,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M10.8 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby. O escritor emite min/max e `distinct_count` por row group; o leitor pula o grupo que o predicado não pode satisfazer; o join interno hasheia o lado mais barato.
+**M0 → M10.9 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby. SQL junta com `USING`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -130,7 +130,7 @@ Falta para o 1.0, e nada disso é questão de escopo:
 | **Publicação em canal conda** | `recipe.yaml` está pronto; falta um canal (prefix.dev ou equivalente). Decisão de projeto. |
 | **Slab de data em Int32** | Dívida rastreada com gatilho explícito — ver abaixo. |
 
-GPU (M11) e Excel (M12) seguem fora do caminho crítico, como sempre estiveram.
+GPU (M11), Excel (M12) e o servidor HTTP do painel (M7) seguem fora do caminho crítico.
 
 | Peça | Status |
 |------|--------|
@@ -162,8 +162,8 @@ GPU (M11) e Excel (M12) seguem fora do caminho crítico, como sempre estiveram.
 | `unir` (hash join interno e à esquerda) | ✅ M6 |
 | `ordenar` / `concatenar` / `resumo` / `contar_valores` | ✅ M6 |
 | `remover_na` / `preencher_na` / `unicos` | ✅ M6 |
-| Painel: KPI, gráfico, tabela, filtro | ✅ M7 |
-| Servidor HTTP sobre libc (`external_call`) | ✅ M7 |
+| Painel: KPI, gráfico, tabela, filtro | ⏸ M7 — protótipo, fora do caminho |
+| Servidor HTTP sobre libc (`external_call`) | ⏸ M7 — estacionado; não há `std.net` |
 | Otimizador: dobra, fusão, empurrão, poda | ✅ M8 |
 | Varredura Parquet adiada + pushdown de colunas | ✅ M8 — 1,9× |
 | Leitura por faixa (`pread`) e por row group | ✅ M9 |
@@ -178,6 +178,7 @@ GPU (M11) e Excel (M12) seguem fora do caminho crítico, como sempre estiveram.
 | Mais rápido que pandas (leitura 1,7×, pipeline 2,4×) | ✅ M10.6 |
 | Estatísticas min/max no row group + predicate pushdown | ✅ M10.7 |
 | `distinct_count` + hash join no lado mais barato | ✅ M10.8 |
+| SQL `JOIN` / `LEFT JOIN` com `USING` | ✅ M10.9 |
 | Paralelismo por chunk | ❌ **bloqueado** — fechado por construção no Mojo 1.0 |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
@@ -208,7 +209,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M4 | SIMD (+ Parallel) | crítica | ✅ SIMD / ⛔ paralelo | kernels vetorizados |
 | M5 | I/O + Streaming | crítica | ✅ feito | scanner CSV, Parquet, fatias, datahora |
 | M6 | Aggregation + Join | crítica | ✅ feito | group/join como operadores |
-| M7 | Painel | alta | ✅ feito | dashboard nativo |
+| M7 | Painel (HTTP) | baixa | ⏸ estacionado | protótipo; sem `std.net` não é produto |
 | M8 | Optimizer | crítica | ✅ feito | pushdown + folding + reorder |
 | M9 | Out-of-Core | alta | ✅ feito | datasets > RAM |
 | M10 | Interop | alta | ✅ feito | Arrow (sem Python) + SQL |
@@ -216,6 +217,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M10.6 | Passar o pandas | crítica | ✅ feito | leitura 1,7×, pipeline 2,4× |
 | M10.7 | Predicate pushdown | crítica | ✅ feito | min/max no rodapé; pula row group |
 | M10.8 | distinct_count + join | crítica | ✅ feito | NDV no rodapé; hash no lado barato |
+| M10.9 | SQL JOIN | crítica | ✅ feito | `USING` sobre o mesmo `unir` |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
 | M12 | Excel | baixa | não iniciado | compatibilidade tardia |
 
@@ -234,11 +236,9 @@ M4 SIMD + Parallel + dictionary encoding
  ↓
 M5 I/O (scanner CSV + Parquet)
  ↓
-M6 Aggregation + Join      ← a partir daqui o painel faz sentido
+M6 Aggregation + Join
  ↓
-M7 Painel
- ↓
-M8 Optimizer               ← torna o painel interativo em escala
+M8 Optimizer
  ↓
 M9 Out-of-Core
  ↓
@@ -252,11 +252,14 @@ M10.7 Predicate pushdown
  ↓
 M10.8 distinct_count + reordenação de junção
  ↓
+M10.9 SQL JOIN
+ ↓
 Tucano 1.0
    └── M11 GPU [experimental]   M12 Excel [depois]
+       M7 Painel HTTP [estacionado]
 ```
 
-**Por que o Painel antes do Optimizer:** o painel é o primeiro artefato que um usuário vê e entende sem ler benchmark. Ele fecha o objetivo 3 e valida os objetivos 1 e 2 de uma vez. O Optimizer vem logo atrás porque é ele que transforma "painel que funciona" em "painel que responde em 10M linhas".
+**Por que o Optimizer veio depois da agregação:** é ele que transforma "plano que funciona" em "plano que não lê coluna inútil nem ordena o que vai embora". O painel HTTP (M7) ficou no meio da linha do tempo porque existia; **não é mais o caminho** — ver M7.
 
 ---
 
@@ -648,7 +651,13 @@ O `resumo()` não inventa estatística: coluna não numérica traz contagens, e 
 
 ---
 
-## M7 — Painel ✅
+## M7 — Painel ⏸
+
+**Fora do caminho crítico.** O marco está fechado como protótipo: o widget guarda uma
+`Consulta`, o payload é JSON agregado, e isso continua verdadeiro. O servidor HTTP
+sobre libc **não** é o produto. Sem `std.net`, investir mais aqui é escrever servidor em
+vez de engine. O código permanece; `json_painel()` / `json_dados()` geram o payload sem
+subir socket. Reavalia quando o stdlib expuser sockets.
 
 O dashboard como camada da biblioteca, não como ecossistema à parte.
 
@@ -850,7 +859,7 @@ REGRAS     poda de colunas (3 -> 2)
 
 **Isso é um teste da arquitetura, não só um recurso.** Se o plano não fosse um valor manipulável, SQL exigiria um interpretador separado. Como é, o SQL ganha de graça a poda de colunas, o empurrão de filtro e a varredura adiada de Parquet.
 
-Suportado: `SELECT` com colunas e agregações (`SUM`, `AVG`, `COUNT`, `MIN`, `MAX`) e `AS`; `FROM` arquivo ou tabela registrada num `Catalogo`; `WHERE` com comparações, `AND`/`OR`/`NOT` e parênteses; `GROUP BY`; `ORDER BY` com `ASC`/`DESC`; `LIMIT`. Erros apontam a posição no texto.
+Suportado: `SELECT` com colunas e agregações (`SUM`, `AVG`, `COUNT`, `MIN`, `MAX`) e `AS`; `FROM` arquivo ou tabela registrada num `Catalogo`; `JOIN` / `LEFT JOIN` com `USING (colunas)`; `WHERE` com comparações, `AND`/`OR`/`NOT` e parênteses; `GROUP BY`; `ORDER BY` com `ASC`/`DESC`; `LIMIT`. Erros apontam a posição no texto.
 
 Dois cuidados de semântica: `ORDER BY` por apelido ordena depois da projeção, e por coluna descartada ordena antes — as duas formas funcionam sem o usuário saber a ordem interna das etapas. E coluna no `SELECT` fora do `GROUP BY` é recusada com a explicação, em vez de escolher um valor arbitrário do grupo.
 
@@ -1101,6 +1110,35 @@ esquerda-depois-direita.
 
 ---
 
+## M10.9 — SQL JOIN ✅
+
+O dialeto SQL do M10 cobria filtro, agregação e ordenação. `unir` já era operador
+de primeira classe; o `SELECT` não juntava. Uma forma só, a mesma do `unir`: chaves
+com o mesmo nome nos dois lados.
+
+```sql
+SELECT cidade, estado
+FROM vendas
+JOIN cidades USING (cidade)
+
+SELECT cidade, estado
+FROM vendas
+LEFT JOIN cidades USING (cidade)
+```
+
+`ON expressao` é recusado: o Tucano não junta por predicado arbitrário. `RIGHT JOIN`
+também — inverta as tabelas ou use `LEFT JOIN`. O plano é o mesmo `JOIN interno por
+[cidade]` da API fluente, então o hash no lado mais barato (M10.8) vale aqui também.
+
+### Critério de saída
+
+- [x] `JOIN` / `INNER JOIN` / `LEFT JOIN` com `USING (colunas)`
+- [x] vira `unir`; o plano mostra a junção
+- [x] `ON` e `RIGHT JOIN` recusados com explicação
+- [x] 197 testes verdes
+
+---
+
 ## M11 — GPU [experimental]
 
 Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / Aggregate / Sort estarem maduros na CPU, e só onde o workload justificar.
@@ -1125,13 +1163,13 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **I/O** — CSV, Parquet (column pruning + predicate pushdown + distinct_count)
 
-**Painel** — KPI, gráfico, tabela, filtro interativo
+**SQL** — SELECT/WHERE/GROUP BY/ORDER BY/LIMIT e JOIN (`USING`), sobre o mesmo planner
 
 **Performance** — SIMD, dictionary encoding (leitura e escrita), streaming, predicate pushdown, benchmarks públicos. Multithreading quando o Mojo 1.0 expuser primitiva.
 
 **Distribuição** — pacote instalável, README, documentação de API
 
-**Fora do 1.0** — Python, Excel, clonagem de API alheia, GPU obrigatória
+**Fora do 1.0** — Python, Excel, clonagem de API alheia, GPU obrigatória, servidor HTTP / dashboard nativo
 
 ---
 
@@ -1151,12 +1189,6 @@ def main() raises:
 
     resumo.mostrar()
     resumo.para_parquet("saida.parquet")
-
-    var painel = vendas.painel("Vendas")
-    painel.kpi("Faturamento", coluna("valor").soma())
-    painel.grafico(tipo="linha", x="mes", y=soma("valor"))
-    painel.filtro("cidade")
-    painel.abrir()
 ```
 
 Por baixo: Expression → Logical Plan → Optimizer → Physical Plan → SIMD/Parallel/Streaming → Memory Engine.
@@ -1168,8 +1200,6 @@ Por baixo: Expression → Logical Plan → Optimizer → Physical Plan → SIMD/
 Tucano × Polars × DuckDB × a biblioteca tabular mais usada em Python, de 1M a 1B linhas:
 
 tempo, RAM, throughput, **startup**, scaling por cores, I/O
-
-E, a partir do M7, a métrica que é nossa: **latência de filtro de painel** e **bytes de payload por interação**.
 
 ---
 
@@ -1189,3 +1219,5 @@ E, a partir do M7, a métrica que é nossa: **latência de filtro de painel** e 
 12. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5
 13. ~~**Próximo com retorno:** estatísticas de row group + predicate pushdown~~ — M10.7
 14. ~~**Próximo com retorno:** `distinct_count` em coluna dicionarizada + reordenação de junção~~ — M10.8
+15. ~~**Próximo com retorno:** `JOIN` no SQL (`USING`)~~ — M10.9
+16. Painel HTTP — **fora por ora.** Reavalia quando o Mojo expuser `std.net`.
