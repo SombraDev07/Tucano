@@ -3,6 +3,54 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.4.0] — M3: Execution Engine
+
+### Adicionado
+
+- **Executor coluna-a-coluna** (`tucano/executor.mojo`). Cada coluna referenciada e
+  lida **uma vez** para um `Vetor` contiguo (`ref` sobre o lote, sem copia) e todo o
+  resto opera sobre esse vetor.
+- **Operadores fisicos sobre lotes**: `op_filtro` (FilterExec), `op_projecao`
+  (ProjectionExec), `op_com_coluna` (ExpressionExec). O executor recebe e devolve
+  `List[Coluna]` — **nao conhece `Tabela`**. E a separacao logical/physical de verdade,
+  e a forma que o M6 precisa para join e groupby.
+- **`Vetor`** (`tucano/vetor.mojo`): slab contiguo + mascara de ausentes. O laco interno
+  ja tem a forma que o M4 vetoriza — tipo da operacao decidido fora do laco.
+- **Plano logico e fisico** (`tucano/plano.mojo`): `Etapa` / `TipoEtapa`,
+  `descrever_logico`, `descrever_fisico` (indentado, de baixo para cima).
+- **`Tabela.onde()` / `.com_coluna()` / `.consultar()`** devolvem `Consulta`. Ergonomia
+  eager, execucao lazy.
+- **Materializacao automatica**: `mostrar`, `primeiras`, `linhas`, `colunas`, `shape`,
+  `schema`, `nomes`, `pegar`, `soma`, `media` executam o plano sozinhos.
+- **`com_coluna`** — o `df['x'] = ...` do pandas, com inferencia de tipo derivado sem
+  coercao silenciosa. Substitui a coluna se o nome ja existir.
+- **Propagacao de esquema** (`esquema_apos`): o planejador raciocina sobre nome+tipo, nao
+  sobre dados. Da `Consulta.esquema_previsto()` — tipos do resultado **sem executar** — e
+  e a base do otimizador do M8.
+- **`avisos()`**: lista as operacoes sem kernel vetorizado (comparacao de texto, extrator
+  de data). O pandas nunca avisa que voce caiu do caminho rapido.
+- Comparacao lexicografica entre textos (`.gt`, `.lt`, ...), alem de igualdade.
+- `bench/bench_m3.mojo` + tarefa `pixi run bench-m3`: mede ns/linha em 25k..200k.
+
+### Corrigido
+
+- **Custo quadratico do M2.** A avaliacao era linha a linha e cada referencia a coluna
+  chamava `Tabela.pegar()`, que fazia busca linear e devolvia copia profunda do slab. Em
+  200k linhas, um filtro fazia centenas de milhares de copias de colunas de 200k
+  elementos. Agora e linear: `bench_m3` mede ns/linha praticamente constante em 8x de
+  escala.
+- Comparacao entre texto e numero levanta erro em vez de comparar como numero.
+
+### Notas
+
+- `Tabela` e `Consulta` vivem no mesmo modulo por serem mutuamente recursivas — o Mojo
+  aceita recursao mutua dentro de um modulo, mas nao ciclo entre modulos.
+- `tucano.consulta` virou reexport; `Consulta` mora em `tucano.tabela`.
+- `tucano.executor`, `tucano.vetor` e `tucano.plano` sao **internos**: mudam no M4/M6.
+- Armadilha de ambiente: um `tucano.mojoc` precompilado obsoleto no diretorio do arquivo
+  compilado e preferido ao fonte, e metodos novos somem com `value has no attribute` sem
+  apontar a causa.
+
 ## [0.3.0] — M2.5: biblioteca instalavel + correcoes de fundacao
 
 ### Adicionado

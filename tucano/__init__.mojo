@@ -32,4 +32,7 @@ from .expr import (
     mes,
     dia,
 )
-from .consulta import Consulta, Tri, lazy
+from .vetor import Vetor
+from .plano import Etapa, TipoEtapa
+from .executor import Tri
+from .consulta import Consulta, lazy

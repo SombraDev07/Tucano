@@ -24,6 +24,18 @@ from tucano import (
     eh_data_iso,
     data_para_texto,
     sugerir_nome,
+    Vetor,
+    Etapa,
+    TipoEtapa,
+    Consulta,
+)
+from tucano.executor import (
+    extrair_coluna,
+    avaliar,
+    avaliar_tri,
+    tipo_resultado,
+    esquema_do_lote,
+    esquema_apos,
 )
 
 
@@ -392,6 +404,182 @@ def test_data_redondo_no_csv() raises:
     assert_equal(de_novo.pegar("data").tipo, Tipo.DATA)
     assert_equal(de_novo.pegar("data").texto_em(3), "2023-12-01")
     assert_equal(de_novo.pegar("valor").contar_ausentes(), 1)
+
+
+# ------------------------------------------------------------------ M3
+
+
+def test_m3_extrai_coluna_uma_vez() raises:
+    """O executor le a coluna para um Vetor contiguo, nao por linha."""
+    var t = ler_csv("tests/fixtures/pessoas.csv")
+    var v = extrair_coluna(t.lote(), "salario")
+    assert_equal(v.tamanho(), 4)
+    assert_false(v.eh_texto)
+    assert_equal(v.reais[0], 2000.0)
+    assert_true(v.na[1])
+    assert_equal(v.contar_ausentes(), 1)
+
+    var texto = extrair_coluna(t.lote(), "cidade")
+    assert_true(texto.eh_texto)
+    assert_equal(texto.textos[0], "SP")
+
+
+def test_m3_avaliar_expressao_vetorizada() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var v = avaliar(coluna("valor").vezes(lit(2.0)), t.lote())
+    assert_equal(v.tamanho(), 5)
+    assert_equal(v.reais[0], 2400.0)
+    assert_true(v.na[3])  # valor NA propaga
+
+
+def test_m3_mascara_tri_vetorizada() raises:
+    var t = ler_csv("tests/fixtures/pessoas.csv")
+    var m = avaliar_tri(coluna("salario").gt(lit(1000.0)), t.lote())
+    assert_equal(len(m), 4)
+    assert_equal(m[0], Tri.VERDADEIRO)
+    assert_equal(m[1], Tri.DESCONHECIDO)
+    assert_equal(m[2], Tri.VERDADEIRO)
+
+
+def test_m3_tabela_onde_devolve_consulta_lazy() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var q = t.onde(coluna("valor").gt(lit(1000.0)))
+    assert_equal(q.etapas_do_plano(), 1)
+    # materializacao automatica
+    assert_equal(q.linhas(), 3)
+    assert_equal(q.pegar("cidade").texto_em(0), "SP")
+
+
+def test_m3_com_coluna_derivada() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var out = t.com_coluna("dobro", coluna("valor").vezes(lit(2.0))).coletar()
+    assert_equal(out.colunas(), 4)
+    assert_equal(out.pegar("dobro").texto_em(0), "2400.0")
+    assert_true(out.pegar("dobro").eh_ausente(3))
+    assert_equal(t.colunas(), 3)  # a original nao muda
+
+
+def test_m3_com_coluna_substitui() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var out = t.com_coluna("valor", coluna("valor").mais(lit(1.0))).coletar()
+    assert_equal(out.colunas(), 3)
+    assert_equal(out.pegar("valor").texto_em(0), "1201.0")
+
+
+def test_m3_tipo_derivado_sem_coercao() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var esq = esquema_do_lote(t.lote())
+    # o no 0 da arena e o filho: coluna("data") continua sendo data
+    var extrai = mes(coluna("data"))
+    assert_equal(tipo_resultado(extrai, 0, esq), DType.DATA)
+    assert_equal(tipo_resultado(extrai, extrai.root, esq), DType.INTEIRO)
+    # inteiro + inteiro = inteiro; qualquer real = real; divisao sempre real
+    var soma_i = mes(coluna("data")).mais(lit_int(1))
+    assert_equal(tipo_resultado(soma_i, soma_i.root, esq), DType.INTEIRO)
+    var prod_r = coluna("valor").vezes(lit(2.0))
+    assert_equal(tipo_resultado(prod_r, prod_r.root, esq), DType.REAL)
+    var div = mes(coluna("data")).sobre(lit_int(2))
+    assert_equal(tipo_resultado(div, div.root, esq), DType.REAL)
+
+
+def test_m3_esquema_previsto_sem_executar() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var q = (
+        t.com_coluna("dobro", coluna("valor").vezes(lit(2.0)))
+        .com_coluna("m", mes(coluna("data")))
+        .selecionar(["cidade", "dobro", "m"])
+    )
+    var esq = q.esquema_previsto()
+    assert_equal(esq.tamanho(), 3)
+    assert_equal(esq.dtype_de("cidade").codigo, DType.TEXTO)
+    assert_equal(esq.dtype_de("dobro").codigo, DType.REAL)
+    assert_equal(esq.dtype_de("m").codigo, DType.INTEIRO)
+    # e bate com o que a execucao produz
+    assert_equal(q.schema().nomes(), esq.nomes())
+
+
+def test_m3_plano_com_todas_as_etapas() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var q = (
+        t.com_coluna("m", mes(coluna("data")))
+        .onde(coluna("m").eq(lit_int(2)))
+        .selecionar(["cidade", "m"])
+    )
+    var logico = q.descrever()
+    assert_true("WITH_COLUMN m = mes(coluna(data))" in logico)
+    assert_true("FILTER (coluna(m) == lit(2))" in logico)
+    assert_true("PROJECT [cidade, m]" in logico)
+
+    var fisico = q.descrever_fisico()
+    assert_true("ScanExec" in fisico)
+    assert_true("ExpressionExec" in fisico)
+    assert_true("FilterExec" in fisico)
+    assert_true("ProjectionExec" in fisico)
+
+    # filtro sobre coluna criada em etapa anterior
+    assert_equal(q.linhas(), 2)
+
+
+def test_m3_avisos_de_caminho_escalar() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var com_data = t.onde(mes(coluna("data")).eq(lit_int(2)))
+    var notas = com_data.avisos()
+    assert_true(len(notas) > 0)
+    assert_true("escalar" in notas[0])
+
+    var com_texto = t.onde(coluna("cidade").eq(lit_texto("SP")))
+    var notas_texto = com_texto.avisos()
+    assert_true(len(notas_texto) > 0)
+    assert_true("dictionary encoding" in notas_texto[0])
+
+    var so_numero = t.onde(coluna("valor").gt(lit(1000.0)))
+    assert_equal(len(so_numero.avisos()), 0)
+
+
+def test_m3_sem_coercao_entre_texto_e_numero() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var pegou = False
+    try:
+        _ = t.onde(coluna("cidade").eq(lit(1.0))).coletar()
+    except e:
+        pegou = True
+        assert_true("texto e numero" in String(e))
+    assert_true(pegou)
+
+
+def test_m3_ordem_lexicografica_em_texto() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var out = t.onde(coluna("cidade").ge(lit_texto("RJ"))).coletar()
+    assert_equal(out.linhas(), 4)  # SP, RJ, SP, SP
+
+
+def test_m3_esquema_apos_propaga() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var etapas = List[Etapa]()
+    etapas.append(Etapa.com_coluna("m", mes(coluna("data"))))
+    etapas.append(Etapa.projecao(["cidade", "m"]))
+    var esq = esquema_apos(esquema_do_lote(t.lote()), etapas)
+    assert_equal(len(esq), 2)
+    assert_equal(esq[1].nome, "m")
+    assert_equal(esq[1].dtype.codigo, DType.INTEIRO)
+
+
+def test_m3_vetor_constante() raises:
+    var v = Vetor.constante_numerica(3, 7.0)
+    assert_equal(v.tamanho(), 3)
+    assert_equal(v.reais[2], 7.0)
+    assert_equal(v.contar_ausentes(), 0)
+    var s = Vetor.constante_textual(2, "x")
+    assert_true(s.eh_texto)
+    assert_equal(s.textos[1], "x")
+
+
+def test_m3_lazy_continua_funcionando() raises:
+    """Compatibilidade: lazy() e o caminho antigo seguem validos."""
+    var t = ler_csv("tests/fixtures/pessoas.csv")
+    var q = lazy(t).onde(coluna("idade").gt(lit(25.0))).selecionar(["cidade"])
+    assert_equal(q.coletar().linhas(), 2)
+    assert_equal(q.etapas_do_plano(), 2)
 
 
 def main() raises:

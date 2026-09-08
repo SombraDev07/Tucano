@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia de pandas e semântica de banco de dados.
 
-Versão 0.3.0 — M0, M1, M2 e M2.5 fechados.
+Versão 0.4.0 — M0, M1, M2, M2.5 e M3 fechados.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -84,7 +84,9 @@ Sem `std.python`, sem pandas, sem pyarrow como runtime.
 | `Coluna` | Vetor nomeado tipado sobre slabs + validity |
 | `Tabela` | Conjunto de colunas alinhadas |
 | `Expr` | Nó de expressão (arena) |
-| `Consulta` | Pipeline lazy sobre uma `Tabela` |
+| `Consulta` | Pipeline lazy: plano de etapas + materialização |
+| `Etapa` / `TipoEtapa` | Uma etapa do plano lógico |
+| `Vetor` | Coluna intermediária do executor |
 | `Tri` | Verdadeiro / Falso / Desconhecido |
 | `DataCivil` | Ano/mês/dia do calendário |
 
@@ -126,6 +128,24 @@ Isso elimina por construção a classe de bugs de `SettingWithCopyWarning`.
 
 ---
 
+## Camadas
+
+```
+coluna · dtype · buffer · datas · erros · schema · expr     base
+                        ↓
+              vetor · plano                                 tipos do M3
+                        ↓
+              executor     opera sobre LOTES (List[Coluna])  camada física
+                        ↓
+              tabela       Tabela + Consulta                 API do usuário
+```
+
+O **executor não conhece `Tabela`**. Ele recebe e devolve lotes de `Coluna`. Essa é a
+separação logical/physical: a camada física não depende do tipo do usuário.
+
+O **planejador raciocina sobre esquema**, não sobre dados: tipos e avisos são calculados
+sem executar.
+
 ## API da `Tabela`
 
 | Operação | Método |
@@ -138,6 +158,10 @@ Isso elimina por construção a classe de bugs de `SettingWithCopyWarning`.
 | tipo / validade sem cópia | `dtype_de(nome)` / `eh_ausente(nome, i)` |
 | agregar | `soma(nome)` / `media(nome)` |
 | exibir | `primeiras(n)` / `mostrar()` |
+| filtrar (lazy) | `onde(expr)` → `Consulta` |
+| coluna derivada (lazy) | `com_coluna(nome, expr)` → `Consulta` |
+| entrar no plano | `consultar()` → `Consulta` |
+| lote para o executor | `lote()` → `List[Coluna]` |
 
 `Coluna` expõe `soma`, `media`, `minimo`, `maximo`, `contar_ausentes`, `contar_validos`,
 `eh_ausente(i)`, `texto_em(i)`, `dias_em(i)` (só em coluna de data).
@@ -151,17 +175,29 @@ Todas as operações devolvem uma nova `Tabela`; nenhuma muta a original.
 
 ---
 
-## Expressões e consulta lazy
+## Expressões e consulta
+
+**Ergonomia eager, execução lazy.** `onde()` devolve um plano; a materialização é
+automática ao consumir um valor.
 
 ```mojo
 var q = (
-    lazy(tabela)
-    .onde(coluna("idade").gt(lit(18.0)).e(coluna("cidade").eq(lit_texto("SP"))))
-    .selecionar(["cidade", "idade"])
+    tabela
+    .com_coluna("dobro", coluna("valor").vezes(lit(2.0)))
+    .onde(coluna("dobro").gt(lit(1000.0)))
+    .selecionar(["cidade", "dobro"])
 )
-print(q.descrever())    # SCAN -> FILTER (...) -> PROJECT [...] -> RESULT
-var resultado = q.coletar()
+
+print(q.descrever())           # plano lógico
+print(q.descrever_fisico())    # plano físico + avisos de caminho escalar
+print(q.esquema_previsto())    # tipos do resultado, sem executar
+q.mostrar()                    # materializa aqui
+var t = q.coletar()            # ou explicitamente
 ```
+
+Materializam sozinhos: `mostrar`, `primeiras`, `linhas`, `colunas`, `shape`, `schema`,
+`nomes`, `pegar`, `soma`, `media`. Não materializam: `descrever`, `descrever_fisico`,
+`esquema_previsto`, `avisos`, `etapas_do_plano`.
 
 - Construtores: `coluna(nome)`, `lit(f64)`, `lit_int`, `lit_texto`, `lit_bool`, `lit_data`
 - Fluente: `.gt .ge .lt .le .eq .ne .e .ou .nao`, aritmética `.mais .menos .vezes .sobre`
@@ -170,6 +206,26 @@ var resultado = q.coletar()
 - Operadores nativos (`>`, `&`) ainda não disponíveis — a arena evita o ciclo de tipo que
   `List[Expr]` criaria
 - `descrever()` imprime o plano; `coletar()` materializa
+
+### Coluna derivada e tipo
+
+`com_coluna` infere o tipo do resultado sem coerção silenciosa:
+
+| Expressão | Tipo |
+|---|---|
+| `inteiro + inteiro` | `inteiro` |
+| qualquer operando `real` | `real` |
+| divisão | `real` (sempre) |
+| `ano/mes/dia` | `inteiro` |
+| `lit_data` | `data` |
+| comparação / booleano | `logico` |
+
+Comparar texto com número levanta erro — nunca converte em silêncio.
+
+### Avisos
+
+`avisos()` lista as operações que ainda não têm kernel vetorizado. O pandas nunca avisa que
+você caiu do caminho rápido; aqui avisa. A lista encolhe conforme o M4 avança.
 
 Em M3 esta API muda de forma compatível: `Tabela.onde()` passará a devolver `Consulta`
 diretamente e a materialização vira automática na exibição. `lazy()` sai da superfície
@@ -198,6 +254,8 @@ Ambos são **ponte** sobre o Memory Engine. Em M5 viram scanner tipado
 | `Tabela`, `Coluna` (métodos acima) | estável |
 | `Expr` construtores e fluente | estável |
 | `tucano.datas` / `tucano.erros` | estável |
-| `Consulta` / `lazy` | muda em M3 (ver acima) |
+| `Consulta`, `Tabela.onde` / `com_coluna` | estável |
+| `lazy()` | mantido por compatibilidade — prefira `tabela.onde(...)` |
+| `tucano.executor` / `tucano.vetor` / `tucano.plano` | **interno**, muda no M4/M6 |
 | `ler_csv` / `para_csv` | assinatura estável, implementação refeita em M5 |
 | Layout interno de `Coluna` / `buffer.mojo` | **não é API pública** |

@@ -107,7 +107,7 @@ São três provas, em ordem de honestidade:
 
 ## Estado atual do código (honestidade)
 
-**M0, M1, M2 e M2.5 fechados.** Próximo: **M3 — Execution Engine**. 33 testes verdes.
+**M0, M1, M2, M2.5 e M3 fechados.** Próximo: **M4 — SIMD + Parallel**. 48 testes verdes.
 
 | Peça | Status |
 |------|--------|
@@ -120,6 +120,11 @@ São três provas, em ordem de honestidade:
 | `DType.DATA` + `lit_data` / `ano` / `mes` / `dia` | ✅ M2.5 |
 | Erros com sugestão de nome | ✅ M2.5 |
 | README / LICENSE / CHANGELOG / receita conda | ✅ M2.5 |
+| Executor coluna-a-coluna (`Vetor` + lotes) | ✅ M3 |
+| `Tabela.onde()` lazy + materialização automática | ✅ M3 |
+| `com_coluna()` + inferência de tipo derivado | ✅ M3 |
+| Plano físico + avisos de caminho escalar | ✅ M3 |
+| Propagação de esquema sem executar | ✅ M3 |
 | `ler_csv` / `para_csv` | ponte — refazer em M5 |
 | Publicação em canal conda | ❌ exige canal próprio |
 | `DType.DATAHORA` | ❌ adiado para M5 |
@@ -131,7 +136,7 @@ São três provas, em ordem de honestidade:
 
 **1. ~~`Tabela.indice` é o Index do pandas nascendo.~~** ✅ Removido em M2.5. `linhas()` vem de `_colunas[0].tamanho()`.
 
-**2. `Consulta.coletar()` é quadrático.** A avaliação é linha a linha e cada referência a coluna chama `Tabela.pegar()`, que faz busca linear **e retorna `.copy()`** — cópia profunda dos slabs. Numa tabela de 200k linhas, um filtro faz centenas de milhares de cópias de colunas de 200k elementos. É exatamente o que o M3 existe para consertar, e é pré-requisito do M4: não há kernel SIMD sobre um laço que copia a coluna a cada iteração.
+**2. ~~`Consulta.coletar()` é quadrático.~~** ✅ Resolvido em M3. O executor lê cada coluna **uma vez** para um `Vetor` contíguo (com `ref` sobre o lote, sem cópia) e opera sobre ele. `bench/bench_m3.mojo` mede ns/linha praticamente constante de 25k a 200k linhas — escala linear.
 
 **3. ~~Lógica de NA sob negação.~~** ✅ Corrigido em M2.5 — ver Decisão 2. Regressão coberta por `test_na_tres_valores_negacao`.
 
@@ -145,8 +150,8 @@ São três provas, em ordem de honestidade:
 | M1 | Memory Engine | crítica | ✅ feito | columnar + validity + buffers |
 | M2 | Expression Engine | crítica | ✅ feito | expressões + plano lógico |
 | M2.5 | Biblioteca + Correções | crítica | ✅ feito | instalável, sem dívidas de fundação |
-| **M3** | **Execution Engine** | **crítica** | **próximo** | executor coluna-a-coluna |
-| M4 | SIMD + Parallel | crítica | não iniciado | kernels vetorizados/paralelos |
+| M3 | Execution Engine | crítica | ✅ feito | executor coluna-a-coluna |
+| **M4** | **SIMD + Parallel** | **crítica** | **próximo** | kernels vetorizados/paralelos |
 | M5 | I/O + Streaming | crítica | parcial (CSV ponte) | scanner tipado + Parquet |
 | M6 | Aggregation + Join | crítica | não iniciado | group/join como operadores |
 | M7 | Painel | alta | não iniciado | dashboard nativo |
@@ -271,7 +276,7 @@ coluna("idade").gt(lit(18)).e(coluna("pais").eq(lit_texto("BR")))
 
 ---
 
-## M3 — Execution Engine
+## M3 — Execution Engine ✅
 
 ```
 API → Expression → Logical Plan → Executor físico → Tabela
@@ -300,16 +305,36 @@ O `df['x'] = ...` do pandas é metade do uso real e hoje não existe:
 var t = tabela.com_coluna("total", coluna("preco").vezes(coluna("qtd")))
 ```
 
+### Como ficou
+
+```
+tucano/vetor.mojo     Vetor — slab contíguo + máscara de ausentes
+tucano/plano.mojo     Etapa / plano lógico / plano físico
+tucano/executor.mojo  operadores sobre LOTES de Coluna — não conhece Tabela
+tucano/tabela.mojo    Tabela + Consulta (a face eager e a face lazy)
+```
+
+O executor opera sobre **lotes** (`List[Coluna]`), não sobre `Tabela`. É a separação
+logical/physical de verdade: a camada física não conhece o tipo do usuário — e é a forma
+que o M6 precisa, quando join e groupby passarem lotes entre operadores.
+
+O planejador raciocina sobre **esquema** (nome + tipo), não sobre dados: `esquema_apos()`
+propaga tipos etapa a etapa, o que dá `esquema_previsto()` sem executar nada e é a base do
+otimizador do M8.
+
 ### Critério de saída
 
-- [ ] Scan / Filter / Project físicos, coluna-a-coluna
-- [ ] Separação clara logical vs. physical
-- [ ] `com_coluna()` sobre o Expression Engine
-- [ ] `Tabela.onde()` lazy por padrão, materialização automática na exibição
-- [ ] Fim da cópia por linha em `pegar()` (dívida 2)
-- [ ] `descrever()` mostra o plano físico
-- [ ] Aviso quando uma operação cai fora do caminho vetorizado
-- [ ] Mesmos resultados da API eager antiga nos testes de regressão
+- [x] Scan / Filter / Project / Expression físicos, coluna-a-coluna
+- [x] Separação clara logical vs. physical (executor sobre lotes)
+- [x] `com_coluna()` sobre o Expression Engine, com inferência de tipo derivado
+- [x] `Tabela.onde()` lazy por padrão, materialização automática na exibição
+- [x] Fim da cópia por linha (dívida 2) — `ref` sobre o lote, zero cópia
+- [x] `descrever()` lógico e `descrever_fisico()` com plano indentado
+- [x] Aviso quando uma operação cai fora do caminho vetorizado
+- [x] Mesmos resultados da API antiga — 33 testes de regressão intactos
+- [x] Bônus: `esquema_previsto()` — tipos do resultado sem executar
+- [x] Bônus: `bench/bench_m3.mojo` demonstra escala linear
+- [x] 48 testes verdes
 
 ---
 
@@ -332,12 +357,23 @@ Colunas de texto de baixa cardinalidade (cidade, estado, categoria) viram códig
 
 Pandas compara ponteiros de objeto Python, um por vez. Esta é a diferença algorítmica, não só de linguagem.
 
+### Ponto de partida (herdado do M3)
+
+O laço interno do executor já tem a forma certa: `List[Float64]` contíguo, máscara separada,
+e o tipo de operação decidido **fora** do laço. Trocar o laço escalar por um kernel SIMD é
+uma substituição local, não uma reescrita.
+
+Os `avisos()` do M3 já apontam exatamente onde falta kernel — comparação de texto e extrator
+de data. Quando o M4 fechar, esses avisos somem.
+
 ### Critério de saída
 
 - [ ] Kernels SIMD nas ops numéricas críticas
 - [ ] Paralelismo por chunks
 - [ ] Dictionary encoding automático por cardinalidade
-- [ ] Speedup mensurável vs. baseline M3 em 10M+ linhas
+- [ ] Estreitar o slab de data para Int32
+- [ ] Speedup mensurável vs. baseline `bench_m3` em 10M+ linhas
+- [ ] Lista de `avisos()` vazia para comparação de texto e extrator de data
 
 ---
 
@@ -583,6 +619,7 @@ E, a partir do M7, a métrica que é nossa: **latência de filtro de painel** e 
 2. ~~**M1**: storage columnar (buffers + validity + strings)~~
 3. ~~**M2**: Expression Engine (`coluna` / `lit` / plano lógico / `coletar`)~~
 4. ~~**M2.5**: empacotar a biblioteca, remover `Tabela.indice`, NA de três valores, `DType.DATA`~~
-5. **M3**: executor coluna-a-coluna, `com_coluna()`, lazy por padrão
-6. Manter o CSV atual só como ponte — não investir em features List-based novas
-7. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5
+5. ~~**M3**: executor coluna-a-coluna, `com_coluna()`, lazy por padrão~~
+6. **M4**: kernels SIMD sobre os slabs, paralelismo por chunk, dictionary encoding
+7. Manter o CSV atual só como ponte — não investir em features List-based novas
+8. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5

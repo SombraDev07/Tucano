@@ -7,21 +7,18 @@ Não é um clone da API do pandas. É uma biblioteca usável no primeiro dia por
 pandas, **sem herdar os erros dele**.
 
 ```mojo
-from tucano import ler_csv, lazy, coluna, lit, lit_data, mes
+from tucano import ler_csv, coluna, lit, lit_int, mes
 
 def main() raises:
     var vendas = ler_csv("vendas.csv")
 
-    var q = (
-        lazy(vendas)
-        .onde(coluna("data").ge(lit_data("2024-02-01")))
-        .onde(coluna("valor").gt(lit(1000.0)))
-        .selecionar(["data", "cidade", "valor"])
-    )
-
-    print(q.descrever())   # SCAN -> FILTER (...) -> PROJECT [...] -> RESULT
-    q.coletar().mostrar()
+    vendas.com_coluna("mes", mes(coluna("data")))
+          .onde(coluna("valor").gt(lit(1000.0)))
+          .selecionar(["mes", "cidade", "valor"])
+          .mostrar()
 ```
+
+Parece eager, executa lazy: `onde()` devolve um plano, e `mostrar()` materializa.
 
 ## Instalação
 
@@ -57,6 +54,8 @@ pixi run build
 | `df[df.a>5][['b','c']]` materializa o intermediário | Pipeline lazy com plano inspecionável |
 | `KeyError: 'idade'` | `coluna inexistente: 'idade'. Voce quis dizer 'idades'?` |
 | `NaN` como único ausente, semântica ad-hoc | Lógica de três valores (Verdadeiro / Falso / Desconhecido) |
+| `apply()` 100x lento em silêncio | `avisos()` diz quando você saiu do caminho vetorizado |
+| tipo da coluna derivada só se sabe depois de calcular | `esquema_previsto()` sem executar nada |
 
 ### NA é lógica de três valores
 
@@ -111,21 +110,50 @@ aritmética `.mais .menos .vezes .sobre` · datas `ano() mes() dia()`
 Operadores nativos (`>`, `&`) ainda não estão disponíveis — a arena de nós evita o ciclo
 de tipo que `List[Expr]` criaria.
 
-### Consulta lazy
+### Consulta: plano inspecionável
 
 ```mojo
-var q = lazy(tabela).onde(pred).selecionar(["a", "b"])
-print(q.descrever())   # o plano, antes de executar
-var resultado = q.coletar()
+var q = (
+    tabela
+    .com_coluna("dobro", coluna("valor").vezes(lit(2.0)))
+    .onde(coluna("dobro").gt(lit(1000.0)))
+    .selecionar(["cidade", "dobro"])
+)
+
+print(q.descrever())           # plano lógico
+print(q.descrever_fisico())    # plano físico + avisos de caminho escalar
+print(q.esquema_previsto())    # tipos do resultado, sem executar
+q.mostrar()                    # materializa aqui
 ```
+
+```
+        ProjectionExec: PROJECT [cidade, dobro]
+      FilterExec: FILTER (coluna(dobro) > lit(1000.0))
+    ExpressionExec: WITH_COLUMN dobro = (coluna(valor) * lit(2.0))
+  ScanExec: tabela em memoria
+```
+
+Materializam sozinhos: `mostrar`, `primeiras`, `linhas`, `colunas`, `shape`, `schema`,
+`pegar`, `soma`, `media`. `coletar()` continua existindo para quem quer o controle.
+
+### Coluna derivada
+
+```mojo
+tabela.com_coluna("total", coluna("preco").vezes(coluna("qtd")))
+```
+
+O tipo é inferido sem coerção silenciosa: `inteiro + inteiro` dá `inteiro`, divisão dá
+sempre `real`, `mes()` dá `inteiro`. Comparar texto com número levanta erro.
 
 ## Estado
 
-M0 (fundação), M1 (memory engine columnar), M2 (expression engine) e M2.5 (biblioteca,
-correções de fundação, tipo data) estão fechados. 33 testes.
+M0 (fundação), M1 (memory engine columnar), M2 (expression engine), M2.5 (biblioteca,
+correções de fundação, tipo data) e M3 (execution engine) estão fechados. 48 testes.
 
-Próximo: **M3 — Execution Engine** (executor coluna-a-coluna, `com_coluna()`, lazy por
-padrão). Depois: SIMD/paralelismo, Parquet, groupby/join, painel.
+O executor é coluna-a-coluna e escala linear — `pixi run bench-m3` mede ns/linha
+praticamente constante de 25k a 200k linhas.
+
+Próximo: **M4 — SIMD + Parallel**. Depois: Parquet, groupby/join, painel.
 
 Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
@@ -134,10 +162,15 @@ Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 
 ```bash
 pixi run test      # suíte de testes
-pixi run bench     # benchmarks
+pixi run bench     # benchmarks M0
+pixi run bench-m3  # escala do executor (ns/linha deve ficar constante)
 pixi run exemplo   # exemplo executável
 pixi run build     # precompilar o pacote
 ```
+
+> **Cuidado com `.mojoc` obsoleto.** Se um `tucano.mojoc` precompilado estiver no diretório
+> do arquivo que você está compilando, o Mojo o prefere ao fonte — e módulos novos somem
+> com um `'Tabela' value has no attribute ...` que não aponta a causa. Apague o `.mojoc`.
 
 ## Licença
 

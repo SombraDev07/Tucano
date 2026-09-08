@@ -1,33 +1,28 @@
-from tucano import ler_csv, lazy, coluna, lit, lit_int, lit_texto, lit_data, mes
+from tucano import ler_csv, coluna, lit, lit_int, lit_texto, lit_data, mes
 
 
 def main() raises:
     print("=== pessoas.csv ===")
     var t = ler_csv("tests/fixtures/pessoas.csv")
-    var sh = t.shape()
-    print("shape:", sh.linhas, "x", sh.colunas)
-    print("schema:", t.schema().nomes())
+    print("shape:", t.shape().linhas, "x", t.shape().colunas)
     t.mostrar()
     print()
     print("media idade:", t.media("idade"))
     print("soma salario (ignora NA):", t.soma("salario"))
     print()
 
-    var q = (
-        lazy(t)
-        .onde(coluna("idade").gt(lit(18.0)).e(coluna("cidade").eq(lit_texto("SP"))))
-        .selecionar(["cidade", "idade", "salario"])
-    )
+    print("=== ergonomia eager, execucao lazy ===")
+    # onde() devolve um plano; mostrar() materializa sozinho
+    var q = t.onde(coluna("idade").gt(lit(18.0)).e(coluna("cidade").eq(lit_texto("SP"))))
     print("plano:", q.descrever())
-    q.coletar().mostrar()
+    q.mostrar()
     print()
 
     print("=== NA em logica de tres valores ===")
-    # salario tem NA na linha RJ. A linha ausente sai nos dois casos:
     print("salario > 1000:")
-    lazy(t).onde(coluna("salario").gt(lit(1000.0))).coletar().mostrar()
-    print("nao(salario <= 2000):")
-    lazy(t).onde(coluna("salario").le(lit(2000.0)).nao()).coletar().mostrar()
+    t.onde(coluna("salario").gt(lit(1000.0))).mostrar()
+    print("nao(salario <= 2000) — a linha ausente sai nos dois casos:")
+    t.onde(coluna("salario").le(lit(2000.0)).nao()).mostrar()
     print()
 
     print("=== erro que ensina ===")
@@ -37,18 +32,34 @@ def main() raises:
         print(e)
     print()
 
-    print("=== vendas.csv: tipo data ===")
+    print("=== vendas.csv: data + coluna derivada ===")
     var v = ler_csv("tests/fixtures/vendas.csv")
-    print("schema:", v.schema().nomes())
-    print("tipo de 'data':", v.dtype_de("data").nome())
     v.mostrar()
     print()
 
-    var por_data = lazy(v).onde(coluna("data").ge(lit_data("2024-02-01")))
-    print("plano:", por_data.descrever())
-    por_data.coletar().mostrar()
+    var pipeline = (
+        v.com_coluna("dobro", coluna("valor").vezes(lit(2.0)))
+        .com_coluna("mes", mes(coluna("data")))
+        .onde(coluna("mes").eq(lit_int(2)))
+        .selecionar(["data", "cidade", "valor", "dobro", "mes"])
+    )
+
+    print("plano logico:")
+    print(pipeline.descrever())
+    print()
+    print("plano fisico:")
+    print(pipeline.descrever_fisico())
     print()
 
-    var fevereiro = lazy(v).onde(mes(coluna("data")).eq(lit_int(2)))
-    print("plano:", fevereiro.descrever())
-    fevereiro.coletar().mostrar()
+    print("esquema previsto (sem executar):")
+    var esq = pipeline.esquema_previsto()
+    for campo in esq.campos:
+        print("  ", campo.nome, "->", campo.dtype.nome())
+    print()
+
+    print("resultado:")
+    pipeline.mostrar()
+    print()
+
+    print("filtro por data:")
+    v.onde(coluna("data").ge(lit_data("2024-02-01"))).mostrar()
