@@ -432,16 +432,33 @@ ponteiros de objeto, um por vez.
 No M6 a mesma estrutura faz groupby por chave dicionarizada virar **indexação direta de
 array**, sem hash.
 
-### Paralelismo — bloqueado
+### Paralelismo — bloqueado, e agora se sabe por quê
 
-**O stdlib do Mojo 1.0 não expõe `parallelize`.** Existem `TaskGroup` e `create_task` em
-`std.runtime.asyncrt`, mas: um `TaskGroup()` destruído sem uso já aborta o processo
-(`destroying a non-available AsyncValue isn't implemented`), e passar ponteiros para uma
-`async def` exige apagar a origem — `unsafe_ptr()` devolve `Pointer` com origem amarrada, e
-não há `origin_cast` nem `MutableAnyOrigin` acessíveis.
+**O stdlib do Mojo 1.0 não expõe `parallelize`.** `TaskGroup` e `create_task` existem em
+`std.runtime.asyncrt`, mas um `TaskGroup()` destruído sem uso já aborta o processo
+(`destroying a non-available AsyncValue isn't implemented`).
 
-Construir paralelismo de dados sobre isso hoje seria frágil. Vira **trilha própria**, a
-retomar quando o stdlib expuser uma primitiva estável.
+Com `external_call` funcionando bem em outros pontos (sockets no M7, `pread` no M9), a rota
+óbvia era pthreads direto. **E ela chega surpreendentemente longe:** `pthread_create` aceita
+um ponteiro de função produzido pelo Mojo e devolve 0.
+
+O que fecha a porta é outra coisa, e é uma decisão de linguagem, não uma lacuna de
+biblioteca:
+
+```
+error: struct fields cannot expose AnyOrigin in their type
+```
+
+Um payload de thread ao estilo C é um `void*` — um ponteiro com a origem apagada. O Mojo 1.0
+**proíbe deliberadamente** guardar um ponteiro de origem apagada num campo de struct, que é
+exatamente o que marshalar parâmetros para uma thread exige. Não há como contrabandear os
+ponteiros para dentro da thread sem furar a regra que existe justamente para impedir isso.
+
+Ou seja: não é falta de esforço nem de primitiva conveniente. **Paralelismo de dados em
+espaço de usuário está fechado por construção no Mojo 1.0**, e a saída tem de vir de uma
+primitiva de primeira classe. É isso que se espera do compilador — e enquanto não vem, a
+suíte comparativa mede exatamente quanto isso custa: de metade a dois terços da distância
+para os engines de referência.
 
 ### Critério de saída
 
