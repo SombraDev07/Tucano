@@ -3,6 +3,22 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.15.0] — Predicate pushdown por min/max
+
+O escritor passa a gravar min/max de cada row group numerico no rodape. O
+leitor, no `coletar()` e no fluxo, nao le o grupo cujo intervalo nao pode
+satisfazer um `coluna op literal` (e `E`/`OU` disso). Sem estatistica, ou com
+predicado que nao e essa forma, o grupo e lido — a regra e conservadora.
+
+O filtro do plano continua rodando. Pular grupo e I/O, nao substitui a selecao.
+
+### Adicionado
+
+- **Estatisticas de row group** (`Statistics` no `ColumnMetaData`): min/max em
+  PLAIN para inteiro, real, data e datahora. Ausente nao entra na faixa.
+- **Predicate pushdown:** row group impossivel nao sai do disco, em `coletar()`
+  e em `coletar_em_fluxo()`.
+
 ## [0.14.0] — Mais rapido que pandas, medido
 
 O escritor passou a emitir texto repetido em `RLE_DICTIONARY`, o leitor

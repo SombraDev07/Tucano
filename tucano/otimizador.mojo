@@ -392,3 +392,20 @@ def otimizar(
         )
 
     return PlanoOtimizado(empurradas^, colunas^, regras^)
+
+
+def filtro_do_scan(etapas: List[Etapa]) raises -> Expr:
+    """Predicado que o scan Parquet pode usar para pular row group.
+
+    So os filtros que o otimizador deixou no comeco do plano: os que usam
+    coluna derivada ou vêm depois de agregacao ficam para o executor.
+    """
+    var acc = Expr()
+    for e in etapas:
+        if e.tipo != TipoEtapa.FILTRO:
+            break
+        if acc.vazia():
+            acc = e.expr.copy()
+        else:
+            acc = _e_de(acc^, e.expr.copy())
+    return acc^

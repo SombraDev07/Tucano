@@ -278,6 +278,13 @@ struct EscritorThrift(Copyable, Movable):
         self.campo(id, TTipo.BINARIO)
         self.binario(valor)
 
+    def campo_bytes(mut self, id: Int, dados: List[UInt8]):
+        """Binario cru — min/max do Parquet e PLAIN, nao UTF-8."""
+        self.campo(id, TTipo.BINARIO)
+        self.varint(len(dados))
+        for x in dados:
+            self.bytes.append(x)
+
     def campo_struct(mut self, id: Int):
         self.campo(id, TTipo.STRUCT)
         self.entrar()

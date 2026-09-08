@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.14.0 — M0 → M10.5 fechados; leitura e pipeline acima do pandas (paralelismo por thread à parte).
+Versão 0.15.0 — M0 → M10.7 fechados; leitura e pipeline acima do pandas (paralelismo por thread à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -331,10 +331,13 @@ pela qual não flui:
 
 Sobre Parquet a fatia é o row group, e o arquivo **nunca é carregado inteiro**:
 `tucano.arquivo` lê por faixa via `pread`, e `VarreduraParquet` lê cada pedaço de coluna na
-sua própria faixa de bytes.
+sua própria faixa de bytes. O escritor grava min/max numérico no rodapé; `coletar()` e
+`coletar_em_fluxo()` não leem o row group cujo intervalo não pode satisfazer um
+`coluna op literal`. Sem estatística, o grupo é lido. O filtro do plano continua
+rodando — pular grupo é I/O, não substitui a seleção.
 
 `para_parquet(tabela, caminho, linhas_por_grupo)` divide o arquivo em row groups; grupos
-menores dão pico menor na leitura em fluxo.
+menores dão pico menor na leitura em fluxo e mais oportunidade de poda.
 
 ### SQL
 

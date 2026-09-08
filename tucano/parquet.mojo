@@ -18,6 +18,8 @@ from std.ffi import external_call
 from std.memory import UnsafePointer
 from .thrift import LeitorThrift, TTipo, CampoThrift, ListaThrift
 from .arquivo import LeitorArquivo
+from .expr import Expr, ExprNode, Kind
+from .codecs import bits_para_real64, bits_para_real32
 
 
 struct PTipo:
@@ -152,6 +154,9 @@ struct ColunaMeta(Copyable, Movable):
     var tamanho_comprimido: Int
     var caminho: String
     var codificacoes: List[Int]
+    var tem_min_max: Bool
+    var min_bits: Int
+    var max_bits: Int
 
     def tem_dicionario(self) -> Bool:
         """Ausencia e -1, nao 0. Deslocar o pedaco leva um dicionario no comeco
@@ -163,6 +168,91 @@ struct ColunaMeta(Copyable, Movable):
         if self.tem_dicionario() and self.offset_dicionario < self.offset_dados:
             return self.offset_dicionario
         return self.offset_dados
+
+    def min_f64(self) -> Float64:
+        return _stats_como_f64(self.tipo, self.min_bits)
+
+    def max_f64(self) -> Float64:
+        return _stats_como_f64(self.tipo, self.max_bits)
+
+    def min_int(self) -> Int:
+        return _stats_como_int(self.tipo, self.min_bits)
+
+    def max_int(self) -> Int:
+        return _stats_como_int(self.tipo, self.max_bits)
+
+
+@fieldwise_init
+struct StatsFaixa(Copyable, Movable, ImplicitlyCopyable):
+    """min/max de uma coluna num row group, no encoding PLAIN do tipo fisico."""
+
+    var tem: Bool
+    var min_bits: Int
+    var max_bits: Int
+
+
+def _stats_como_int(tipo: Int, bits: Int) -> Int:
+    """INT32 vem em 4 bytes; o sinal precisa sobreviver a promocao para Int."""
+    if tipo == PTipo.INT32:
+        var u = bits & 0xFFFFFFFF
+        if u >= 0x80000000:
+            return u - 0x100000000
+        return u
+    return bits
+
+
+def _stats_como_f64(tipo: Int, bits: Int) -> Float64:
+    if tipo == PTipo.DOUBLE:
+        return bits_para_real64(bits)
+    if tipo == PTipo.FLOAT:
+        return bits_para_real32(bits)
+    return Float64(_stats_como_int(tipo, bits))
+
+
+def _int_cabe_em_f64(v: Int) -> Bool:
+    var a = v
+    if a < 0:
+        a = -a
+    return a <= 9007199254740992
+
+
+def _ler_le_stats(bytes: List[UInt8], ini: Int, n: Int) -> Int:
+    var v = 0
+    for i in range(n):
+        v |= Int(bytes[ini + i]) << (8 * i)
+    return v
+
+
+def _ler_estatisticas(
+    mut l: LeitorThrift, bytes: List[UInt8]
+) raises -> StatsFaixa:
+    """Campo 12 de ColumnMetaData: min_value/max_value em PLAIN."""
+    var tem_min = False
+    var tem_max = False
+    var min_bits = 0
+    var max_bits = 0
+    l.entrar()
+    while True:
+        var d = l.campo(bytes)
+        if d.tipo == TTipo.STOP:
+            break
+        if (
+            (d.id == 1 or d.id == 2 or d.id == 5 or d.id == 6)
+            and d.tipo == TTipo.BINARIO
+        ):
+            var faixa = l.faixa_binaria(bytes)
+            if faixa.tamanho == 4 or faixa.tamanho == 8:
+                var bits = _ler_le_stats(bytes, faixa.tipo, faixa.tamanho)
+                if d.id == 1 or d.id == 5:
+                    max_bits = bits
+                    tem_max = True
+                else:
+                    min_bits = bits
+                    tem_min = True
+        else:
+            l.pular_valor(bytes, d.tipo)
+    l.sair()
+    return StatsFaixa(tem_min and tem_max, min_bits, max_bits)
 
 
 @fieldwise_init
@@ -208,6 +298,164 @@ struct MetadadosParquet(Copyable, Movable):
         if self.coluna_do_esquema(i).repeticao == PRepeticao.OPCIONAL:
             return 1
         return 0
+
+
+def _meta_da_coluna(grupo: GrupoLinhas, nome: String) -> Int:
+    for i in range(len(grupo.colunas)):
+        if grupo.colunas[i].caminho == nome:
+            return i
+    return -1
+
+
+def _eh_lit_numerico(k: Int) -> Bool:
+    return (
+        k == Kind.LIT_F64
+        or k == Kind.LIT_I64
+        or k == Kind.LIT_DATA
+        or k == Kind.LIT_DATAHORA
+    )
+
+
+def _lit_eh_inteiro(k: Int) -> Bool:
+    return k == Kind.LIT_I64 or k == Kind.LIT_DATA or k == Kind.LIT_DATAHORA
+
+
+def _lit_f64(n: ExprNode) -> Float64:
+    if n.kind == Kind.LIT_F64:
+        return n.f64
+    return Float64(n.i64)
+
+
+def _lit_int(n: ExprNode) -> Int:
+    return Int(n.i64)
+
+
+def _op_invertido(op: Int) -> Int:
+    if op == Kind.GT:
+        return Kind.LT
+    if op == Kind.GE:
+        return Kind.LE
+    if op == Kind.LT:
+        return Kind.GT
+    if op == Kind.LE:
+        return Kind.GE
+    return op
+
+
+def _nao_casa_int(mn: Int, mx: Int, op: Int, lit: Int) -> Bool:
+    if op == Kind.GT:
+        return mx <= lit
+    if op == Kind.GE:
+        return mx < lit
+    if op == Kind.LT:
+        return mn >= lit
+    if op == Kind.LE:
+        return mn > lit
+    if op == Kind.EQ:
+        return lit < mn or lit > mx
+    if op == Kind.NE:
+        return mn == mx and mn == lit
+    return False
+
+
+def _nao_casa_f64(mn: Float64, mx: Float64, op: Int, lit: Float64) -> Bool:
+    if op == Kind.GT:
+        return mx <= lit
+    if op == Kind.GE:
+        return mx < lit
+    if op == Kind.LT:
+        return mn >= lit
+    if op == Kind.LE:
+        return mn > lit
+    if op == Kind.EQ:
+        return lit < mn or lit > mx
+    if op == Kind.NE:
+        return mn == mx and mn == lit
+    return False
+
+
+def _coluna_inteira(tipo: Int) -> Bool:
+    return tipo == PTipo.INT32 or tipo == PTipo.INT64
+
+
+def _faixa_impossivel(cm: ColunaMeta, op: Int, lit: ExprNode) -> Bool:
+    if not cm.tem_min_max:
+        return False
+    if _coluna_inteira(cm.tipo) and _lit_eh_inteiro(lit.kind):
+        return _nao_casa_int(cm.min_int(), cm.max_int(), op, _lit_int(lit))
+    if cm.tipo == PTipo.BOOLEAN or cm.tipo == PTipo.BYTE_ARRAY or cm.tipo == PTipo.FLBA:
+        return False
+    if _coluna_inteira(cm.tipo):
+        if not _int_cabe_em_f64(cm.min_int()) or not _int_cabe_em_f64(cm.max_int()):
+            return False
+    return _nao_casa_f64(cm.min_f64(), cm.max_f64(), op, _lit_f64(lit))
+
+
+def _impossivel_no(grupo: GrupoLinhas, filtro: Expr, idx: Int) raises -> Bool:
+    """True = nenhuma linha do grupo pode satisfazer. Conservador: na duvida, False."""
+    if idx < 0 or filtro.vazia():
+        return False
+    var n = filtro.nodes[idx].copy()
+    var k = n.kind
+    if k == Kind.AND:
+        return (
+            _impossivel_no(grupo, filtro, n.left)
+            or _impossivel_no(grupo, filtro, n.right)
+        )
+    if k == Kind.OR:
+        return (
+            _impossivel_no(grupo, filtro, n.left)
+            and _impossivel_no(grupo, filtro, n.right)
+        )
+    if (
+        k != Kind.GT
+        and k != Kind.GE
+        and k != Kind.LT
+        and k != Kind.LE
+        and k != Kind.EQ
+        and k != Kind.NE
+    ):
+        return False
+    var a = filtro.nodes[n.left].copy()
+    var b = filtro.nodes[n.right].copy()
+    if a.kind == Kind.COLUNA and _eh_lit_numerico(b.kind):
+        var i = _meta_da_coluna(grupo, a.nome)
+        if i < 0:
+            return False
+        return _faixa_impossivel(grupo.colunas[i], k, b)
+    if b.kind == Kind.COLUNA and _eh_lit_numerico(a.kind):
+        var j = _meta_da_coluna(grupo, b.nome)
+        if j < 0:
+            return False
+        return _faixa_impossivel(grupo.colunas[j], _op_invertido(k), a)
+    return False
+
+
+def grupo_impossivel(grupo: GrupoLinhas, filtro: Expr) raises -> Bool:
+    """O row group nao tem nenhuma linha que o predicado aceite.
+
+    So decide com min/max. Sem estatistica, ou predicado que nao e
+    `coluna op literal` (e AND/OR disso), devolve False — le o grupo.
+    """
+    if filtro.vazia():
+        return False
+    return _impossivel_no(grupo, filtro, filtro.root)
+
+
+def n_grupos_possiveis(m: MetadadosParquet, filtro: Expr) raises -> Int:
+    var n = 0
+    for g in m.grupos:
+        if not grupo_impossivel(g, filtro):
+            n += 1
+    return n
+
+
+def _grupos_a_ler(m: MetadadosParquet, filtro: Expr) raises -> List[Int]:
+    var out = List[Int]()
+    for g in range(len(m.grupos)):
+        if not grupo_impossivel(m.grupos[g], filtro):
+            out.append(g)
+    return out^
 
 
 # ----------------------------------------------------------------- parsing
@@ -317,6 +565,9 @@ def _ler_coluna_meta(mut l: LeitorThrift, bytes: List[UInt8]) raises -> ColunaMe
     var comprimido = 0
     var caminho = String("")
     var codificacoes = List[Int]()
+    var tem_min_max = False
+    var min_bits = 0
+    var max_bits = 0
 
     l.entrar()
     while True:
@@ -346,6 +597,14 @@ def _ler_coluna_meta(mut l: LeitorThrift, bytes: List[UInt8]) raises -> ColunaMe
             offset_dados = l.zigzag(bytes)
         elif c.id == 11:
             offset_dic = l.zigzag(bytes)
+        elif c.id == 12:
+            if c.tipo != TTipo.STRUCT:
+                l.pular_valor(bytes, c.tipo)
+            else:
+                var st = _ler_estatisticas(l, bytes)
+                tem_min_max = st.tem
+                min_bits = st.min_bits
+                max_bits = st.max_bits
         else:
             l.pular_valor(bytes, c.tipo)
     l.sair()
@@ -359,12 +618,15 @@ def _ler_coluna_meta(mut l: LeitorThrift, bytes: List[UInt8]) raises -> ColunaMe
         comprimido,
         caminho,
         codificacoes^,
+        tem_min_max,
+        min_bits,
+        max_bits,
     )
 
 
 def _ler_pedaco(mut l: LeitorThrift, bytes: List[UInt8]) raises -> ColunaMeta:
     var meta = ColunaMeta(
-        -1, 0, 0, 0, -1, 0, "", List[Int]()
+        -1, 0, 0, 0, -1, 0, "", List[Int](), False, 0, 0
     )
     var achou = False
     l.entrar()
@@ -516,6 +778,7 @@ def _deslocar(meta: ColunaMeta, base: Int) -> ColunaMeta:
     return ColunaMeta(
         meta.tipo, meta.codec, meta.num_valores, meta.offset_dados - base, dic,
         meta.tamanho_comprimido, meta.caminho, meta.codificacoes.copy(),
+        meta.tem_min_max, meta.min_bits, meta.max_bits,
     )
 
 
@@ -589,8 +852,6 @@ from .codecs import (
     remapeia_i32,
     rle_valor_unico,
     largura_de_bits,
-    bits_para_real64,
-    bits_para_real32,
 )
 from std.collections import Dict
 from .coluna import Coluna
@@ -1642,7 +1903,9 @@ def esquema_parquet(caminho: String) raises -> Schema:
 
 
 def ler_parquet_lote(
-    caminho: String, colunas: List[String] = List[String]()
+    caminho: String,
+    colunas: List[String] = List[String](),
+    filtro: Expr = Expr(),
 ) raises -> List[Coluna]:
     """Le um arquivo Parquet para um lote de colunas.
 
@@ -1650,6 +1913,11 @@ def ler_parquet_lote(
     faixas de bytes das colunas pedidas sao lidas. Carregar o arquivo inteiro
     para depois decodificar parte dele desperdicava a maior parcela do tempo —
     ler 244 MiB custa 180 ms; ler as faixas de duas colunas de cinco custa 30.
+
+    `filtro` e predicate pushdown: row group cujo min/max nao pode satisfazer
+    um `coluna op literal` (e AND/OR disso) nao sai do disco. Sem estatistica,
+    o grupo e lido. O operador de filtro no plano continua rodando — pular
+    grupo e so I/O, nao substitui a selecao.
 
     Devolve lote, nao `Tabela`: assim o leitor pode ser chamado de dentro do
     `coletar()`, depois que o otimizador ja decidiu quais colunas o plano usa.
@@ -1660,6 +1928,11 @@ def ler_parquet_lote(
     if len(querer) == 0:
         leitor.fechar()
         raise Error("parquet: nenhuma coluna selecionada")
+
+    var grupos = _grupos_a_ler(m, filtro)
+    var esperado = 0
+    for g in grupos:
+        esperado += m.grupos[g].num_linhas
 
     var saida = List[Coluna]()
     for c in querer:
@@ -1673,10 +1946,10 @@ def ler_parquet_lote(
         var def_max = m.nivel_definicao_max(c)
 
         var acc = _Acumulador()
-        acc.reservar(m.num_linhas, tipo_tucano)
+        acc.reservar(esperado, tipo_tucano)
         var dic = DicionarioBytes()
         var usou = False
-        for g in range(len(m.grupos)):
+        for g in grupos:
             ref grupo = m.grupos[g]
             if c >= len(grupo.colunas):
                 leitor.fechar()
@@ -1689,11 +1962,12 @@ def ler_parquet_lote(
                 bytes, local, def_max, tipo_tucano, escala, grupo.num_linhas,
                 acc, dic, usou,
             )
-        if acc.linhas() != m.num_linhas:
+        if acc.linhas() != esperado:
             leitor.fechar()
             raise Error(
                 "parquet: coluna '" + e.nome + "' com " + String(acc.linhas())
-                + " linhas, arquivo declara " + String(m.num_linhas)
+                + " linhas, arquivo declara " + String(esperado)
+                + " apos poda de row group"
             )
         saida.append(_montar_coluna(e.nome, tipo_tucano, acc^, dic^, usou))
 
@@ -1963,6 +2237,65 @@ def _cabecalho_de_dicionario(num_valores: Int, tamanho: Int) raises -> List[UInt
     return w.finalizar()
 
 
+def _stats_de_coluna(col: Coluna) raises -> StatsFaixa:
+    """min/max dos valores presentes. Texto e logico nao entram: sem PLAIN util."""
+    var n = col.tamanho()
+    if col.tipo == DType.REAL:
+        var tem = False
+        var mn = 0.0
+        var mx = 0.0
+        for i in range(n):
+            if col.eh_ausente(i):
+                continue
+            var v = col.reals[i]
+            if not tem:
+                mn = v
+                mx = v
+                tem = True
+            else:
+                if v < mn:
+                    mn = v
+                if v > mx:
+                    mx = v
+        if not tem:
+            return StatsFaixa(False, 0, 0)
+        return StatsFaixa(True, real64_para_bits(mn), real64_para_bits(mx))
+    if (
+        col.tipo == DType.INTEIRO
+        or col.tipo == DType.DATA
+        or col.tipo == DType.DATAHORA
+    ):
+        var tem = False
+        var mn = Int64(0)
+        var mx = Int64(0)
+        for i in range(n):
+            if col.eh_ausente(i):
+                continue
+            var v = col.ints[i]
+            if not tem:
+                mn = v
+                mx = v
+                tem = True
+            else:
+                if v < mn:
+                    mn = v
+                if v > mx:
+                    mx = v
+        if not tem:
+            return StatsFaixa(False, 0, 0)
+        return StatsFaixa(True, Int(mn), Int(mx))
+    return StatsFaixa(False, 0, 0)
+
+
+def _bytes_stats(tipo: Int, bits: Int) -> List[UInt8]:
+    var n = 8
+    if tipo == PTipo.INT32 or tipo == PTipo.FLOAT:
+        n = 4
+    var out = List[UInt8]()
+    _por_le(out, bits, n)
+    return out^
+
+
 def para_parquet_lote(
     colunas: List[Coluna],
     nomes: List[String],
@@ -2009,9 +2342,11 @@ def para_parquet_lote(
     var tamanhos = List[Int]()
     var offset_dados = List[Int]()
     var offset_dic = List[Int]()
+    var stats = List[StatsFaixa]()
     for g in range(len(inicios)):
         for c in range(len(colunas)):
             var fatia = _fatiar(colunas[c], inicios[g], fins[g])
+            stats.append(_stats_de_coluna(fatia))
             var usa_dic = fatia.tipo == DType.TEXTO and fatia.eh_dicionarizada()
             var inicio_chunk = len(arquivo)
             var dic_off = -1
@@ -2105,6 +2440,12 @@ def para_parquet_lote(
             w.campo_i64(9, offset_dados[k])
             if offset_dic[k] >= 0:
                 w.campo_i64(11, offset_dic[k])
+            if stats[k].tem:
+                var tipo_p = _tipo_parquet(colunas[c].tipo)
+                w.campo_struct(12)
+                w.campo_bytes(5, _bytes_stats(tipo_p, stats[k].max_bits))
+                w.campo_bytes(6, _bytes_stats(tipo_p, stats[k].min_bits))
+                w.sair()
             w.sair()  # ColumnMetaData
             w.sair()  # ColumnChunk
         w.campo_i64(2, total)

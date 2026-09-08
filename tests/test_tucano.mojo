@@ -75,7 +75,7 @@ from tucano.thrift import LeitorThrift
 from tucano.arquivo import LeitorArquivo
 from tucano.flatbuf import ConstrutorFlat, raiz_flat, campo_flat, ler_i32, texto_flat
 from tucano.fluxo import plano_flui, EstadoAgregacao
-from tucano.parquet import VarreduraParquet
+from tucano.parquet import VarreduraParquet, grupo_impossivel, n_grupos_possiveis
 from tucano.otimizador import (
     dobrar_constantes,
     mesclar_filtros,
@@ -1408,6 +1408,94 @@ def test_pq_escrita_emite_dicionario() raises:
     assert_equal(volta.pegar("grupo").texto_em(0), original.pegar("grupo").texto_em(0))
     assert_equal(volta.pegar("grupo").texto_em(1000), original.pegar("grupo").texto_em(1000))
     assert_equal(volta.pegar("id").texto_em(2999), "2999")
+
+
+def test_pq_escrita_emite_min_max() raises:
+    """Cada row group numerico sai com min/max no rodape."""
+    var ids = List[Int64](capacity=300)
+    var vals = List[Float64](capacity=300)
+    for i in range(300):
+        ids.append(Int64(i))
+        vals.append(Float64(i))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("id", ids^))
+    cols.append(Coluna.de_reais("valor", vals^))
+    var t = Tabela(cols^)
+    var saida = "tests/fixtures/_saida_stats.parquet"
+    para_parquet(t, saida, 100)
+
+    var m = metadados_parquet(saida)
+    assert_equal(len(m.grupos), 3)
+    var c_id = 0
+    var c_valor = 1
+    for g in range(3):
+        assert_true(m.grupos[g].colunas[c_id].tem_min_max)
+        assert_true(m.grupos[g].colunas[c_valor].tem_min_max)
+        var base = g * 100
+        assert_equal(m.grupos[g].colunas[c_id].min_int(), base)
+        assert_equal(m.grupos[g].colunas[c_id].max_int(), base + 99)
+        assert_equal(m.grupos[g].colunas[c_valor].min_f64(), Float64(base))
+        assert_equal(m.grupos[g].colunas[c_valor].max_f64(), Float64(base + 99))
+
+
+def test_pq_predicate_pushdown_pula_grupo() raises:
+    """Filtro que nenhum valor do grupo pode satisfazer nao le o grupo."""
+    var ids = List[Int64](capacity=300)
+    var vals = List[Float64](capacity=300)
+    for i in range(300):
+        ids.append(Int64(i))
+        vals.append(Float64(i))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("id", ids^))
+    cols.append(Coluna.de_reais("valor", vals^))
+    var t = Tabela(cols^)
+    var saida = "tests/fixtures/_saida_pushdown.parquet"
+    para_parquet(t, saida, 100)
+    var m = metadados_parquet(saida)
+
+    # grupo 0: 0-99, grupo 1: 100-199, grupo 2: 200-299
+    assert_equal(n_grupos_possiveis(m, coluna("valor").gt(lit(150.0))), 2)
+    assert_equal(n_grupos_possiveis(m, coluna("valor").gt(lit(99.0))), 2)
+    assert_equal(n_grupos_possiveis(m, coluna("id").gt(lit_int(99))), 2)
+    assert_equal(n_grupos_possiveis(m, coluna("valor").eq(lit(150.0))), 1)
+    assert_equal(
+        n_grupos_possiveis(
+            m, coluna("valor").lt(lit(10.0)).ou(coluna("valor").gt(lit(250.0)))
+        ),
+        2,
+    )
+    # o do meio: min=100 max=199 — nenhum dos dois lados do OU
+    assert_true(
+        grupo_impossivel(
+            m.grupos[1],
+            coluna("valor").lt(lit(10.0)).ou(coluna("valor").gt(lit(250.0))),
+        )
+    )
+    # sem estatistica util (texto) ou predicado complexo: nao pula
+    assert_equal(n_grupos_possiveis(m, coluna("valor").vezes(lit(2.0)).gt(lit(10.0))), 3)
+
+    var q = varredura_parquet(saida).onde(coluna("valor").gt(lit(150.0)))
+    var r = q.coletar()
+    assert_equal(r.linhas(), 149)  # 151..299
+    assert_equal(r.pegar("id").texto_em(0), "151")
+    assert_equal(r.pegar("id").texto_em(148), "299")
+
+    var vazio = (
+        varredura_parquet(saida).onde(coluna("valor").gt(lit(1000.0))).coletar()
+    )
+    assert_equal(vazio.linhas(), 0)
+
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    var fluindo = (
+        varredura_parquet(saida)
+        .onde(coluna("valor").gt(lit(150.0)))
+        .agregar_total(aggs^)
+        .coletar_em_fluxo()
+    )
+    # 151+...+299 = (149 * (151+299)) / 2
+    assert_equal(fluindo.linhas(), 1)
+    assert_equal(fluindo.soma("soma_valor"), 33525.0)
 
 
 # ------------------------------------------------------------------ M6

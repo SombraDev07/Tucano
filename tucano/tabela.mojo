@@ -24,11 +24,12 @@ from .parquet import (
     para_parquet_lote,
     esquema_parquet,
     VarreduraParquet,
+    grupo_impossivel,
 )
 from .fluxo import plano_flui, EstadoAgregacao
 from .arrow import escrever_arrow, ler_arrow_lote
 from .schema import Campo
-from .otimizador import otimizar, PlanoOtimizado
+from .otimizador import otimizar, PlanoOtimizado, filtro_do_scan
 from .executor import (
     executar,
     avisos_plano,
@@ -247,10 +248,12 @@ struct Consulta(Copyable, Movable):
     def plano_otimizado(self) raises -> PlanoOtimizado:
         return otimizar(self.etapas, self._nomes_da_fonte())
 
-    def _lote_de_entrada(self, colunas_lidas: List[String]) raises -> List[Coluna]:
+    def _lote_de_entrada(
+        self, colunas_lidas: List[String], filtro: Expr = Expr()
+    ) raises -> List[Coluna]:
         if self.le_de_arquivo():
-            # aqui a poda vira menos I/O: as outras colunas nao saem do disco
-            return ler_parquet_lote(self.caminho, colunas_lidas)
+            # poda de coluna e de row group viram menos I/O
+            return ler_parquet_lote(self.caminho, colunas_lidas, filtro)
         if len(colunas_lidas) == 0:
             return self.fonte.copy()
         var out = List[Coluna]()
@@ -268,7 +271,9 @@ struct Consulta(Copyable, Movable):
                 " `.agrupar([...])`"
             )
         var plano = self.plano_otimizado()
-        var entrada = self._lote_de_entrada(plano.colunas_lidas)
+        var entrada = self._lote_de_entrada(
+            plano.colunas_lidas, filtro_do_scan(plano.etapas)
+        )
         return Tabela(executar(entrada, plano.etapas))
 
     def coletar_sem_otimizar(self) raises -> Tabela:
@@ -282,7 +287,9 @@ struct Consulta(Copyable, Movable):
             raise Error("agrupar sem agregar")
         var entrada: List[Coluna]
         if self.le_de_arquivo():
-            entrada = ler_parquet_lote(self.caminho, List[String]())
+            entrada = ler_parquet_lote(
+                self.caminho, List[String](), filtro_do_scan(self.etapas)
+            )
         else:
             entrada = self.fonte.copy()
         return Tabela(executar(entrada, self.etapas))
@@ -338,7 +345,10 @@ struct Consulta(Copyable, Movable):
 
         if self.le_de_arquivo():
             var v = VarreduraParquet(self.caminho, plano.colunas_lidas)
+            var filtro = filtro_do_scan(plano.etapas)
             for g in range(v.n_grupos()):
+                if grupo_impossivel(v.metadados.grupos[g], filtro):
+                    continue
                 var lote = v.ler_grupo(g)
                 estado.absorver(executar(lote, pre))
             v.fechar()

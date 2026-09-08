@@ -120,7 +120,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M10.6 fechados.** 187 testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby.
+**M0 → M10.7 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby. O escritor emite min/max por row group; o leitor pula o grupo que o predicado não pode satisfazer.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -176,6 +176,7 @@ GPU (M11) e Excel (M12) seguem fora do caminho crítico, como sempre estiveram.
 | `pread` sem zerar; RLE em `Int32`; gather numérico | ✅ M10.6 |
 | Filtro compacta o slab; agregação sem `extrair_coluna` | ✅ M10.6 |
 | Mais rápido que pandas (leitura 1,7×, pipeline 2,4×) | ✅ M10.6 |
+| Estatísticas min/max no row group + predicate pushdown | ✅ M10.7 |
 | Paralelismo por chunk | ❌ **bloqueado** — fechado por construção no Mojo 1.0 |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
@@ -212,6 +213,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M10 | Interop | alta | ✅ feito | Arrow (sem Python) + SQL |
 | M10.5 | Desperdício do leitor | crítica | ✅ feito | 1112 → 230 ms |
 | M10.6 | Passar o pandas | crítica | ✅ feito | leitura 1,7×, pipeline 2,4× |
+| M10.7 | Predicate pushdown | crítica | ✅ feito | min/max no rodapé; pula row group |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
 | M12 | Excel | baixa | não iniciado | compatibilidade tardia |
 
@@ -243,6 +245,8 @@ M10 Interop (Arrow / SQL)
 M10.5 Desperdício do leitor
  ↓
 M10.6 Passar o pandas
+ ↓
+M10.7 Predicate pushdown
  ↓
 Tucano 1.0
    └── M11 GPU [experimental]   M12 Excel [depois]
@@ -755,9 +759,9 @@ Com filtro é mais rápido que sem: o filtro reduz as linhas antes das agregaç�
 - [x] Filtro de painel sobre 10M linhas em tempo de interação — 186 ms
 - [x] Equivalência otimizado × não otimizado verificada em teste
 - [x] 151 testes verdes
-- [ ] Reordenação de junção — fora por ora: sem estatística de cardinalidade, escolher ordem seria adivinhar
+- [ ] Reordenação de junção — fora por ora: sem `distinct_count`, escolher ordem seria adivinhar
 
-> Reordenar junções exige saber o tamanho de cada lado antes de executar. As estatísticas de row group do Parquet trazem isso de graça, mas o leitor ainda não as extrai. **Próximo item com retorno** (depois do M10.6): predicate pushdown por min/max — as duas coisas dependem da mesma leitura.
+> Reordenar junções exige saber o tamanho de cada lado antes de executar. Min/max e `num_linhas` por row group já estão no rodapé (M10.7); ainda falta cardinalidade da chave. **Próximo item com retorno:** `distinct_count` nas colunas dicionarizadas + reordenação de junção.
 
 ---
 
@@ -1023,6 +1027,44 @@ Critério de saída:
 
 ---
 
+## M10.7 — Predicate pushdown por min/max ✅
+
+O M8 empurra o filtro para cima do plano e poda colunas. O I/O ainda lia **todo**
+row group das colunas pedidas, mesmo quando nenhum valor do grupo podia
+satisfazer `valor > 150`. O rodapé do Parquet já reserva campo para isso
+(`Statistics` no `ColumnMetaData`); o Tucano não emitia nem lia.
+
+### Conceitos
+
+**Escritor emite min/max.** Cada pedaço numérico (inteiro, real, data, datahora)
+grava `max_value` / `min_value` em PLAIN no encoding do tipo físico. Ausente não
+entra na faixa. Texto e lógico ficam sem estatística — pular exigiria ordem de
+bytes, e o ganho não paga o risco.
+
+**Leitor interpreta o campo 12.** Arquivo nosso ou de outro escritor. Sem
+estatística, o grupo é lido: a regra é conservadora, nunca muda o resultado.
+
+**Poda de row group.** Predicado `coluna op literal` (e `E`/`OU` disso) contra
+min/max. `max <= lit` descarta o grupo em `>`; o restante é simétrico. `!=` só
+descarta quando min = max = lit. Qualquer outra forma (aritmética, extrator,
+coluna derivada) não pula. O operador de filtro **continua no plano**: pular
+grupo é I/O, não substitui a seleção.
+
+O banco de 5M do comparativo **não** pula grupo (`valor > 1000` com
+`(i%9973)*1.5` mistura a faixa em cada um). A vitória é arquivo real com
+clustering — e a mesma leitura que a reordenação de junção vai usar.
+
+### Critério de saída
+
+- [x] escritor emite min/max em coluna numérica
+- [x] leitor parseia estatística própria e de terceiros
+- [x] `coletar()` e `coletar_em_fluxo()` pulam o grupo impossível
+- [x] sem estatística ou predicado complexo, lê o grupo
+- [x] resultado idêntico ao de ler tudo
+- [x] 189 testes verdes
+
+---
+
 ## M11 — GPU [experimental]
 
 Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / Aggregate / Sort estarem maduros na CPU, e só onde o workload justificar.
@@ -1045,11 +1087,11 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **Analytics** — groupby, join, concat, resumo, estatísticas básicas
 
-**I/O** — CSV, Parquet
+**I/O** — CSV, Parquet (column pruning + predicate pushdown)
 
 **Painel** — KPI, gráfico, tabela, filtro interativo
 
-**Performance** — SIMD, dictionary encoding (leitura e escrita), streaming, benchmarks públicos. Multithreading quando o Mojo 1.0 expuser primitiva.
+**Performance** — SIMD, dictionary encoding (leitura e escrita), streaming, predicate pushdown, benchmarks públicos. Multithreading quando o Mojo 1.0 expuser primitiva.
 
 **Distribuição** — pacote instalável, README, documentação de API
 
@@ -1109,4 +1151,5 @@ E, a partir do M7, a métrica que é nossa: **latência de filtro de painel** e 
 10. ~~**Escritor**: emitir texto em `RLE_DICTIONARY`~~ — 245 → 124 MiB; leitura 230 → 62 ms
 11. ~~Reavaliar paralelismo~~ — reavaliado: continua bloqueado (`struct fields cannot expose AnyOrigin`). Entra quando o stdlib expuser primitiva.
 12. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5
-13. **Próximo com retorno:** estatísticas de row group + predicate pushdown — o M8 deixou explícito; o escritor ainda não emite min/max
+13. ~~**Próximo com retorno:** estatísticas de row group + predicate pushdown~~ — M10.7
+14. **Próximo com retorno:** `distinct_count` em coluna dicionarizada + reordenação de junção — o M8 deixou explícito; min/max sozinho não escolhe ordem

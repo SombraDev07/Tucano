@@ -52,13 +52,14 @@ o que for mais conveniente na hora.
 - **Leitura de CSV rápida e correta** — `bytes → scanner → parser tipado → buffers`, sem
   alocar por célula. 715 ns/linha, com aspas RFC 4180 na leitura e na escrita.
 - **Parquet nativo, leitura e escrita** — sem ponte, sem dependência externa. Column pruning
-  de verdade: as colunas que você não pediu nunca são lidas.
+  e predicate pushdown de verdade: coluna não pedida e row group impossível não saem do disco.
 - **Agrupamento e junção como operadores** — não funções soltas. Chave de texto repetida
   agrupa por indexação direta de array, sem hash: 14,7× mais rápido que chave composta.
 - **Painel embutido** — KPIs, gráficos e filtros servidos pela própria biblioteca. Cada
   widget guarda uma *consulta*, não uma tabela: o filtro reexecuta e só o agregado atravessa.
-- **Otimizador de consultas** — o filtro sobe no plano, constantes dobram, e a coluna que
-  ninguém usa não sai do disco. `explicar()` mostra o plano antes e depois.
+- **Otimizador de consultas** — o filtro sobe no plano, constantes dobram, a coluna que
+  ninguém usa não sai do disco, e o row group cujo min/max não casa com o predicado
+  também não. `explicar()` mostra o plano antes e depois.
 - **Execução em memória limitada** — agregar não exige ter tudo em RAM. Sobre Parquet, o
   arquivo é lido row group por row group e nunca entra inteiro em memória.
 - **SQL sobre o mesmo motor** — `SELECT` vira as mesmas etapas da API fluente e passa pelo
@@ -509,7 +510,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Execution engine coluna-a-coluna | ✅ |
 | Kernels SIMD e dictionary encoding | ✅ |
 | I/O tipado: scanner CSV, datahora, leitura em fatias | ✅ |
-| Parquet: leitura, escrita, column pruning | ✅ |
+| Parquet: leitura, escrita, column pruning, predicate pushdown | ✅ |
 | Agregação, junção, ordenação e verbos de análise | ✅ |
 | Painel: KPI, gráfico, tabela, filtro | ✅ |
 | Otimizador: dobra, fusão, empurrão, poda de colunas | ✅ |
@@ -518,7 +519,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Arrow IPC: leitura e escrita, interop verificada | ✅ |
 | Painel de visualização | planejado |
 
-184 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+189 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do
