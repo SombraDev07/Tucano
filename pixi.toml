@@ -1,6 +1,6 @@
 [workspace]
 name = "tucano"
-version = "0.5.0"
+version = "0.6.0"
 channels = ["https://conda.modular.com/max", "conda-forge"]
 platforms = ["linux-64"]
 
@@ -16,3 +16,17 @@ play = "mojo jogo.mojo"
 
 [dependencies]
 mojo = ">=1.0.0,<2"
+
+# Ambiente separado, so para GERAR fixtures binarias de teste (Parquet).
+# Nao entra no runtime da biblioteca: o principio de Zero Python e sobre o que
+# o Tucano carrega em producao, nao sobre a bancada de teste. Nenhum modulo em
+# `tucano/` importa nada daqui.
+[feature.fixtures.dependencies]
+python = ">=3.11"
+pyarrow = "*"
+
+[feature.fixtures.tasks]
+fixtures = "python tools/gerar_fixtures_parquet.py"
+
+[environments]
+fixtures = ["fixtures"]

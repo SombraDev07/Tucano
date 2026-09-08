@@ -7,5 +7,7 @@
 *.mojoc
 *.mojopkg
 
+# fixtures Parquet SAO commitadas (geradas por `pixi run -e fixtures fixtures`)
+
 # saidas de teste
 tests/fixtures/_saida_*.csv
