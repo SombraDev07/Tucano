@@ -3,6 +3,46 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.20.1] — Decodificador Snappy sem copia byte a byte
+
+O [0.19.0] ligou Snappy por padrao na escrita e ninguem remediu a leitura depois.
+Sem mudanca de API.
+
+| mesmo dado, 5M x 5 colunas | arquivo | ler tudo |
+|---|---|---|
+| `compressao="nenhuma"` | 124 MiB | 62 ms |
+| `compressao="snappy"` (padrao), antes | 43 MiB | 264 ms |
+| `compressao="snappy"` (padrao), agora | 43 MiB | **102 ms** |
+
+Pipeline completo (filtro + groupby + 3 agregacoes): 220 -> **117 ms**.
+
+### Alterado
+
+- **`descomprimir_snappy` aloca a saida uma vez e escreve por ponteiro.** O
+  tamanho descomprimido vem no preambulo do formato, entao nao ha motivo para
+  `append` por byte. Literal e copia em bloco.
+- **Copia para tras anda de 16 em 16 quando a distancia permite.** Com faixas
+  sobrepostas a leitura precisa enxergar o que acabou de ser escrita — e disso
+  que sai a repeticao — mas a partir de 16 bytes de distancia um bloco de 16
+  nunca le byte que ele mesmo vai escrever.
+- **O laco de tags le por ponteiro.** Roda uma vez por elemento comprimido; ali
+  o teste de limite do `List` pesava mais que o trabalho. Os limites da pagina
+  continuam conferidos, uma vez por elemento em vez de uma vez por byte.
+
+### Adicionado
+
+- **`test_pq_snappy_copia_larga`** monta fluxos Snappy a mao: o compressor nao
+  deixa escolher a distancia da copia, e a distancia e o que separa os dois
+  caminhos do decodificador. Cobre 15 contra 16 e comprimentos que nao fecham
+  em 16.
+
+### Nota
+
+Os numeros de leitura do [0.14.0] (62 ms, "1,7x mais rapido que pandas") foram
+medidos no arquivo sem compressao, que era o padrao da escrita naquele momento.
+Com o padrao atual a leitura pura fica **1,1x atras** do pandas; o pipeline
+segue 1,9x a frente. README e ROADMAP refeitos.
+
 ## [0.20.0] — Ler .xlsx
 
 `ler_xlsx(caminho)` devolve a primeira planilha como `Tabela`. `planilha="Nome"`

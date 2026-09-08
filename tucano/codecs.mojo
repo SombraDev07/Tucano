@@ -18,6 +18,8 @@ O empacotamento e do bit menos significativo para o mais significativo dentro de
 cada byte.
 """
 
+from std.ffi import external_call
+
 from std.memory import bitcast
 from std.ffi import external_call
 
@@ -37,7 +39,20 @@ def bits_para_real32(bits: Int) -> Float64:
 
 
 def descomprimir_snappy(bytes: List[UInt8], ini: Int, fim: Int) raises -> List[UInt8]:
-    """Snappy cru: varint de tamanho, depois literais e copias para tras."""
+    """Snappy cru: varint de tamanho, depois literais e copias para tras.
+
+    O tamanho descomprimido vem no preambulo, entao a saida e alocada **uma vez**
+    e escrita por ponteiro: some o `append` por byte e a verificacao de
+    capacidade que vinha junto. Literal e copia em bloco.
+
+    Copia para tras so anda byte a byte quando as faixas se sobrepoem — e a
+    sobreposicao e justamente o que produz repeticao, entao ali a leitura
+    precisa mesmo enxergar o que acabou de ser escrito. A partir de 16 bytes de
+    distancia isso nao acontece dentro de um bloco de 16, e a copia anda larga.
+
+    Literal curto continua no laco: abaixo de 16 bytes a chamada de `memcpy`
+    custa mais que os bytes que ela copia.
+    """
     var pos = ini
 
     var tamanho = 0
@@ -55,9 +70,20 @@ def descomprimir_snappy(bytes: List[UInt8], ini: Int, fim: Int) raises -> List[U
             raise Error("snappy: preambulo invalido")
 
     var out = List[UInt8](capacity=tamanho)
+    out.resize(unsafe_uninit_length=tamanho)
+    var destino = out.unsafe_ptr()
+    # o mesmo buffer visto por outro ponteiro: a copia para tras le da saida que
+    # ela mesma ja escreveu
+    var relido = out.unsafe_ptr()
+    var entrada = bytes.unsafe_ptr()
+    var escritos = 0
 
+    # a partir daqui a leitura e por ponteiro: o laco de tags roda uma vez por
+    # elemento comprimido, e ali o teste de limite do `List` pesa mais que o
+    # trabalho. Os limites da pagina continuam conferidos, uma vez por elemento
+    # em vez de uma vez por byte.
     while pos < fim:
-        var tag = Int(bytes[pos])
+        var tag = Int(entrada.unsafe_load(pos))
         pos += 1
         var tipo = tag & 0x03
 
@@ -67,16 +93,24 @@ def descomprimir_snappy(bytes: List[UInt8], ini: Int, fim: Int) raises -> List[U
             if n >= 60:
                 var extras = n - 59
                 n = 0
+                if pos + extras > fim:
+                    raise Error("snappy: literal truncado")
                 for i in range(extras):
-                    if pos + i >= fim:
-                        raise Error("snappy: literal truncado")
-                    n |= Int(bytes[pos + i]) << (8 * i)
+                    n |= Int(entrada.unsafe_load(pos + i)) << (8 * i)
                 pos += extras
             n += 1
             if pos + n > fim:
                 raise Error("snappy: literal ultrapassa a pagina")
-            for i in range(n):
-                out.append(bytes[pos + i])
+            if escritos + n > tamanho:
+                raise Error("snappy: literal ultrapassa o tamanho declarado")
+            if n >= 16:
+                _ = external_call["memcpy", Int](
+                    destino.unsafe_offset(escritos), entrada.unsafe_offset(pos), n
+                )
+            else:
+                for i in range(n):
+                    destino.unsafe_store(escritos + i, entrada.unsafe_load(pos + i))
+            escritos += n
             pos += n
             continue
 
@@ -86,13 +120,16 @@ def descomprimir_snappy(bytes: List[UInt8], ini: Int, fim: Int) raises -> List[U
             comprimento = 4 + ((tag >> 2) & 0x07)
             if pos >= fim:
                 raise Error("snappy: copia truncada")
-            deslocamento_copia = ((tag >> 5) << 8) | Int(bytes[pos])
+            deslocamento_copia = ((tag >> 5) << 8) | Int(entrada.unsafe_load(pos))
             pos += 1
         elif tipo == 2:
             comprimento = (tag >> 2) + 1
             if pos + 2 > fim:
                 raise Error("snappy: copia truncada")
-            deslocamento_copia = Int(bytes[pos]) | (Int(bytes[pos + 1]) << 8)
+            deslocamento_copia = (
+                Int(entrada.unsafe_load(pos))
+                | (Int(entrada.unsafe_load(pos + 1)) << 8)
+            )
             pos += 2
         else:
             comprimento = (tag >> 2) + 1
@@ -100,20 +137,36 @@ def descomprimir_snappy(bytes: List[UInt8], ini: Int, fim: Int) raises -> List[U
                 raise Error("snappy: copia truncada")
             deslocamento_copia = 0
             for i in range(4):
-                deslocamento_copia |= Int(bytes[pos + i]) << (8 * i)
+                deslocamento_copia |= Int(entrada.unsafe_load(pos + i)) << (8 * i)
             pos += 4
 
-        if deslocamento_copia <= 0 or deslocamento_copia > len(out):
+        if deslocamento_copia <= 0 or deslocamento_copia > escritos:
             raise Error("snappy: deslocamento de copia invalido")
-        # copia byte a byte: as faixas podem se sobrepor, e a sobreposicao e
-        # justamente o que produz repeticao
-        var origem = len(out) - deslocamento_copia
-        for i in range(comprimento):
-            out.append(out[origem + i])
+        if escritos + comprimento > tamanho:
+            raise Error("snappy: copia ultrapassa o tamanho declarado")
+        var origem = escritos - deslocamento_copia
+        if deslocamento_copia >= 16:
+            # a origem esta pelo menos 16 bytes atras do destino, entao um bloco
+            # de 16 nunca le byte que este mesmo bloco vai escrever
+            var i = 0
+            while i + 16 <= comprimento:
+                destino.unsafe_offset(escritos + i).unsafe_store(
+                    relido.unsafe_offset(origem + i).unsafe_load[width=16]()
+                )
+                i += 16
+            while i < comprimento:
+                destino.unsafe_store(escritos + i, relido.unsafe_load(origem + i))
+                i += 1
+        else:
+            # faixas proximas: a leitura precisa enxergar o que acabou de ser
+            # escrito, e e disso que sai a repeticao
+            for i in range(comprimento):
+                destino.unsafe_store(escritos + i, relido.unsafe_load(origem + i))
+        escritos += comprimento
 
-    if len(out) != tamanho:
+    if escritos != tamanho:
         raise Error(
-            "snappy: descomprimiu " + String(len(out)) + " bytes, esperado "
+            "snappy: descomprimiu " + String(escritos) + " bytes, esperado "
             + String(tamanho)
         )
     return out^

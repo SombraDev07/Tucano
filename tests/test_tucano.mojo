@@ -1205,6 +1205,75 @@ def test_pq_snappy_ida_e_volta() raises:
     assert_true(len(enc_r) < len(r))
 
 
+def _snappy_fluxo(distancia: Int, comprimento: Int) raises -> List[UInt8]:
+    """Monta um fluxo Snappy cru: um literal, depois uma copia para tras.
+
+    Feito a mao de proposito. Passar pelo `comprimir_snappy` nao permite escolher
+    a distancia da copia, e a distancia e exatamente o que separa os dois
+    caminhos do decodificador.
+    """
+    var total = distancia + comprimento
+    var fluxo = List[UInt8]()
+    var v = total
+    while v >= 128:
+        fluxo.append(UInt8((v & 0x7F) | 0x80))
+        v >>= 7
+    fluxo.append(UInt8(v))
+    # literal com o comprimento no proprio tag (vale ate 60 bytes)
+    fluxo.append(UInt8((distancia - 1) << 2))
+    for i in range(distancia):
+        fluxo.append(UInt8((i * 31 + 7) % 251))
+    # copia com deslocamento de 2 bytes
+    fluxo.append(UInt8(((comprimento - 1) << 2) | 2))
+    fluxo.append(UInt8(distancia & 0xFF))
+    fluxo.append(UInt8((distancia >> 8) & 0xFF))
+    return fluxo^
+
+
+def _snappy_esperado(distancia: Int, comprimento: Int) raises -> List[UInt8]:
+    """A mesma copia, byte a byte — a definicao do formato."""
+    var esperado = List[UInt8]()
+    for i in range(distancia):
+        esperado.append(UInt8((i * 31 + 7) % 251))
+    for _ in range(comprimento):
+        esperado.append(esperado[len(esperado) - distancia])
+    return esperado^
+
+
+def test_pq_snappy_copia_larga() raises:
+    """A copia para tras anda de 16 em 16 quando a distancia permite.
+
+    Regressao do decodificador que copiava byte a byte. A partir de 16 bytes de
+    distancia um bloco de 16 nunca le byte que ele mesmo vai escrever, e so por
+    isso a copia larga e valida — abaixo disso a leitura precisa enxergar o que
+    acabou de ser escrito, que e o que produz a repeticao. As fronteiras que
+    importam sao a distancia 15 contra 16 e o comprimento que nao fecha em 16.
+    """
+    var distancias = List[Int]()
+    distancias.append(1)
+    distancias.append(3)
+    distancias.append(15)
+    distancias.append(16)
+    distancias.append(17)
+    distancias.append(40)
+    var comprimentos = List[Int]()
+    comprimentos.append(1)
+    comprimentos.append(5)
+    comprimentos.append(16)
+    comprimentos.append(17)
+    comprimentos.append(31)
+    comprimentos.append(64)
+
+    for d in distancias:
+        for c in comprimentos:
+            var fluxo = _snappy_fluxo(d, c)
+            var obtido = descomprimir_snappy(fluxo, 0, len(fluxo))
+            var esperado = _snappy_esperado(d, c)
+            assert_equal(len(obtido), len(esperado))
+            for i in range(len(esperado)):
+                assert_equal(Int(obtido[i]), Int(esperado[i]))
+
+
 def test_pq_largura_de_bits() raises:
     assert_equal(largura_de_bits(0), 0)
     assert_equal(largura_de_bits(1), 1)

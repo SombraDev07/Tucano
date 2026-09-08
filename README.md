@@ -444,35 +444,39 @@ pixi run bench-comparativo              # pipeline completo
 pixi run -e comparativo referencia-1t   # pipeline, uma thread
 ```
 
-**Ler 5 milhões de linhas × 5 colunas de Parquet — 124 MiB — e materializar em memória:**
+**Ler 5 milhões de linhas × 5 colunas de Parquet — 44 MiB — e materializar em memória:**
 
 | | ler tudo | ler 2 de 5 colunas |
 |---|---|---|
-| Tucano | **62 ms** | **24 ms** |
-| pandas 3.0.5 | 108 ms | 31 ms |
-| pyarrow | 52 ms | 20 ms |
-| Polars 1.44 | 30 ms | 12 ms |
-| DuckDB 1.5.5 | 5 ms | 2 ms |
+| Tucano | 102 ms | 46 ms |
+| pandas 3.0.5 | **90 ms** | **34 ms** |
+| pyarrow | 48 ms | 23 ms |
+| Polars 1.44 | 31 ms | 13 ms |
+| DuckDB 1.5.5 | 5 ms | 3 ms |
 
-O arquivo é o que o próprio Tucano escreve: texto repetido em `RLE_DICTIONARY`,
-numéricas em PLAIN. 1,7× mais rápido que pandas na leitura completa; o pyarrow
-continua um pouco à frente (52 ms), o DuckDB não materializa o mesmo objeto.
+O arquivo é o que o próprio Tucano escreve com o padrão de hoje: texto repetido
+em `RLE_DICTIONARY`, páginas em Snappy. Na leitura pura o Tucano está **1,1×
+atrás do pandas** — descomprimir 124 MiB de saída custa ~40 ms. Escrito com
+`compressao="nenhuma"`, o mesmo dado é lido em 60 ms, mas o padrão é comprimido
+e é o padrão que se publica.
 
 **Pipeline completo — Parquet → filtro → groupby → 3 agregações, 5M linhas:**
 
 | | tempo | vs Tucano |
 |---|---|---|
-| Tucano | **97 ms** | — |
-| pandas 3.0.5 (1 thread) | 228 ms | Tucano **2,4×** mais rápido |
-| Polars (1 thread) | 109 ms | Tucano **1,1×** mais rápido |
-| DuckDB (1 thread) | 58 ms | 1,7× |
-| Polars (16 threads) | 62 ms | 1,6× |
-| DuckDB (16 threads) | 15 ms | 6,6× |
+| Tucano | **117 ms** | — |
+| pandas 3.0.5 (1 thread) | 224 ms | Tucano **1,9×** mais rápido |
+| Polars (1 thread) | 134 ms | Tucano **1,1×** mais rápido |
+| DuckDB (1 thread) | 89 ms | 1,3× |
+| Polars (16 threads) | 56 ms | 2,1× |
+| DuckDB (16 threads) | 13 ms | 9,0× |
 
 Uma thread contra uma thread: o Tucano passa pandas e Polars neste workload.
 O que resta para DuckDB em 16 núcleos é paralelismo, ainda bloqueado no Mojo 1.0.
 
-Publicar o número desfavorável continua valendo — agora ele mudou de lado.
+Publicar o número desfavorável continua valendo. Foi assim que se descobriu que
+ligar Snappy por padrão tinha deixado a leitura 4,3× mais lenta sem que nenhum
+teste reclamasse — testes verificam correção, e o arquivo estava correto.
 
 ## Arquitetura
 
@@ -511,7 +515,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Excel `.xlsx`: leitura | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-212 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+213 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do

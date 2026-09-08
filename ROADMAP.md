@@ -107,12 +107,16 @@ São três provas, em ordem de honestidade:
 
 `pixi run bench-leitura` / `pixi run -e comparativo leitura` e `pixi run bench-comparativo` / `pixi run -e comparativo referencia-1t`. Mesmo arquivo Parquet, mesma pergunta, menor de três execuções. Uma thread contra uma thread.
 
+O arquivo é o que o próprio Tucano escreve com o padrão de hoje: texto repetido em `RLE_DICTIONARY`, páginas em Snappy — 44 MiB.
+
 | 5M linhas, uma thread | Tucano | pandas 3.0.5 | Polars | DuckDB |
 |---|---|---|---|---|
-| ler 5 colunas (124 MiB) | **62 ms** | 108 ms | 30 ms | 5 ms |
-| pipeline (filtro + groupby + 3 agregações) | **97 ms** | 228 ms | 109 ms | 58 ms |
+| ler 5 colunas | 102 ms | **90 ms** | 31 ms | 5 ms |
+| pipeline (filtro + groupby + 3 agregações) | **117 ms** | 224 ms | 134 ms | 89 ms |
 
-Tucano **1,7×** na leitura e **2,4×** no pipeline contra pandas; **1,1×** contra Polars no pipeline. DuckDB em 16 threads faz o mesmo pipeline em 15 ms — essa distância é paralelismo, bloqueado no Mojo 1.0.
+No pipeline o Tucano é **1,9×** o pandas e **1,1×** o Polars em uma thread. Na leitura está **1,1× atrás** do pandas: descomprimir 124 MiB de saída custa ~40 ms que o pandas paga mais barato. Sem compressão o Tucano lê os mesmos dados em 60 ms — mas o padrão é comprimido, e é o padrão que se publica.
+
+DuckDB em 16 threads faz o mesmo pipeline em 13 ms — essa distância é paralelismo, bloqueado no Mojo 1.0.
 
 A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5) ficam nos marcos correspondentes: são o ponto de partida, não o estado.
 
@@ -120,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M10.11 fechados, leitura .xlsx no M12.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M10.12 fechados, leitura .xlsx no M12.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -175,7 +179,8 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Escr
 | Escritor `RLE_DICTIONARY` em texto | ✅ M10.6 — 245 → 124 MiB |
 | `pread` sem zerar; RLE em `Int32`; gather numérico | ✅ M10.6 |
 | Filtro compacta o slab; agregação sem `extrair_coluna` | ✅ M10.6 |
-| Mais rápido que pandas (leitura 1,7×, pipeline 2,4×) | ✅ M10.6 |
+| Mais rápido que pandas no pipeline (1,9×) | ✅ M10.6 |
+| Decodificador Snappy sem cópia byte a byte | ✅ M10.12 |
 | Estatísticas min/max no row group + predicate pushdown | ✅ M10.7 |
 | `distinct_count` + hash join no lado mais barato | ✅ M10.8 |
 | SQL `JOIN` / `LEFT JOIN` com `USING` | ✅ M10.9 |
@@ -217,13 +222,14 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M9 | Out-of-Core | alta | ✅ feito | datasets > RAM |
 | M10 | Interop | alta | ✅ feito | Arrow (sem Python) + SQL |
 | M10.5 | Desperdício do leitor | crítica | ✅ feito | 1112 → 230 ms |
-| M10.6 | Passar o pandas | crítica | ✅ feito | leitura 1,7×, pipeline 2,4× |
+| M10.6 | Passar o pandas | crítica | ✅ feito | medido sem compressão |
 | M10.7 | Predicate pushdown | crítica | ✅ feito | min/max no rodapé; pula row group |
 | M10.8 | distinct_count + join | crítica | ✅ feito | NDV no rodapé; hash no lado barato |
 | M10.9 | SQL JOIN | crítica | ✅ feito | `USING` sobre o mesmo `unir` |
 | M10.10 | Snappy na escrita | crítica | ✅ feito | páginas comprimidas por padrão |
 | M10.11 | SQL HAVING + COUNT(DISTINCT) | crítica | ✅ feito | mesmo `onde` / `distintos` |
 | M12 | Excel (leitura) | alta | ✅ feito | `ler_xlsx`, primeira aba ou pelo nome |
+| M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
 | M12b | Excel (escrita) | baixa | não iniciado | compatibilidade tardia |
 
@@ -1040,6 +1046,10 @@ saem `eh_ausente` por linha e `extrair_coluna` (uma cópia inteira por agregaç�
 | ler 5 colunas | **62 ms** | 108 ms | **1,7×** |
 | pipeline (filtro + groupby + 3 agregações) | **97 ms** | 228 ms | **2,4×** |
 
+> Medido no arquivo **sem compressão** de 124 MiB, que era o padrão da escrita
+> quando o M10.6 fechou. O M10.10 ligou Snappy por padrão e a leitura mudou de
+> lado — ver M10.12, que é o conserto e a medição refeita.
+
 No mesmo pipeline, Polars em uma thread faz 109 ms. DuckDB em uma thread faz
 58 ms; em 16 threads, 15 ms — essa distância é paralelismo.
 
@@ -1198,6 +1208,77 @@ e sem `GROUP BY` é recusado. `COUNT(DISTINCT *)` também.
 
 ---
 
+## M10.12 — Snappy: o padrão não estava medido ✅
+
+O M10.10 ligou Snappy por padrão na escrita. A mensagem do commit dizia, com
+razão, que "o leitor já descomprimia" — e ninguém remediu a leitura depois.
+
+| mesmo dado, 5M × 5 colunas | arquivo | ler tudo |
+|---|---|---|
+| `compressao="nenhuma"` | 124 MiB | 62 ms |
+| `compressao="snappy"` (padrão) | 43 MiB | **264 ms** |
+
+Os 62 ms do M10.6 reproduzem exatos — mas só no arquivo sem compressão. Com o
+padrão de hoje a leitura custava 4,3× mais, e a afirmação publicada de "1,7× à
+frente do pandas" tinha deixado de valer sem que nenhum teste reclamasse: testes
+verificam correção, e o arquivo estava correto.
+
+### O mesmo desperdício, de novo
+
+`descomprimir_snappy` montava a saída com `out.append(bytes[pos + i])` — um byte
+por iteração, com verificação de capacidade junto. É o mesmo laço que o M10.5
+tirou de `_descomprimir`, sobrevivendo no codec ao lado.
+
+O tamanho descomprimido vem no preâmbulo do próprio formato, então a saída é
+alocada **uma vez** e escrita por ponteiro. Literal vira cópia em bloco.
+
+### A cópia para trás não é um `memcpy`
+
+E não pode ser: quando as faixas se sobrepõem, a leitura tem de enxergar o que
+ela mesma acabou de escrever — é dessa sobreposição que sai a repetição. Mas a
+partir de 16 bytes de distância um bloco de 16 nunca lê byte que ele próprio vai
+escrever, e aí a cópia anda larga. Abaixo disso, byte a byte, porque a semântica
+exige.
+
+A análise de exclusividade do Mojo recusa o mesmo ponteiro nos dois lados de um
+`memcpy`, o que fecha a porta para a saída errada por acidente.
+
+`test_pq_snappy_copia_larga` monta fluxos Snappy **à mão** — o compressor não
+deixa escolher a distância, e a distância é justamente o que separa os dois
+caminhos. Cobre 15 contra 16 e comprimentos que não fecham em 16.
+
+### Resultado
+
+| 5M × 5 colunas, 44 MiB | antes | depois |
+|---|---|---|
+| ler tudo | 264 ms | **102 ms** |
+| ler 2 de 5 colunas | 97 ms | **46 ms** |
+| pipeline (filtro + groupby + 3 agregações) | 220 ms | **117 ms** |
+
+Contra pandas em uma thread: pipeline **1,9×** mais rápido; leitura pura **1,1×
+mais lenta** — descomprimir 124 MiB de saída custa ~40 ms, e é isso que separa
+os 102 ms dos 60 ms do arquivo cru. O número desfavorável fica publicado.
+
+### O que isso ensina sobre a suíte
+
+Mudar um **padrão** é mudar o que todo usuário mede. A suíte comparativa roda por
+tarefa separada e ninguém a rodou depois do M10.10; a régua de correção passou
+verde o tempo todo, porque o arquivo estava certo — só era lido devagar.
+
+Tentei ainda 32 bytes de folga no fim do buffer para eliminar os laços de resto:
+102 → 99 ms. Três por cento por uma folga a justificar, uma guarda na entrada e
+um laço que escreve de propósito além do necessário. Recusado — quando a medição
+diz que o ganho é ruído, a forma simples ganha.
+
+### Critério de saída
+
+- [x] nenhuma cópia byte a byte fora do caso que a semântica exige
+- [x] fronteira da cópia larga coberta por teste que falha se ela se mover
+- [x] 213 testes verdes, interoperabilidade nos dois formatos
+- [x] números do README e do ROADMAP refeitos no padrão atual
+
+---
+
 ## M12 — Ler .xlsx ✅
 
 Abrir a planilha é o que o analista pede. `.xlsx` é ZIP de XML; o Tucano passa a
@@ -1303,4 +1384,5 @@ tempo, RAM, throughput, **startup**, scaling por cores, I/O
 17. ~~**Próximo com retorno:** Snappy na escrita~~ — M10.10
 18. ~~**Próximo com retorno:** `HAVING` + `COUNT(DISTINCT)` no SQL~~ — M10.11
 19. ~~**Próximo com retorno:** abrir `.xlsx`~~ — M12
-20. **Próximo com retorno:** `SELECT DISTINCT` (`unicos`) — o operador existe; o dialeto ainda não chega
+20. ~~**Próximo com retorno:** decodificador Snappy~~ — M10.12
+21. **Próximo com retorno:** `SELECT DISTINCT` (`unicos`) — o operador existe; o dialeto ainda não chega
