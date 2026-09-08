@@ -383,16 +383,18 @@ def _cmp_dicionario(
 
     var esq = expr.nodes[n.left].copy()
     var dir = expr.nodes[n.right].copy()
-    var nome = String("")
-    var literal = String("")
+    var col_no: ExprNode
+    var lit_no: ExprNode
     if esq.kind == Kind.COLUNA and dir.kind == Kind.LIT_STR:
-        nome = esq.nome
-        literal = dir.texto
+        col_no = esq^
+        lit_no = dir^
     elif dir.kind == Kind.COLUNA and esq.kind == Kind.LIT_STR:
-        nome = dir.nome
-        literal = esq.texto
+        col_no = dir^
+        lit_no = esq^
     else:
         return List[UInt8]()
+    var nome = col_no.nome
+    var literal = lit_no.texto
 
     var pos = posicao_no_lote(cols, nome)
     ref col = cols[pos]
@@ -659,13 +661,14 @@ def _tem_caminho_dicionario(
         return False
     var esq = expr.nodes[n.left].copy()
     var dir = expr.nodes[n.right].copy()
-    var nome = String("")
+    var col_no: ExprNode
     if esq.kind == Kind.COLUNA and dir.kind == Kind.LIT_STR:
-        nome = esq.nome
+        col_no = esq^
     elif dir.kind == Kind.COLUNA and esq.kind == Kind.LIT_STR:
-        nome = dir.nome
+        col_no = dir^
     else:
         return False
+    var nome = col_no.nome
     for c in cols:
         if c.nome == nome:
             return c.tipo == DType.TEXTO and c.eh_dicionarizada()
