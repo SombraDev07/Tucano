@@ -1,12 +1,15 @@
 """Vetor — resultado de avaliar uma expressao sobre a tabela inteira (M3).
 
-O executor do M3 e coluna-a-coluna: uma expressao nunca e avaliada linha a linha
-sobre a `Tabela`. Ela vira um `Vetor` — um slab contiguo com mascara de ausentes
-— e todas as operacoes seguintes leem esse slab.
+O executor e coluna-a-coluna: uma expressao nunca e avaliada linha a linha sobre
+a `Tabela`. Ela vira um `Vetor` — um slab contiguo com mascara de ausentes — e
+todas as operacoes seguintes leem esse slab.
 
-E essa forma que o M4 substitui por kernels SIMD: o laco interno ja opera sobre
-`List[Float64]` contiguo, sem tocar em `Tabela` nem em `Coluna`.
+M4: a mascara `na` e `List[UInt8]` (0 presente, 1 ausente), nao `List[Bool]`,
+porque e sobre ela que os kernels SIMD operam — 32 elementos por instrucao no
+AVX2.
 """
+
+from .kernels import contar_marcados
 
 
 struct Vetor(Copyable, Movable):
@@ -16,7 +19,7 @@ struct Vetor(Copyable, Movable):
     var eh_texto: Bool
     var reais: List[Float64]
     var textos: List[String]
-    var na: List[Bool]
+    var na: List[UInt8]
 
     def __init__(
         out self,
@@ -24,7 +27,7 @@ struct Vetor(Copyable, Movable):
         eh_texto: Bool,
         var reais: List[Float64],
         var textos: List[String],
-        var na: List[Bool],
+        var na: List[UInt8],
     ):
         self.n = n
         self.eh_texto = eh_texto
@@ -35,19 +38,19 @@ struct Vetor(Copyable, Movable):
     @staticmethod
     def numerico(n: Int) -> Self:
         var reais = List[Float64](capacity=n)
-        var na = List[Bool](capacity=n)
+        var na = List[UInt8](capacity=n)
         for _ in range(n):
             reais.append(0.0)
-            na.append(False)
+            na.append(UInt8(0))
         return Self(n, False, reais^, List[String](), na^)
 
     @staticmethod
     def textual(n: Int) -> Self:
         var textos = List[String](capacity=n)
-        var na = List[Bool](capacity=n)
+        var na = List[UInt8](capacity=n)
         for _ in range(n):
             textos.append("")
-            na.append(False)
+            na.append(UInt8(0))
         return Self(n, True, List[Float64](), textos^, na^)
 
     @staticmethod
@@ -67,9 +70,11 @@ struct Vetor(Copyable, Movable):
     def tamanho(self) -> Int:
         return self.n
 
+    def eh_na(self, i: Int) -> Bool:
+        return self.na[i] != 0
+
+    def marcar_na(mut self, i: Int):
+        self.na[i] = UInt8(1)
+
     def contar_ausentes(self) -> Int:
-        var total = 0
-        for i in range(self.n):
-            if self.na[i]:
-                total += 1
-        return total
+        return contar_marcados(self.na, self.n)

@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia de pandas e semântica de banco de dados.
 
-Versão 0.4.0 — M0, M1, M2, M2.5 e M3 fechados.
+Versão 0.5.0 — M0, M1, M2, M2.5, M3 e M4 fechados (paralelismo à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -27,7 +27,11 @@ nunca um rótulo visível que participa de aritmética.
 
 ### 2. NA é lógica de três valores
 
-Valor ausente não é `False` nem `0`. Comparação envolvendo NA produz **Desconhecido**:
+Valor ausente não é `False` nem `0`. Comparação envolvendo NA produz **Desconhecido**.
+
+Os três estados são numerados na ordem do reticulado de Kleene —
+`FALSO = 0 < DESCONHECIDO = 1 < VERDADEIRO = 2` — para que `E` seja `min`, `OU` seja `max` e
+`NÃO` seja `2 - x`. Cada conectivo é uma instrução SIMD.
 
 | Expressão | Resultado |
 |---|---|
@@ -102,7 +106,7 @@ Planejado: `DType.datahora` em M5.
 
 ```
 Coluna
-├── validity : bitmap empacotado (List[UInt8])
+├── validity : bitmap empacotado (List[UInt8]) + contagem de ausentes O(1)
 ├── ints     : slab contíguo Int64    (capacity == len) — inteiro e data
 ├── reals    : slab contíguo Float64  (capacity == len)
 ├── logics   : slab contíguo UInt8 0/1
@@ -112,8 +116,21 @@ Coluna
 - As factories (`de_inteiros`, `de_reais`, `de_logicos`, `de_textos`) aceitam `List` na
   entrada e **copiam** para o layout columnar.
 - `List` aqui é o slab contíguo do Mojo — não uma lista de objetos.
-- O layout interno não é API pública. Em M4 os kernels SIMD acessam esses slabs via
-  `unsafe_ptr`.
+├── codigos  : Int32 por linha quando a coluna de texto é dicionarizada
+```
+
+- As factories (`de_inteiros`, …) aceitam `List` na entrada e **copiam** para o layout.
+- `List` aqui é o slab contíguo do Mojo — não uma lista de objetos.
+- O layout interno não é API pública. Os kernels SIMD acessam esses slabs por ponteiro.
+
+### Dictionary encoding (M4)
+
+Coluna de texto **com repetição** guarda os valores distintos em `textos` e um `Int32` por
+linha em `codigos`. Uma comparação com literal resolve o texto para um código uma única vez
+— varrendo só os distintos — e o filtro vira comparação de inteiros vetorizada.
+
+`eh_dicionarizada()` e `cardinalidade()` expõem o estado. Coluna com todos os valores
+distintos não é dicionarizada: não haveria ganho.
 
 ---
 
@@ -131,14 +148,19 @@ Isso elimina por construção a classe de bugs de `SettingWithCopyWarning`.
 ## Camadas
 
 ```
+kernels      SIMD puro — não importa nada do Tucano
+    ↓
 coluna · dtype · buffer · datas · erros · schema · expr     base
-                        ↓
-              vetor · plano                                 tipos do M3
-                        ↓
-              executor     opera sobre LOTES (List[Coluna])  camada física
-                        ↓
-              tabela       Tabela + Consulta                 API do usuário
+    ↓
+vetor · plano                                               tipos do executor
+    ↓
+executor     opera sobre LOTES (List[Coluna])               camada física
+    ↓
+tabela       Tabela + Consulta                              API do usuário
 ```
+
+`tucano/kernels.mojo` fica isolado de propósito: o `DType` lá é o **do Mojo** (parâmetro de
+`SIMD`), não o tipo lógico do Tucano.
 
 O **executor não conhece `Tabela`**. Ele recebe e devolve lotes de `Coluna`. Essa é a
 separação logical/physical: a camada física não depende do tipo do usuário.
@@ -225,7 +247,11 @@ Comparar texto com número levanta erro — nunca converte em silêncio.
 ### Avisos
 
 `avisos()` lista as operações que ainda não têm kernel vetorizado. O pandas nunca avisa que
-você caiu do caminho rápido; aqui avisa. A lista encolhe conforme o M4 avança.
+você caiu do caminho rápido; aqui avisa.
+
+Depois do M4, sobra um caso: comparação em coluna de texto **não dicionarizada** (todos os
+valores distintos, ou coluna derivada). Aritmética, comparação numérica, extrator de data e
+texto dicionarizado não avisam mais.
 
 Em M3 esta API muda de forma compatível: `Tabela.onde()` passará a devolver `Consulta`
 diretamente e a materialização vira automática na exibição. `lazy()` sai da superfície
@@ -256,6 +282,7 @@ Ambos são **ponte** sobre o Memory Engine. Em M5 viram scanner tipado
 | `tucano.datas` / `tucano.erros` | estável |
 | `Consulta`, `Tabela.onde` / `com_coluna` | estável |
 | `lazy()` | mantido por compatibilidade — prefira `tabela.onde(...)` |
-| `tucano.executor` / `tucano.vetor` / `tucano.plano` | **interno**, muda no M4/M6 |
+| `tucano.executor` / `tucano.vetor` / `tucano.plano` | **interno**, muda no M6 |
+| `tucano.kernels` | **interno**, contrato de ponteiros pode mudar |
 | `ler_csv` / `para_csv` | assinatura estável, implementação refeita em M5 |
 | Layout interno de `Coluna` / `buffer.mojo` | **não é API pública** |

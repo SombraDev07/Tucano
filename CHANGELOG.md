@@ -3,6 +3,61 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.5.0] — M4: SIMD + dictionary encoding
+
+Ganhos medidos contra o laco escalar equivalente (n = 5M, AVX2, `pixi run bench-m4`):
+soma 2,33x | comparacao 3,07x | mes(data) 4,70x | `cidade == "SP"` 4,21x |
+`a + b` 1,29x (memory-bound).
+
+### Adicionado
+
+- **`tucano/kernels.mojo`** — kernels SIMD sobre slabs contiguos. Isolado de proposito:
+  o `DType` la e o **do Mojo** (parametro de `SIMD`), nao o tipo logico do Tucano.
+  Aritmetica, comparacao, logica de tres valores, selecao, reducoes e calendario.
+- **Dictionary encoding** em coluna de texto com repeticao: valores distintos em
+  `textos` + um `Int32` por linha em `codigos`. `cidade == "SP"` resolve o literal
+  para um codigo UMA vez e o filtro vira comparacao de inteiros vetorizada.
+  `Coluna.eh_dicionarizada()`, `.cardinalidade()`, `.codigo_de()`, `.texto_bruto()`.
+- **Kernel de calendario** (`calendario_f64`): `ano/mes/dia` vetorizados.
+- `Validity.n_ausentes` mantido na construcao (`contar_ausentes()` virou O(1)),
+  `tem_ausentes()` e `para_bytes()` para desempacotar o bitmap.
+- Kernels densos (`soma_f64_densa`, `minimo_f64_densa`, ...) para coluna sem ausentes.
+- `bench/bench_m4.mojo` + tarefa `pixi run bench-m4`.
+
+### Alterado
+
+- **Ordem do `Tri`**: agora `FALSO = 0 < DESCONHECIDO = 1 < VERDADEIRO = 2`, a ordem do
+  reticulado de Kleene. Com ela `E` vira `min`, `OU` vira `max` e `NAO` vira `2 - x` —
+  cada conectivo e uma unica instrucao SIMD. A semantica e identica; so a numeracao
+  mudou. **Quebra** codigo que dependia dos valores numericos antigos.
+- `Vetor.na` passou de `List[Bool]` para `List[UInt8]` (0 presente, 1 ausente), que e
+  sobre o que os kernels operam. Use `Vetor.eh_na(i)` em vez de indexar direto.
+- Mascaras de tres valores passaram de `List[Int]` para `List[UInt8]`.
+- `Coluna.soma/media/minimo/maximo` passam por kernel SIMD.
+- `avisos()` nao aponta mais extrator de data nem texto dicionarizado. Sobra o texto
+  **nao** dicionarizado — cardinalidade alta ou coluna derivada.
+
+### Achados registrados
+
+- **Int64 nao vetoriza divisao no AVX2.** `civil_de_dias` so divide por constantes, que
+  o compilador troca por multiplicacao e deslocamento — mas em Int64 isso exige
+  multiplicacao 64x64->128, que o AVX2 nao tem. Ganho medido: 1,00x. O mesmo algoritmo
+  em Int32 da 4,70x, e ainda dobra as pistas.
+- **Desempacotar o bitmap custava mais que a reducao.** A primeira `soma()` SIMD dava
+  1,12x porque desempacotava a validade antes de reduzir. Com a contagem O(1) e um
+  kernel denso para o caso sem ausentes, foi para 2,33x.
+
+### Bloqueado
+
+- **Paralelismo por chunk.** O stdlib do Mojo 1.0 nao expoe `parallelize`. `TaskGroup` e
+  `create_task` existem em `std.runtime.asyncrt`, mas um `TaskGroup()` destruido sem uso
+  ja aborta o processo, e passar ponteiros para uma `async def` exige apagar a origem —
+  `unsafe_ptr()` devolve `Pointer` com origem amarrada, sem `origin_cast` nem
+  `MutableAnyOrigin` acessiveis. Vira trilha propria.
+- **Slab de data em Int32** adiado para o M5. O motivo que fazia isso urgente era o
+  calculo, e o kernel de calendario ja resolve convertendo para Int32; o que resta e
+  economia de memoria, que cabe na reescrita de storage do scanner.
+
 ## [0.4.0] — M3: Execution Engine
 
 ### Adicionado

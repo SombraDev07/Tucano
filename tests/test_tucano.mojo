@@ -29,6 +29,18 @@ from tucano import (
     TipoEtapa,
     Consulta,
 )
+from tucano.kernels import (
+    add_f64,
+    mul_f64,
+    cmp_f64,
+    tri_e,
+    tri_ou,
+    tri_nao,
+    soma_f64,
+    calendario_f64,
+    contar_marcados,
+    largura_f64,
+)
 from tucano.executor import (
     extrair_coluna,
     avaliar,
@@ -323,9 +335,10 @@ def test_coluna_logica_como_predicado() raises:
 
 
 def test_tri_constantes() raises:
+    """Ordem do reticulado de Kleene: E vira min, OU vira max, NAO vira 2-x."""
     assert_equal(Tri.FALSO, 0)
-    assert_equal(Tri.VERDADEIRO, 1)
-    assert_equal(Tri.DESCONHECIDO, 2)
+    assert_equal(Tri.DESCONHECIDO, 1)
+    assert_equal(Tri.VERDADEIRO, 2)
 
 
 def test_datas_civil_ida_e_volta() raises:
@@ -416,7 +429,8 @@ def test_m3_extrai_coluna_uma_vez() raises:
     assert_equal(v.tamanho(), 4)
     assert_false(v.eh_texto)
     assert_equal(v.reais[0], 2000.0)
-    assert_true(v.na[1])
+    assert_true(v.eh_na(1))
+    assert_false(v.eh_na(0))
     assert_equal(v.contar_ausentes(), 1)
 
     var texto = extrair_coluna(t.lote(), "cidade")
@@ -429,7 +443,7 @@ def test_m3_avaliar_expressao_vetorizada() raises:
     var v = avaliar(coluna("valor").vezes(lit(2.0)), t.lote())
     assert_equal(v.tamanho(), 5)
     assert_equal(v.reais[0], 2400.0)
-    assert_true(v.na[3])  # valor NA propaga
+    assert_true(v.eh_na(3))  # valor NA propaga
 
 
 def test_m3_mascara_tri_vetorizada() raises:
@@ -522,15 +536,24 @@ def test_m3_plano_com_todas_as_etapas() raises:
 
 def test_m3_avisos_de_caminho_escalar() raises:
     var t = ler_csv("tests/fixtures/vendas.csv")
+    # M4: extrator de data virou kernel SIMD em Int32
     var com_data = t.onde(mes(coluna("data")).eq(lit_int(2)))
-    var notas = com_data.avisos()
+    assert_equal(len(com_data.avisos()), 0)
+
+    # texto de alta cardinalidade nao dicionariza: continua escalar e avisa
+    var unicos = List[String]()
+    for i in range(4):
+        unicos.append("id-" + String(i))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("chave", unicos^))
+    var alta = Tabela(cols^)
+    var notas = alta.onde(coluna("chave").eq(lit_texto("id-1"))).avisos()
     assert_true(len(notas) > 0)
     assert_true("escalar" in notas[0])
 
+    # M4: cidade e dicionarizada, entao a comparacao e SIMD sobre Int32
     var com_texto = t.onde(coluna("cidade").eq(lit_texto("SP")))
-    var notas_texto = com_texto.avisos()
-    assert_true(len(notas_texto) > 0)
-    assert_true("dictionary encoding" in notas_texto[0])
+    assert_equal(len(com_texto.avisos()), 0)
 
     var so_numero = t.onde(coluna("valor").gt(lit(1000.0)))
     assert_equal(len(so_numero.avisos()), 0)
@@ -580,6 +603,205 @@ def test_m3_lazy_continua_funcionando() raises:
     var q = lazy(t).onde(coluna("idade").gt(lit(25.0))).selecionar(["cidade"])
     assert_equal(q.coletar().linhas(), 2)
     assert_equal(q.etapas_do_plano(), 2)
+
+
+# ------------------------------------------------------------------ M4
+
+
+def _u8(n: Int, v: Int) -> List[UInt8]:
+    var out = List[UInt8](capacity=n)
+    for _ in range(n):
+        out.append(UInt8(v))
+    return out^
+
+
+def _f64(valores: List[Float64]) -> List[Float64]:
+    var out = List[Float64](capacity=len(valores))
+    for v in valores:
+        out.append(v)
+    return out^
+
+
+def test_m4_largura_simd_valida() raises:
+    assert_true(largura_f64() >= 1)
+
+
+def test_m4_kernel_aritmetica_cobre_cauda() raises:
+    """Tamanho nao multiplo da largura SIMD: a cauda escalar precisa fechar."""
+    var n = largura_f64() * 3 + 1
+    var a = List[Float64](capacity=n)
+    var b = List[Float64](capacity=n)
+    var out = List[Float64](capacity=n)
+    for i in range(n):
+        a.append(Float64(i))
+        b.append(2.0)
+        out.append(0.0)
+    add_f64(a, b, out, n)
+    for i in range(n):
+        assert_equal(out[i], Float64(i) + 2.0)
+    mul_f64(a, b, out, n)
+    assert_equal(out[n - 1], Float64(n - 1) * 2.0)
+
+
+def test_m4_kernel_comparacao_tres_valores() raises:
+    var n = 5
+    var a = _f64([1.0, 5.0, 3.0, 9.0, 3.0])
+    var b = _f64([3.0, 3.0, 3.0, 3.0, 3.0])
+    var na = _u8(n, 0)
+    na[4] = UInt8(1)
+    var out = _u8(n, 0)
+    cmp_f64(0, a, b, na, out, n)  # gt
+    assert_equal(Int(out[0]), Tri.FALSO)
+    assert_equal(Int(out[1]), Tri.VERDADEIRO)
+    assert_equal(Int(out[2]), Tri.FALSO)
+    assert_equal(Int(out[3]), Tri.VERDADEIRO)
+    assert_equal(Int(out[4]), Tri.DESCONHECIDO)
+
+
+def test_m4_kernels_kleene() raises:
+    # todas as 9 combinacoes de E e OU
+    var n = 9
+    var a = _u8(n, 0)
+    var b = _u8(n, 0)
+    var esperado_e = _u8(n, 0)
+    var esperado_ou = _u8(n, 0)
+    var vals = List[Int]()
+    vals.append(Tri.FALSO)
+    vals.append(Tri.DESCONHECIDO)
+    vals.append(Tri.VERDADEIRO)
+    var k = 0
+    for i in range(3):
+        for j in range(3):
+            a[k] = UInt8(vals[i])
+            b[k] = UInt8(vals[j])
+            esperado_e[k] = UInt8(min(vals[i], vals[j]))
+            esperado_ou[k] = UInt8(max(vals[i], vals[j]))
+            k += 1
+    var out = _u8(n, 0)
+    tri_e(a, b, out, n)
+    for i in range(n):
+        assert_equal(out[i], esperado_e[i])
+    tri_ou(a, b, out, n)
+    for i in range(n):
+        assert_equal(out[i], esperado_ou[i])
+    # NAO: F->V, D->D, V->F
+    var tres = _u8(3, 0)
+    tres[0] = UInt8(Tri.FALSO)
+    tres[1] = UInt8(Tri.DESCONHECIDO)
+    tres[2] = UInt8(Tri.VERDADEIRO)
+    var neg = _u8(3, 0)
+    tri_nao(tres, neg, 3)
+    assert_equal(Int(neg[0]), Tri.VERDADEIRO)
+    assert_equal(Int(neg[1]), Tri.DESCONHECIDO)
+    assert_equal(Int(neg[2]), Tri.FALSO)
+
+
+def test_m4_kernel_soma_ignora_ausentes() raises:
+    var n = 10
+    var d = List[Float64](capacity=n)
+    var na = _u8(n, 0)
+    for i in range(n):
+        d.append(Float64(i))
+    na[3] = UInt8(1)
+    na[7] = UInt8(1)
+    assert_equal(soma_f64(d, na, n), 45.0 - 3.0 - 7.0)
+    assert_equal(contar_marcados(na, n), 2)
+
+
+def test_m4_kernel_calendario_bate_com_escalar() raises:
+    """SIMD em Int32 tem de dar exatamente o mesmo que o algoritmo escalar."""
+    var n = 1000
+    var dias = List[Float64](capacity=n)
+    for i in range(n):
+        dias.append(Float64(i * 37 - 10_000))
+    var out = List[Float64](capacity=n)
+    for _ in range(n):
+        out.append(0.0)
+
+    calendario_f64(0, dias, out, n)
+    for i in range(n):
+        assert_equal(Int(out[i]), civil_de_dias(Int(dias[i])).ano)
+    calendario_f64(1, dias, out, n)
+    for i in range(n):
+        assert_equal(Int(out[i]), civil_de_dias(Int(dias[i])).mes)
+    calendario_f64(2, dias, out, n)
+    for i in range(n):
+        assert_equal(Int(out[i]), civil_de_dias(Int(dias[i])).dia)
+
+
+def test_m4_dicionario_quando_ha_repeticao() raises:
+    var repetida = Coluna.de_textos("cidade", ["SP", "RJ", "SP", "BH", "SP"])
+    assert_true(repetida.eh_dicionarizada())
+    assert_equal(repetida.cardinalidade(), 3)
+    assert_equal(repetida.texto_em(0), "SP")
+    assert_equal(repetida.texto_em(3), "BH")
+    assert_equal(Int(repetida.codigo_de("RJ")), 1)
+    assert_equal(Int(repetida.codigo_de("XX")), -1)
+
+    # tudo distinto: nao compensa dicionarizar
+    var distinta = Coluna.de_textos("id", ["a", "b", "c"])
+    assert_false(distinta.eh_dicionarizada())
+    assert_equal(distinta.texto_em(2), "c")
+
+
+def test_m4_dicionario_preserva_na() raises:
+    var c = Coluna.de_textos(
+        "cidade", ["SP", "", "SP", "RJ"], [False, True, False, False]
+    )
+    assert_true(c.eh_dicionarizada())
+    assert_equal(c.texto_em(1), "NA")
+    assert_equal(c.contar_ausentes(), 1)
+
+
+def test_m4_filtro_por_dicionario_bate_com_escalar() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    assert_true(t.pegar("cidade").eh_dicionarizada())
+    var sp = t.onde(coluna("cidade").eq(lit_texto("SP"))).coletar()
+    assert_equal(sp.linhas(), 3)
+    var nao_sp = t.onde(coluna("cidade").ne(lit_texto("SP"))).coletar()
+    assert_equal(nao_sp.linhas(), 2)
+    # literal fora do dicionario: nenhuma linha casa
+    var nenhuma = t.onde(coluna("cidade").eq(lit_texto("XYZ"))).coletar()
+    assert_equal(nenhuma.linhas(), 0)
+
+
+def test_m4_validity_conta_em_tempo_constante() raises:
+    var v = Validity.de_lista([False, True, False, True])
+    assert_equal(v.contar_ausentes(), 2)
+    assert_true(v.tem_ausentes())
+    var vazia = Validity.todos_presentes(100)
+    assert_equal(vazia.contar_ausentes(), 0)
+    assert_false(vazia.tem_ausentes())
+    var bytes = vazia.para_bytes()
+    assert_equal(len(bytes), 100)
+    assert_equal(bytes[99], UInt8(0))
+
+
+def test_m4_validity_para_bytes_desempacota() raises:
+    var v = Validity.de_lista([False, True, False, True, False, False, False, False, True])
+    var b = v.para_bytes()
+    assert_equal(len(b), 9)
+    assert_equal(b[1], UInt8(1))
+    assert_equal(b[3], UInt8(1))
+    assert_equal(b[8], UInt8(1))
+    assert_equal(b[0], UInt8(0))
+
+
+def test_m4_reducoes_batem_com_escalar() raises:
+    var n = largura_f64() * 5 + 3
+    var vals = List[Float64](capacity=n)
+    var aus = List[Bool](capacity=n)
+    var esperado = Float64(0)
+    for i in range(n):
+        var v = Float64((i * 7) % 23) - 5.0
+        vals.append(v)
+        var ausente = i % 11 == 0
+        aus.append(ausente)
+        if not ausente:
+            esperado += v
+    var c = Coluna.de_reais("x", vals^, aus^)
+    assert_equal(c.soma(), esperado)
+    assert_equal(c.media(), esperado / Float64(c.contar_validos()))
 
 
 def main() raises:

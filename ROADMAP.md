@@ -30,13 +30,13 @@ Isto não é decoração. Cada linha abaixo é uma decisão de design do Tucano.
 |---|---|---|---|
 | **Index implícito com alinhamento automático** | `a + b` vira NaN silencioso; `reset_index()` em todo lugar | Sem index de rótulo. Join é sempre explícito | M2.5 |
 | **NaN como único missing** | Int com 1 nulo vira `float64` e perde precisão | Validity bitmap separado do valor: Int64 continua Int64 com NA | ✅ M1 |
-| **String = `object` dtype** | Um ponteiro Python por célula, zero vetorização | `StringStore` (offsets + bytes) + dictionary encoding | ✅ M1 / M4 |
+| **String = `object` dtype** | Um ponteiro Python por célula, zero vetorização | `StringStore` (offsets + bytes) + dictionary encoding — `cidade == "SP"` medido 4,2× | ✅ M1 / M4 |
 | **View vs. copy indecidível** | `SettingWithCopyWarning`; ninguém sabe se mutou | Ownership do Mojo (`var` / `^` / `ref`) resolve em compile-time | ✅ grátis |
 | **Eager sem plano** | `df[df.a>5][['b','c']]` materializa o intermediário | Lazy por padrão + pushdown | ✅ M2 / M8 |
-| **`apply(lambda)` 100x lento em silêncio** | O usuário nunca sabe que caiu do caminho rápido | Plano inspecionável + **aviso explícito ao sair do kernel vetorizado** | M3 |
+| **`apply(lambda)` 100x lento em silêncio** | O usuário nunca sabe que caiu do caminho rápido | Plano inspecionável + **aviso explícito ao sair do kernel vetorizado** | ✅ M3 |
 | **~600 métodos, 5 formas de indexar** | `.loc`/`.iloc`/`.at`/`.iat`/`[]`, `apply`/`map`/`agg`/`transform` | **Uma forma por operação.** Sinônimos são recusados | permanente |
 | **Coerção silenciosa de tipo** | Concat de tipos diferentes → `object` | Erro, nunca coerção implícita | ✅ prática atual |
-| **Single-threaded (GIL)** | 1 core de 16 | Paralelismo automático por chunk | M4 |
+| **Single-threaded (GIL)** | 1 core de 16 | SIMD por padrão (2–4,7× medido); paralelismo por chunk bloqueado no Mojo 1.0 | ✅ SIMD / ⛔ threads |
 | **2–5x a RAM do dado** | `inplace=True` mente e copia mesmo assim | Moves explícitos, zero-copy onde couber | parcial |
 | **`groupby.apply` com shape imprevisível** | O retorno muda conforme a função | Só agregações tipadas | M6 |
 | **`KeyError: 'idade'` e nada mais** | Um typo custa 5 minutos | `coluna inexistente: 'idade'. Você quis dizer 'idades'?` | M2.5 |
@@ -107,7 +107,9 @@ São três provas, em ordem de honestidade:
 
 ## Estado atual do código (honestidade)
 
-**M0, M1, M2, M2.5 e M3 fechados.** Próximo: **M4 — SIMD + Parallel**. 48 testes verdes.
+**M0, M1, M2, M2.5, M3 e M4 (parcial) fechados.** Próximo: **M5 — I/O + Streaming**. 60 testes verdes.
+
+O M4 entregou SIMD e dictionary encoding com ganhos medidos. **Paralelismo ficou bloqueado** por ausência de primitiva no stdlib do Mojo 1.0 — detalhes na seção do M4.
 
 | Peça | Status |
 |------|--------|
@@ -125,6 +127,11 @@ São três provas, em ordem de honestidade:
 | `com_coluna()` + inferência de tipo derivado | ✅ M3 |
 | Plano físico + avisos de caminho escalar | ✅ M3 |
 | Propagação de esquema sem executar | ✅ M3 |
+| Kernels SIMD (aritmética, comparação, reduções) | ✅ M4 |
+| Dictionary encoding automático em texto | ✅ M4 |
+| Kernel de calendário em Int32 | ✅ M4 |
+| Paralelismo por chunk | ❌ **bloqueado** — sem primitiva no Mojo 1.0 |
+| Slab de data em Int32 | ❌ adiado para M5 |
 | `ler_csv` / `para_csv` | ponte — refazer em M5 |
 | Publicação em canal conda | ❌ exige canal próprio |
 | `DType.DATAHORA` | ❌ adiado para M5 |
@@ -151,8 +158,8 @@ São três provas, em ordem de honestidade:
 | M2 | Expression Engine | crítica | ✅ feito | expressões + plano lógico |
 | M2.5 | Biblioteca + Correções | crítica | ✅ feito | instalável, sem dívidas de fundação |
 | M3 | Execution Engine | crítica | ✅ feito | executor coluna-a-coluna |
-| **M4** | **SIMD + Parallel** | **crítica** | **próximo** | kernels vetorizados/paralelos |
-| M5 | I/O + Streaming | crítica | parcial (CSV ponte) | scanner tipado + Parquet |
+| M4 | SIMD (+ Parallel) | crítica | ✅ SIMD / ⛔ paralelo | kernels vetorizados |
+| **M5** | **I/O + Streaming** | **crítica** | **próximo** | scanner tipado + Parquet |
 | M6 | Aggregation + Join | crítica | não iniciado | group/join como operadores |
 | M7 | Painel | alta | não iniciado | dashboard nativo |
 | M8 | Optimizer | crítica | não iniciado | pushdown + folding + reorder |
@@ -338,42 +345,78 @@ otimizador do M8.
 
 ---
 
-## M4 — SIMD + Parallel
+## M4 — SIMD ✅ (+ Parallel ⛔ bloqueado)
 
 A justificativa de usar Mojo: kernels especializados que o pandas não pode ter.
 
-- filter, sum, min, max, mean, comparação, aritmética
-- SIMD chunks + mask + reduce
-- multithreading por chunk, cache-aware
-- seleção automática de kernel — o usuário nunca escreve paralelo
+### Ganhos medidos
+
+`pixi run bench-m4` compara cada kernel com o **laço escalar equivalente**, escrito no
+próprio bench, sobre os mesmos dados. Não é afirmação, é medição (n = 5M, AVX2, 4×Float64):
+
+| Operação | Escalar | SIMD | Ganho |
+|---|---|---|---|
+| `soma()` | 7158 µs | 3069 µs | **2,33×** |
+| `a + b` elementwise | 12373 µs | 9582 µs | 1,29× |
+| comparação → máscara | 19437 µs | 6328 µs | **3,07×** |
+| `mes(data)` | 50372 µs | 10707 µs | **4,70×** |
+| `cidade == "SP"` (1M) | 2693 µs | 639 µs | **4,21×** |
+
+`a + b` fica em 1,29× porque é *memory-bound*: lê dois vetores e escreve um terceiro. A
+banda de memória é o teto, não a ALU.
+
+### Três achados que valem mais que o código
+
+**1. A ordem do `Tri` não é arbitrária.** Trocando para a ordem do reticulado de Kleene —
+`FALSO=0 < DESCONHECIDO=1 < VERDADEIRO=2` — o `E` vira `min`, o `OU` vira `max` e o `NÃO`
+vira `2 - x`. Cada conectivo passa a ser **uma instrução SIMD**, em vez de uma cadeia de
+desvios. A semântica é idêntica; só a numeração mudou.
+
+**2. Int64 não vetoriza divisão no AVX2.** O `civil_de_dias` só divide por constantes, o que
+o compilador troca por multiplicação e deslocamento. Em Int64 isso exige multiplicação
+64×64→128, que o AVX2 não tem: **ganho medido 1,00×**. Reescrito em Int32 (todos os
+intermediários cabem com folga), o mesmo algoritmo dá **4,70×** — e ainda dobra as pistas.
+
+**3. A máscara desempacotada custava mais que a redução.** A primeira versão de `soma()`
+desempacotava o bitmap de validade para bytes antes de reduzir: ganho 1,12×. Com a contagem
+de ausentes mantida na construção (`Validity.n_ausentes`, O(1)) e um kernel denso para o
+caso sem ausentes, foi para **2,33×**.
 
 ### Dictionary encoding
 
-Colunas de texto de baixa cardinalidade (cidade, estado, categoria) viram códigos `Int32`:
+Coluna de texto com repetição guarda valores distintos + um `Int32` por linha.
+`cidade == "SP"` resolve o literal para um código **uma vez** — varrendo só os distintos — e
+o filtro vira comparação de inteiros vetorizada. O pandas compara ponteiros de objeto
+Python, um por vez.
 
-- `cidade == "Curitiba"` vira comparação de inteiros → SIMD puro
-- groupby por chave dicionarizada vira **indexação direta de array**, sem hash
-- sort vira **radix sort paralelo**, não comparação
+No M6 a mesma estrutura faz groupby por chave dicionarizada virar **indexação direta de
+array**, sem hash.
 
-Pandas compara ponteiros de objeto Python, um por vez. Esta é a diferença algorítmica, não só de linguagem.
+### Paralelismo — bloqueado
 
-### Ponto de partida (herdado do M3)
+**O stdlib do Mojo 1.0 não expõe `parallelize`.** Existem `TaskGroup` e `create_task` em
+`std.runtime.asyncrt`, mas: um `TaskGroup()` destruído sem uso já aborta o processo
+(`destroying a non-available AsyncValue isn't implemented`), e passar ponteiros para uma
+`async def` exige apagar a origem — `unsafe_ptr()` devolve `Pointer` com origem amarrada, e
+não há `origin_cast` nem `MutableAnyOrigin` acessíveis.
 
-O laço interno do executor já tem a forma certa: `List[Float64]` contíguo, máscara separada,
-e o tipo de operação decidido **fora** do laço. Trocar o laço escalar por um kernel SIMD é
-uma substituição local, não uma reescrita.
-
-Os `avisos()` do M3 já apontam exatamente onde falta kernel — comparação de texto e extrator
-de data. Quando o M4 fechar, esses avisos somem.
+Construir paralelismo de dados sobre isso hoje seria frágil. Vira **trilha própria**, a
+retomar quando o stdlib expuser uma primitiva estável.
 
 ### Critério de saída
 
-- [ ] Kernels SIMD nas ops numéricas críticas
-- [ ] Paralelismo por chunks
-- [ ] Dictionary encoding automático por cardinalidade
-- [ ] Estreitar o slab de data para Int32
-- [ ] Speedup mensurável vs. baseline `bench_m3` em 10M+ linhas
-- [ ] Lista de `avisos()` vazia para comparação de texto e extrator de data
+- [x] Kernels SIMD nas ops numéricas críticas
+- [x] Dictionary encoding automático por cardinalidade
+- [x] Kernel de calendário (em Int32, pelo motivo acima)
+- [x] Speedup mensurável contra laço escalar equivalente — tabela acima
+- [x] `avisos()` vazio para extrator de data e texto dicionarizado
+- [x] 60 testes verdes, incluindo equivalência SIMD × escalar
+- [ ] Paralelismo por chunks — **bloqueado**, trilha própria
+- [ ] Estreitar o slab de data para Int32 — adiado para M5
+
+> O slab de data continua Int64. O motivo que fazia isso urgente era o **cálculo**, e esse já
+> está resolvido: o kernel de calendário converte para Int32. O que resta é economia de
+> memória, que cabe melhor no M5, junto da reescrita da camada de storage no scanner.
 
 ---
 
@@ -399,6 +442,7 @@ Pushdown nasce no design, não como afterthought.
 - [ ] `ler_csv` / `para_csv` sobre o Memory Engine, sem `String.split`
 - [ ] Schema explícito opcional na leitura
 - [ ] `DType.DATAHORA` (Int64) com parsing ISO-8601 completo — herdado do M2.5
+- [ ] Slab de data em Int32 — herdado do M4
 - [ ] `ler_parquet` / `para_parquet` com pruning básico
 - [ ] Caminho de streaming por chunks
 
@@ -620,6 +664,7 @@ E, a partir do M7, a métrica que é nossa: **latência de filtro de painel** e 
 3. ~~**M2**: Expression Engine (`coluna` / `lit` / plano lógico / `coletar`)~~
 4. ~~**M2.5**: empacotar a biblioteca, remover `Tabela.indice`, NA de três valores, `DType.DATA`~~
 5. ~~**M3**: executor coluna-a-coluna, `com_coluna()`, lazy por padrão~~
-6. **M4**: kernels SIMD sobre os slabs, paralelismo por chunk, dictionary encoding
-7. Manter o CSV atual só como ponte — não investir em features List-based novas
-8. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5
+6. ~~**M4**: kernels SIMD sobre os slabs, dictionary encoding~~
+7. **M5**: scanner CSV tipado (bytes → buffers), Parquet com pruning, slab de data em Int32
+8. Reavaliar paralelismo quando o stdlib do Mojo expuser primitiva estável
+9. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5

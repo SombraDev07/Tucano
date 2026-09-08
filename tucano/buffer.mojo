@@ -21,10 +21,24 @@ struct Validity(Copyable, Movable):
 
     var n: Int
     var bits: List[UInt8]
+    var n_ausentes: Int
+    """Contagem mantida na construcao: `contar_ausentes()` e O(1).
 
-    def __init__(out self, n: Int, var bits: List[UInt8]):
+    Sem isso, todo kernel que quer saber "esta coluna tem ausente?" paga uma
+    varredura antes de comecar — e no caso comum (nenhum ausente) essa varredura
+    custa mais que a reducao inteira.
+    """
+
+    def __init__(out self, n: Int, var bits: List[UInt8], n_ausentes: Int = -1):
         self.n = n
         self.bits = bits^
+        if n_ausentes >= 0:
+            self.n_ausentes = n_ausentes
+        else:
+            self.n_ausentes = 0
+            for i in range(self.n):
+                if ((Int(self.bits[i // 8]) >> (i % 8)) & 1) == 1:
+                    self.n_ausentes += 1
 
     @staticmethod
     def todos_presentes(n: Int) -> Self:
@@ -32,7 +46,7 @@ struct Validity(Copyable, Movable):
         var bits = List[UInt8](capacity=nb)
         for _ in range(nb):
             bits.append(UInt8(0))
-        return Self(n, bits^)
+        return Self(n, bits^, 0)
 
     @staticmethod
     def de_lista(ausentes: List[Bool]) -> Self:
@@ -41,13 +55,15 @@ struct Validity(Copyable, Movable):
         var bits = List[UInt8](capacity=nb)
         for _ in range(nb):
             bits.append(UInt8(0))
+        var total = 0
         for i in range(n):
             if ausentes[i]:
                 var byte_i = i // 8
                 var bit_i = i % 8
                 var atual = Int(bits[byte_i])
                 bits[byte_i] = UInt8(atual | (1 << bit_i))
-        return Self(n, bits^)
+                total += 1
+        return Self(n, bits^, total)
 
     def tamanho(self) -> Int:
         return self.n
@@ -65,19 +81,41 @@ struct Validity(Copyable, Movable):
         var byte_i = i // 8
         var bit_i = i % 8
         var atual = Int(self.bits[byte_i])
+        if ((atual >> bit_i) & 1) == 0:
+            self.n_ausentes += 1
         self.bits[byte_i] = UInt8(atual | (1 << bit_i))
 
     def contar_ausentes(self) -> Int:
-        var total = 0
-        for i in range(self.n):
-            var byte_i = i // 8
-            var bit_i = i % 8
-            if ((Int(self.bits[byte_i]) >> bit_i) & 1) == 1:
-                total += 1
-        return total
+        return self.n_ausentes
+
+    def tem_ausentes(self) -> Bool:
+        return self.n_ausentes > 0
 
     def contar_validos(self) -> Int:
         return self.n - self.contar_ausentes()
+
+    def para_bytes(self) -> List[UInt8]:
+        """Desempacota o bitmap para um byte por linha (0 presente, 1 ausente).
+
+        Os kernels SIMD do M4 operam sobre bytes: extrair bit a bit dentro do
+        laco de dados custa mais do que desempacotar uma vez.
+        """
+        var out = List[UInt8](capacity=self.n)
+        if self.n_ausentes == 0:
+            for _ in range(self.n):
+                out.append(UInt8(0))
+            return out^
+        var i = 0
+        while i < self.n:
+            var byte = Int(self.bits[i // 8])
+            var restantes = self.n - i
+            var ate = 8
+            if restantes < 8:
+                ate = restantes
+            for b in range(ate):
+                out.append(UInt8((byte >> b) & 1))
+            i += ate
+        return out^
 
     def para_lista(self) raises -> List[Bool]:
         var saida = List[Bool](capacity=self.n)

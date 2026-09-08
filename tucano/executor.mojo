@@ -17,7 +17,21 @@ from .expr import Expr, ExprNode, Kind
 from .dtype import DType
 from .vetor import Vetor
 from .plano import Etapa, TipoEtapa
-from .datas import civil_de_dias
+from .kernels import (
+    contar_marcados,
+    add_f64,
+    sub_f64,
+    mul_f64,
+    div_f64,
+    ou_na,
+    cmp_f64,
+    cmp_i32,
+    tri_e,
+    tri_ou,
+    tri_nao,
+    tri_para_keep,
+    calendario_f64,
+)
 
 
 # ------------------------------------------------------------------- lote
@@ -125,27 +139,39 @@ def esquema_apos(esq: List[Campo], etapas: List[Etapa]) raises -> List[Campo]:
 
 
 struct Tri:
-    """Valor logico de tres estados.
+    """Valor logico de tres estados, na ordem do reticulado de Kleene.
 
     Comparar com ausente nao da Falso: da Desconhecido. `onde()` mantem apenas
     Verdadeiro, entao a linha ausente e descartada com ou sem negacao.
+
+        FALSO = 0  <  DESCONHECIDO = 1  <  VERDADEIRO = 2
+
+    A ordem nao e arbitraria: com ela `E` e `min`, `OU` e `max` e `NAO` e
+    `2 - x`. Cada conectivo vira uma unica instrucao SIMD (M4).
     """
 
     comptime FALSO = 0
-    comptime VERDADEIRO = 1
-    comptime DESCONHECIDO = 2
+    comptime DESCONHECIDO = 1
+    comptime VERDADEIRO = 2
 
 
-def _de_bool(b: Bool) -> Int:
+def _de_bool(b: Bool) -> UInt8:
     if b:
-        return Tri.VERDADEIRO
-    return Tri.FALSO
+        return UInt8(Tri.VERDADEIRO)
+    return UInt8(Tri.FALSO)
 
 
-def _lista_tri(n: Int, valor: Int) -> List[Int]:
-    var out = List[Int](capacity=n)
+def _lista_tri(n: Int, valor: UInt8) -> List[UInt8]:
+    var out = List[UInt8](capacity=n)
     for _ in range(n):
         out.append(valor)
+    return out^
+
+
+def _zeros_u8(n: Int) -> List[UInt8]:
+    var out = List[UInt8](capacity=n)
+    for _ in range(n):
+        out.append(UInt8(0))
     return out^
 
 
@@ -160,35 +186,28 @@ def extrair_coluna(cols: List[Coluna], nome: String) raises -> Vetor:
     """
     ref col = cols[posicao_no_lote(cols, nome)]
     var n = col.tamanho()
+    # bitmap -> bytes de uma vez; o laco de valores fica sem extracao de bit
+    var na = col.validity_bits.para_bytes()
 
     if col.tipo == DType.TEXTO:
         var vt = Vetor.textual(n)
+        vt.na = na^
         for i in range(n):
-            if col.eh_ausente(i):
-                vt.na[i] = True
-            else:
-                vt.textos[i] = col.textos.get(i)
+            if vt.na[i] == 0:
+                vt.textos[i] = col.texto_bruto(i)
         return vt^
 
     var v = Vetor.numerico(n)
+    v.na = na^
     if col.tipo == DType.REAL:
         for i in range(n):
-            if col.eh_ausente(i):
-                v.na[i] = True
-            else:
-                v.reais[i] = col.reals[i]
+            v.reais[i] = col.reals[i]
     elif col.tipo == DType.INTEIRO or col.tipo == DType.DATA:
         for i in range(n):
-            if col.eh_ausente(i):
-                v.na[i] = True
-            else:
-                v.reais[i] = Float64(col.ints[i])
+            v.reais[i] = Float64(col.ints[i])
     elif col.tipo == DType.LOGICO:
         for i in range(n):
-            if col.eh_ausente(i):
-                v.na[i] = True
-            else:
-                v.reais[i] = Float64(Int(col.logics[i]))
+            v.reais[i] = Float64(Int(col.logics[i]))
     else:
         raise Error("tipo de coluna nao suportado em expressao: " + nome)
     return v^
@@ -227,24 +246,13 @@ def _avaliar_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> Vetor:
         if filho.eh_texto:
             raise Error("extrator de data exige expressao de data")
         var v = Vetor.numerico(linhas)
-        if k == Kind.ANO:
-            for i in range(linhas):
-                if filho.na[i]:
-                    v.na[i] = True
-                else:
-                    v.reais[i] = Float64(civil_de_dias(Int(filho.reais[i])).ano)
-        elif k == Kind.MES:
-            for i in range(linhas):
-                if filho.na[i]:
-                    v.na[i] = True
-                else:
-                    v.reais[i] = Float64(civil_de_dias(Int(filho.reais[i])).mes)
-        else:
-            for i in range(linhas):
-                if filho.na[i]:
-                    v.na[i] = True
-                else:
-                    v.reais[i] = Float64(civil_de_dias(Int(filho.reais[i])).dia)
+        v.na = filho.na.copy()
+        var comp = 0  # ano
+        if k == Kind.MES:
+            comp = 1
+        elif k == Kind.DIA:
+            comp = 2
+        calendario_f64(comp, filho.reais, v.reais, linhas)
         return v^
 
     if k == Kind.ADD or k == Kind.SUB or k == Kind.MUL or k == Kind.DIV:
@@ -253,31 +261,16 @@ def _avaliar_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> Vetor:
         if a.eh_texto or b.eh_texto:
             raise Error("aritmetica sobre coluna de texto")
         var v = Vetor.numerico(linhas)
-        # o tipo da operacao e decidido FORA do laco: forma que o M4 vetoriza
+        # kernel SIMD, com o tipo da operacao decidido FORA do laco
+        ou_na(a.na, b.na, v.na, linhas)
         if k == Kind.ADD:
-            for i in range(linhas):
-                if a.na[i] or b.na[i]:
-                    v.na[i] = True
-                else:
-                    v.reais[i] = a.reais[i] + b.reais[i]
+            add_f64(a.reais, b.reais, v.reais, linhas)
         elif k == Kind.SUB:
-            for i in range(linhas):
-                if a.na[i] or b.na[i]:
-                    v.na[i] = True
-                else:
-                    v.reais[i] = a.reais[i] - b.reais[i]
+            sub_f64(a.reais, b.reais, v.reais, linhas)
         elif k == Kind.MUL:
-            for i in range(linhas):
-                if a.na[i] or b.na[i]:
-                    v.na[i] = True
-                else:
-                    v.reais[i] = a.reais[i] * b.reais[i]
+            mul_f64(a.reais, b.reais, v.reais, linhas)
         else:
-            for i in range(linhas):
-                if a.na[i] or b.na[i]:
-                    v.na[i] = True
-                else:
-                    v.reais[i] = a.reais[i] / b.reais[i]
+            div_f64(a.reais, b.reais, v.reais, linhas)
         return v^
 
     raise Error("no de expressao nao avaliavel como valor: kind " + String(k))
@@ -286,14 +279,14 @@ def _avaliar_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> Vetor:
 # ------------------------------------------------------- logica de 3 valores
 
 
-def avaliar_tri(expr: Expr, cols: List[Coluna]) raises -> List[Int]:
+def avaliar_tri(expr: Expr, cols: List[Coluna]) raises -> List[UInt8]:
     """Mascara de tres valores para a tabela inteira."""
     if expr.vazia():
         raise Error("expressao vazia")
     return _tri_no(expr, expr.root, cols)
 
 
-def _tri_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> List[Int]:
+def _tri_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> List[UInt8]:
     var n = expr.nodes[idx].copy()
     var linhas = n_linhas(cols)
     var k = n.kind
@@ -309,46 +302,29 @@ def _tri_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> List[Int]:
                 + " (use uma comparacao)"
             )
         ref col = cols[posicao_no_lote(cols, n.nome)]
-        var out = List[Int](capacity=linhas)
+        var na = col.validity_bits.para_bytes()
+        var out = List[UInt8](capacity=linhas)
         for i in range(linhas):
-            if col.eh_ausente(i):
-                out.append(Tri.DESCONHECIDO)
+            if na[i] != 0:
+                out.append(UInt8(Tri.DESCONHECIDO))
             else:
                 out.append(_de_bool(Int(col.logics[i]) != 0))
         return out^
 
     if k == Kind.NOT:
         var filho = _tri_no(expr, n.left, cols)
-        var out = List[Int](capacity=linhas)
-        for i in range(linhas):
-            if filho[i] == Tri.DESCONHECIDO:
-                out.append(Tri.DESCONHECIDO)
-            elif filho[i] == Tri.VERDADEIRO:
-                out.append(Tri.FALSO)
-            else:
-                out.append(Tri.VERDADEIRO)
+        var out = _zeros_u8(linhas)
+        tri_nao(filho, out, linhas)  # NAO de Kleene = 2 - x
         return out^
 
     if k == Kind.AND or k == Kind.OR:
         var a = _tri_no(expr, n.left, cols)
         var b = _tri_no(expr, n.right, cols)
-        var out = List[Int](capacity=linhas)
+        var out = _zeros_u8(linhas)
         if k == Kind.AND:
-            for i in range(linhas):
-                if a[i] == Tri.FALSO or b[i] == Tri.FALSO:
-                    out.append(Tri.FALSO)
-                elif a[i] == Tri.DESCONHECIDO or b[i] == Tri.DESCONHECIDO:
-                    out.append(Tri.DESCONHECIDO)
-                else:
-                    out.append(Tri.VERDADEIRO)
+            tri_e(a, b, out, linhas)  # E de Kleene = min
         else:
-            for i in range(linhas):
-                if a[i] == Tri.VERDADEIRO or b[i] == Tri.VERDADEIRO:
-                    out.append(Tri.VERDADEIRO)
-                elif a[i] == Tri.DESCONHECIDO or b[i] == Tri.DESCONHECIDO:
-                    out.append(Tri.DESCONHECIDO)
-                else:
-                    out.append(Tri.FALSO)
+            tri_ou(a, b, out, linhas)  # OU de Kleene = max
         return out^
 
     if (
@@ -359,6 +335,11 @@ def _tri_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> List[Int]:
         or k == Kind.EQ
         or k == Kind.NE
     ):
+        # caminho rapido: coluna de texto dicionarizada vs. literal
+        var rapido = _cmp_dicionario(expr, n, cols, k)
+        if len(rapido) == linhas:
+            return rapido^
+
         var a = _avaliar_no(expr, n.left, cols)
         var b = _avaliar_no(expr, n.right, cols)
         if a.eh_texto != b.eh_texto:
@@ -368,22 +349,90 @@ def _tri_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> List[Int]:
                 + expr.descrever()
                 + " — converta explicitamente"
             )
-        var out = List[Int](capacity=linhas)
+        var out = _zeros_u8(linhas)
         if a.eh_texto:
+            var na = _zeros_u8(linhas)
+            ou_na(a.na, b.na, na, linhas)
             for i in range(linhas):
-                if a.na[i] or b.na[i]:
-                    out.append(Tri.DESCONHECIDO)
+                if na[i] != 0:
+                    out[i] = UInt8(Tri.DESCONHECIDO)
                 else:
-                    out.append(_de_bool(_cmp_texto(k, a.textos[i], b.textos[i])))
+                    out[i] = _de_bool(_cmp_texto(k, a.textos[i], b.textos[i]))
         else:
-            for i in range(linhas):
-                if a.na[i] or b.na[i]:
-                    out.append(Tri.DESCONHECIDO)
-                else:
-                    out.append(_de_bool(_cmp_num(k, a.reais[i], b.reais[i])))
+            var na = _zeros_u8(linhas)
+            ou_na(a.na, b.na, na, linhas)
+            cmp_f64(_codigo_op(k), a.reais, b.reais, na, out, linhas)
         return out^
 
     raise Error("expressao de filtro nao booleana")
+
+
+def _cmp_dicionario(
+    expr: Expr, n: ExprNode, cols: List[Coluna], k: Int
+) raises -> List[UInt8]:
+    """Caminho rapido: coluna de texto dicionarizada vs. literal de texto.
+
+    `cidade == "SP"` vira comparacao de Int32 vetorizada. O texto e resolvido
+    para um codigo UMA vez, varrendo so os valores distintos.
+
+    Devolve lista vazia quando o padrao nao se aplica — o chamador cai no
+    caminho geral.
+    """
+    if k != Kind.EQ and k != Kind.NE:
+        return List[UInt8]()
+
+    var esq = expr.nodes[n.left].copy()
+    var dir = expr.nodes[n.right].copy()
+    var nome = String("")
+    var literal = String("")
+    if esq.kind == Kind.COLUNA and dir.kind == Kind.LIT_STR:
+        nome = esq.nome
+        literal = dir.texto
+    elif dir.kind == Kind.COLUNA and esq.kind == Kind.LIT_STR:
+        nome = dir.nome
+        literal = esq.texto
+    else:
+        return List[UInt8]()
+
+    var pos = posicao_no_lote(cols, nome)
+    ref col = cols[pos]
+    if col.tipo != DType.TEXTO or not col.eh_dicionarizada():
+        return List[UInt8]()
+
+    var linhas = col.tamanho()
+    var na = col.validity_bits.para_bytes()
+    var out = _zeros_u8(linhas)
+    var code = col.codigo_de(literal)
+
+    if code < 0:
+        # o literal nao esta no dicionario: nenhuma linha casa
+        var constante = UInt8(Tri.FALSO)
+        if k == Kind.NE:
+            constante = UInt8(Tri.VERDADEIRO)
+        for i in range(linhas):
+            if na[i] != 0:
+                out[i] = UInt8(Tri.DESCONHECIDO)
+            else:
+                out[i] = constante
+        return out^
+
+    cmp_i32(_codigo_op(k), col.codigos, code, na, out, linhas)
+    return out^
+
+
+def _codigo_op(k: Int) -> Int:
+    """Kind de comparacao -> codigo do kernel (0 gt .. 5 ne)."""
+    if k == Kind.GT:
+        return 0
+    if k == Kind.GE:
+        return 1
+    if k == Kind.LT:
+        return 2
+    if k == Kind.LE:
+        return 3
+    if k == Kind.EQ:
+        return 4
+    return 5
 
 
 def _cmp_num(k: Int, a: Float64, b: Float64) -> Bool:
@@ -461,7 +510,7 @@ def vetor_para_coluna(nome: String, v: Vetor, tipo: Int) raises -> Coluna:
     var n = v.tamanho()
     var aus = List[Bool](capacity=n)
     for i in range(n):
-        aus.append(v.na[i])
+        aus.append(v.na[i] != 0)
 
     if tipo == DType.TEXTO:
         var textos = List[String](capacity=n)
@@ -492,17 +541,14 @@ def vetor_para_coluna(nome: String, v: Vetor, tipo: Int) raises -> Coluna:
 # ------------------------------------------------------------ operadores fisicos
 
 
-def filtrar_coluna(col: Coluna, keep: List[Bool]) raises -> Coluna:
-    var n_out = 0
-    for flag in keep:
-        if flag:
-            n_out += 1
+def filtrar_coluna(col: Coluna, keep: List[UInt8]) raises -> Coluna:
+    var n_out = contar_marcados(keep, col.tamanho())
 
     if col.tipo == DType.INTEIRO or col.tipo == DType.DATA:
         var vals = List[Int64](capacity=n_out)
         var aus = List[Bool](capacity=n_out)
         for i in range(col.tamanho()):
-            if keep[i]:
+            if keep[i] != 0:
                 vals.append(col.ints[i])
                 aus.append(col.eh_ausente(i))
         if col.tipo == DType.DATA:
@@ -513,7 +559,7 @@ def filtrar_coluna(col: Coluna, keep: List[Bool]) raises -> Coluna:
         var vals = List[Float64](capacity=n_out)
         var aus = List[Bool](capacity=n_out)
         for i in range(col.tamanho()):
-            if keep[i]:
+            if keep[i] != 0:
                 vals.append(col.reals[i])
                 aus.append(col.eh_ausente(i))
         return Coluna.de_reais(col.nome, vals^, aus^)
@@ -522,7 +568,7 @@ def filtrar_coluna(col: Coluna, keep: List[Bool]) raises -> Coluna:
         var vals = List[Bool](capacity=n_out)
         var aus = List[Bool](capacity=n_out)
         for i in range(col.tamanho()):
-            if keep[i]:
+            if keep[i] != 0:
                 vals.append(Int(col.logics[i]) != 0)
                 aus.append(col.eh_ausente(i))
         return Coluna.de_logicos(col.nome, vals^, aus^)
@@ -530,22 +576,22 @@ def filtrar_coluna(col: Coluna, keep: List[Bool]) raises -> Coluna:
     var vals = List[String](capacity=n_out)
     var aus = List[Bool](capacity=n_out)
     for i in range(col.tamanho()):
-        if keep[i]:
+        if keep[i] != 0:
             if col.eh_ausente(i):
                 vals.append("")
                 aus.append(True)
             else:
-                vals.append(col.textos.get(i))
+                vals.append(col.texto_bruto(i))
                 aus.append(False)
     return Coluna.de_textos(col.nome, vals^, aus^)
 
 
 def op_filtro(cols: List[Coluna], pred: Expr) raises -> List[Coluna]:
     """FilterExec: mascara de tres valores -> selecao. So Verdadeiro passa."""
+    var linhas = n_linhas(cols)
     var mascara = avaliar_tri(pred, cols)
-    var keep = List[Bool](capacity=len(mascara))
-    for m in mascara:
-        keep.append(m == Tri.VERDADEIRO)
+    var keep = _zeros_u8(linhas)
+    tri_para_keep(mascara, keep, linhas)
 
     var out = List[Coluna]()
     for c in cols:
@@ -605,31 +651,59 @@ def executar(cols: List[Coluna], etapas: List[Etapa]) raises -> List[Coluna]:
 # ---------------------------------------------------------------- avisos
 
 
-def avisos_expr(
-    expr: Expr, idx: Int, esq: List[Campo], mut saida: List[String]
-) raises:
-    """Marca os nos que nao terao kernel vetorizado no M4.
+def _tem_caminho_dicionario(
+    expr: Expr, n: ExprNode, cols: List[Coluna]
+) raises -> Bool:
+    """A comparacao casa com o padrao vetorizado coluna-dicionarizada vs literal?"""
+    if n.kind != Kind.EQ and n.kind != Kind.NE:
+        return False
+    var esq = expr.nodes[n.left].copy()
+    var dir = expr.nodes[n.right].copy()
+    var nome = String("")
+    if esq.kind == Kind.COLUNA and dir.kind == Kind.LIT_STR:
+        nome = esq.nome
+    elif dir.kind == Kind.COLUNA and esq.kind == Kind.LIT_STR:
+        nome = dir.nome
+    else:
+        return False
+    for c in cols:
+        if c.nome == nome:
+            return c.tipo == DType.TEXTO and c.eh_dicionarizada()
+    return False
 
-    O pandas nunca avisa que voce caiu do caminho rapido. Aqui avisa.
+
+def avisos_expr(
+    expr: Expr,
+    idx: Int,
+    esq: List[Campo],
+    cols: List[Coluna],
+    mut saida: List[String],
+) raises:
+    """Marca os nos que ainda nao tem kernel vetorizado.
+
+    O pandas nunca avisa que voce caiu do caminho rapido. Aqui avisa — e o aviso
+    some quando o kernel chega.
     """
     if idx < 0:
         return
     var n = expr.nodes[idx].copy()
     var k = n.kind
 
+    # comparacao dicionarizada e SIMD sobre Int32: nao avisa, nem desce na subarvore
+    if _tem_caminho_dicionario(expr, n, cols):
+        return
+
     if k == Kind.COLUNA:
         if tipo_no_esquema(esq, n.nome) == DType.TEXTO:
             saida.append(
                 "coluna de texto '"
                 + n.nome
-                + "': comparacao escalar byte a byte (dictionary encoding no M4)"
+                + "': comparacao escalar byte a byte (sem dicionario — "
+                + "cardinalidade alta demais ou coluna derivada)"
             )
         return
-    if k == Kind.ANO or k == Kind.MES or k == Kind.DIA:
-        saida.append("extrator de data: caminho escalar (kernel de calendario no M4)")
-
-    avisos_expr(expr, n.left, esq, saida)
-    avisos_expr(expr, n.right, esq, saida)
+    avisos_expr(expr, n.left, esq, cols, saida)
+    avisos_expr(expr, n.right, esq, cols, saida)
 
 
 def avisos_plano(cols: List[Coluna], etapas: List[Etapa]) raises -> List[String]:
@@ -644,7 +718,7 @@ def avisos_plano(cols: List[Coluna], etapas: List[Etapa]) raises -> List[String]
         if e.tipo == TipoEtapa.PROJECAO:
             esq = projetar_esquema(esq, e.nomes)
         else:
-            avisos_expr(e.expr, e.expr.root, esq, saida)
+            avisos_expr(e.expr, e.expr.root, esq, cols, saida)
             if e.tipo == TipoEtapa.COM_COLUNA:
                 esq = com_coluna_esquema(
                     esq, e.nome, tipo_resultado(e.expr, e.expr.root, esq)

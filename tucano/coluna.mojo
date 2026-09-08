@@ -1,5 +1,18 @@
 from .dtype import DType
 from .datas import parse_data_iso, data_para_texto
+from std.collections import Dict
+from .kernels import (
+    soma_f64,
+    soma_i64,
+    soma_f64_densa,
+    soma_i64_densa,
+    minimo_f64_densa,
+    maximo_f64_densa,
+    minimo_f64,
+    maximo_f64,
+    minimo_i64,
+    maximo_i64,
+)
 from .buffer import (
     Validity,
     StringStore,
@@ -21,6 +34,12 @@ struct Coluna(Copyable, Movable):
       - validity: bitmap empacotado
       - ints/reals/logics: slab contiguidade (capacity == len)
       - textos: StringStore (offsets + bytes UTF-8)
+      - codigos: Int32 por linha quando a coluna e dicionarizada (M4)
+
+    Dictionary encoding: quando ha repeticao, `textos` guarda so os valores
+    distintos e `codigos` guarda um Int32 por linha. E o que transforma
+    `cidade == "SP"` em comparacao de inteiros, vetorizavel — o pandas compara
+    ponteiros de objeto Python, um por vez.
     """
 
     var nome: String
@@ -31,6 +50,7 @@ struct Coluna(Copyable, Movable):
     var reals: List[Float64]
     var logics: List[UInt8]
     var textos: StringStore
+    var codigos: List[Int32]
 
     @staticmethod
     def de_inteiros(
@@ -50,6 +70,7 @@ struct Coluna(Copyable, Movable):
             List[Float64](),
             List[UInt8](),
             StringStore.vazio(),
+            List[Int32](),
         )
 
     @staticmethod
@@ -70,6 +91,7 @@ struct Coluna(Copyable, Movable):
             slab_float64(valores),
             List[UInt8](),
             StringStore.vazio(),
+            List[Int32](),
         )
 
     @staticmethod
@@ -90,6 +112,7 @@ struct Coluna(Copyable, Movable):
             List[Float64](),
             slab_bool_u8(valores),
             StringStore.vazio(),
+            List[Int32](),
         )
 
     @staticmethod
@@ -101,6 +124,32 @@ struct Coluna(Copyable, Movable):
         var val = Validity.todos_presentes(n)
         if len(ausentes) != 0:
             val = Validity.de_lista(ausentes)
+        # dicionariza quando ha repeticao: valores distintos + codigo por linha
+        var mapa = Dict[String, Int32]()
+        var distintos = List[String]()
+        var codigos = List[Int32](capacity=n)
+        for i in range(n):
+            var v = valores[i]
+            if v in mapa:
+                codigos.append(mapa[v])
+            else:
+                var code = Int32(len(distintos))
+                mapa[v] = code
+                distintos.append(v)
+                codigos.append(code)
+
+        if len(distintos) < n and len(distintos) <= 65535:
+            return Self(
+                nome,
+                DType.TEXTO,
+                n,
+                val^,
+                List[Int64](),
+                List[Float64](),
+                List[UInt8](),
+                StringStore.de_valores(distintos),
+                codigos^,
+            )
         return Self(
             nome,
             DType.TEXTO,
@@ -110,6 +159,7 @@ struct Coluna(Copyable, Movable):
             List[Float64](),
             List[UInt8](),
             StringStore.de_valores(valores),
+            List[Int32](),
         )
 
     @staticmethod
@@ -131,6 +181,7 @@ struct Coluna(Copyable, Movable):
             List[Float64](),
             List[UInt8](),
             StringStore.vazio(),
+            List[Int32](),
         )
 
     @staticmethod
@@ -158,6 +209,7 @@ struct Coluna(Copyable, Movable):
         var reals: List[Float64],
         var logics: List[UInt8],
         var textos: StringStore,
+        var codigos: List[Int32],
     ):
         self.nome = nome
         self.tipo = tipo
@@ -167,6 +219,7 @@ struct Coluna(Copyable, Movable):
         self.reals = reals^
         self.logics = logics^
         self.textos = textos^
+        self.codigos = codigos^
 
     def tamanho(self) -> Int:
         return self.n
@@ -211,12 +264,16 @@ struct Coluna(Copyable, Movable):
         return Int(self.ints[i])
 
     def soma(self) raises -> Float64:
+        """Soma ignorando ausentes, por kernel SIMD (M4)."""
         self._exige_numerico()
-        var total = Float64(0)
-        for i in range(self.n):
-            if not self.validity_bits.eh_ausente(i):
-                total += self._como_real(i)
-        return total
+        if not self.validity_bits.tem_ausentes():
+            if self.tipo == DType.INTEIRO:
+                return soma_i64_densa(self.ints, self.n)
+            return soma_f64_densa(self.reals, self.n)
+        var na = self.validity_bits.para_bytes()
+        if self.tipo == DType.INTEIRO:
+            return soma_i64(self.ints, na, self.n)
+        return soma_f64(self.reals, na, self.n)
 
     def media(self) raises -> Float64:
         self._exige_numerico()
@@ -227,33 +284,27 @@ struct Coluna(Copyable, Movable):
 
     def minimo(self) raises -> Float64:
         self._exige_numerico()
-        var achou = False
-        var menor = Float64(0)
-        for i in range(self.n):
-            if self.validity_bits.eh_ausente(i):
-                continue
-            var valor = self._como_real(i)
-            if not achou or valor < menor:
-                menor = valor
-                achou = True
-        if not achou:
+        try:
+            if not self.validity_bits.tem_ausentes() and self.tipo == DType.REAL:
+                return minimo_f64_densa(self.reals, self.n)
+            var na = self.validity_bits.para_bytes()
+            if self.tipo == DType.INTEIRO:
+                return minimo_i64(self.ints, na, self.n)
+            return minimo_f64(self.reals, na, self.n)
+        except:
             raise Error("coluna sem valores validos: " + self.nome)
-        return menor
 
     def maximo(self) raises -> Float64:
         self._exige_numerico()
-        var achou = False
-        var maior = Float64(0)
-        for i in range(self.n):
-            if self.validity_bits.eh_ausente(i):
-                continue
-            var valor = self._como_real(i)
-            if not achou or valor > maior:
-                maior = valor
-                achou = True
-        if not achou:
+        try:
+            if not self.validity_bits.tem_ausentes() and self.tipo == DType.REAL:
+                return maximo_f64_densa(self.reals, self.n)
+            var na = self.validity_bits.para_bytes()
+            if self.tipo == DType.INTEIRO:
+                return maximo_i64(self.ints, na, self.n)
+            return maximo_f64(self.reals, na, self.n)
+        except:
             raise Error("coluna sem valores validos: " + self.nome)
-        return maior
 
     def maior_que(self, limiar: Float64) raises -> List[Bool]:
         self._exige_numerico()
@@ -264,6 +315,36 @@ struct Coluna(Copyable, Movable):
             else:
                 mascara.append(self._como_real(i) > limiar)
         return mascara^
+
+    def eh_dicionarizada(self) -> Bool:
+        return len(self.codigos) > 0
+
+    def cardinalidade(self) -> Int:
+        """Numero de valores distintos, se dicionarizada."""
+        if self.eh_dicionarizada():
+            return self.textos.tamanho()
+        return self.n
+
+    def codigo_de(self, valor: String) raises -> Int32:
+        """Codigo do valor no dicionario, ou -1 se ausente dele.
+
+        Custa uma varredura sobre os DISTINTOS — uma vez por consulta, nao por
+        linha. Depois disso o filtro e comparacao de Int32.
+        """
+        if not self.eh_dicionarizada():
+            raise Error("coluna nao dicionarizada: " + self.nome)
+        for i in range(self.textos.tamanho()):
+            if self.textos.get(i) == valor:
+                return Int32(i)
+        return Int32(-1)
+
+    def texto_bruto(self, i: Int) raises -> String:
+        """Texto armazenado, sem substituir ausente por "NA"."""
+        if self.tipo != DType.TEXTO:
+            raise Error("coluna nao e de texto: " + self.nome)
+        if self.eh_dicionarizada():
+            return self.textos.get(Int(self.codigos[i]))
+        return self.textos.get(i)
 
     def texto_em(self, i: Int) raises -> String:
         if i < 0 or i >= self.n:
@@ -280,7 +361,7 @@ struct Coluna(Copyable, Movable):
             if Int(self.logics[i]) != 0:
                 return "True"
             return "False"
-        return self.textos.get(i)
+        return self.texto_bruto(i)
 
     def mostrar(self) raises:
         var partes = String()
