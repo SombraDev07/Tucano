@@ -26,6 +26,7 @@ from .parquet import (
     VarreduraParquet,
 )
 from .fluxo import plano_flui, EstadoAgregacao
+from .arrow import escrever_arrow, ler_arrow_lote
 from .schema import Campo
 from .otimizador import otimizar, PlanoOtimizado
 from .executor import (
@@ -441,6 +442,16 @@ def para_parquet(
     leitura em fluxo com pico de memoria menor.
     """
     para_parquet_lote(tabela.lote(), tabela.nomes(), caminho, linhas_por_grupo)
+
+
+def para_arrow(tabela: Tabela, caminho: String) raises:
+    """Grava a tabela em Arrow IPC — o layout que outra implementacao usa em RAM."""
+    escrever_arrow(tabela.lote(), caminho)
+
+
+def ler_arrow(caminho: String) raises -> Tabela:
+    """Le um arquivo Arrow IPC."""
+    return Tabela(ler_arrow_lote(caminho))
 
 
 def varredura_parquet(caminho: String) -> Consulta:

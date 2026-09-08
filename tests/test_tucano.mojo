@@ -52,6 +52,8 @@ from tucano import (
     esquema_parquet,
     metadados_parquet,
     consultar_sql,
+    para_arrow,
+    ler_arrow,
     consultar_sql_em,
     plano_do_sql,
     Catalogo,
@@ -65,6 +67,7 @@ from tucano import (
 from tucano.codecs import decodificar_rle, descomprimir_snappy, largura_de_bits
 from tucano.thrift import LeitorThrift
 from tucano.arquivo import LeitorArquivo
+from tucano.flatbuf import ConstrutorFlat, raiz_flat, campo_flat, ler_i32, texto_flat
 from tucano.fluxo import plano_flui, EstadoAgregacao
 from tucano.parquet import VarreduraParquet
 from tucano.otimizador import (
@@ -2441,6 +2444,116 @@ def test_sql_limite_como_operador() raises:
     var r = t.limite(2).coletar()
     assert_equal(r.linhas(), 2)
     assert_true("LIMIT 2" in t.limite(2).descrever())
+
+
+# ----------------------------------------------------------- M10 Arrow
+
+
+def test_arrow_flatbuf_ida_e_volta() raises:
+    """Uma tabela escrita e lida de volta pelo proprio construtor."""
+    var b = ConstrutorFlat()
+    var nome = b.texto("tucano")
+    b.iniciar_tabela()
+    b.campo_referencia(0, nome)
+    b.campo_i32(1, 42, 0)
+    b.campo_bool(2, True, False)
+    var raiz = b.terminar_tabela()
+    var bytes = b.finalizar(raiz)
+
+    var t = raiz_flat(bytes, 0)
+    assert_equal(texto_flat(bytes, campo_flat(bytes, t, 0)), "tucano")
+    assert_equal(ler_i32(bytes, campo_flat(bytes, t, 1)), 42)
+    # campo com valor padrao nao ocupa espaco: some da vtable
+    b = ConstrutorFlat()
+    b.iniciar_tabela()
+    b.campo_i32(1, 0, 0)
+    var vazia = b.terminar_tabela()
+    var bytes2 = b.finalizar(vazia)
+    assert_equal(campo_flat(bytes2, raiz_flat(bytes2, 0), 1), -1)
+
+
+def test_arrow_le_arquivo_de_outra_implementacao() raises:
+    """A fixture foi escrita por outra implementacao — ler a propria nao prova."""
+    var t = ler_arrow("tests/fixtures/simples.arrow")
+    assert_equal(t.linhas(), 5)
+    assert_equal(t.colunas(), 4)
+    assert_equal(t.dtype_de("id").codigo, DType.INTEIRO)
+    assert_equal(t.dtype_de("valor").codigo, DType.REAL)
+    assert_equal(t.dtype_de("ativo").codigo, DType.LOGICO)
+    assert_equal(t.dtype_de("cidade").codigo, DType.TEXTO)
+    assert_equal(t.pegar("id").texto_em(4), "5")
+    assert_equal(t.pegar("valor").texto_em(4), "50.125")
+    assert_equal(t.pegar("ativo").texto_em(1), "False")
+    assert_equal(t.pegar("cidade").texto_em(3), "BH")
+
+
+def test_arrow_le_ausentes() raises:
+    """A validade do Arrow e invertida: bit 1 significa presente."""
+    var t = ler_arrow("tests/fixtures/com_na.arrow")
+    assert_equal(t.linhas(), 5)
+    assert_equal(t.pegar("id").contar_ausentes(), 2)
+    assert_true(t.pegar("id").eh_ausente(1))
+    assert_false(t.pegar("id").eh_ausente(0))
+    assert_equal(t.pegar("valor").contar_ausentes(), 2)
+    assert_equal(t.pegar("cidade").texto_em(3), "BH")
+    assert_true(t.pegar("cidade").eh_ausente(4))
+
+
+def test_arrow_le_temporais() raises:
+    var t = ler_arrow("tests/fixtures/temporal.arrow")
+    assert_equal(t.dtype_de("quando").codigo, DType.DATA)
+    assert_equal(t.dtype_de("carimbo").codigo, DType.DATAHORA)
+    assert_equal(t.pegar("quando").texto_em(1), "2024-02-29")
+    assert_equal(t.pegar("carimbo").texto_em(1), "2024-02-29T23:59:59.500000")
+    assert_equal(t.pegar("carimbo").texto_em(2), "1969-12-31T23:59:59")
+
+
+def test_arrow_ida_e_volta_pelo_tucano() raises:
+    var original = ler_parquet("tests/fixtures/grupos.parquet")
+    var saida = "tests/fixtures/_saida_grupos.arrow"
+    para_arrow(original, saida)
+    var volta = ler_arrow(saida)
+    assert_equal(volta.linhas(), 3000)
+    assert_equal(volta.colunas(), 3)
+    assert_equal(volta.soma("id"), original.soma("id"))
+    assert_equal(volta.pegar("grupo").texto_em(1000), "b")
+    assert_equal(volta.pegar("valor").texto_em(2), "1.0")
+
+
+def test_arrow_ida_e_volta_com_ausentes_e_datas() raises:
+    var original = ler_csv("tests/fixtures/eventos.csv")
+    var saida = "tests/fixtures/_saida_eventos.arrow"
+    para_arrow(original, saida)
+    var volta = ler_arrow(saida)
+    assert_equal(volta.linhas(), 4)
+    assert_equal(volta.dtype_de("quando").codigo, DType.DATAHORA)
+    assert_equal(volta.pegar("quando").texto_em(0), "2024-01-15T08:30:00")
+    assert_equal(volta.pegar("valor").contar_ausentes(), 1)
+    assert_true(volta.pegar("valor").eh_ausente(2))
+    assert_equal(volta.pegar("tipo").texto_em(1), "compra")
+
+
+def test_arrow_arquivo_invalido_erra() raises:
+    var pegou = False
+    try:
+        _ = ler_arrow("tests/fixtures/pessoas.csv")
+    except e:
+        pegou = True
+        assert_true("ARROW1" in String(e))
+    assert_true(pegou)
+
+
+def test_arrow_alimenta_o_executor() raises:
+    """Arrow e so mais uma fonte: o plano nao sabe de onde os dados vieram."""
+    var t = ler_arrow("tests/fixtures/simples.arrow")
+    var chaves = List[String]()
+    chaves.append("cidade")
+    var aggs = List[Agregacao]()
+    aggs.append(soma("valor"))
+    var r = t.agrupar(chaves).agregar(aggs^).coletar()
+    assert_equal(r.linhas(), 3)
+    assert_equal(r.pegar("cidade").texto_em(0), "SP")
+    assert_equal(r.pegar("soma_valor").texto_em(0), "90.625")
 
 
 def main() raises:

@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.11.0 — M0 → M9 fechados (paralelismo por thread à parte).
+Versão 0.12.0 — M0 → M10 fechados (paralelismo por thread à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -332,6 +332,44 @@ sua própria faixa de bytes.
 `para_parquet(tabela, caminho, linhas_por_grupo)` divide o arquivo em row groups; grupos
 menores dão pico menor na leitura em fluxo.
 
+### SQL
+
+```mojo
+consultar_sql(
+    "SELECT grupo, SUM(valor) AS total FROM 'vendas.parquet'"
+    " WHERE valor > 100 GROUP BY grupo ORDER BY total DESC LIMIT 10"
+)
+```
+
+Não há um segundo motor: o `SELECT` vira as mesmas etapas que a API fluente produz, e passa
+pelo mesmo otimizador. `plano_do_sql(texto, catalogo)` devolve a `Consulta` sem executar —
+dá para chamar `explicar()` nela.
+
+| Suportado | |
+|---|---|
+| `SELECT` | colunas, `SUM`/`AVG`/`COUNT`/`MIN`/`MAX`, `AS` |
+| `FROM` | `'arquivo.parquet'`, `'arquivo.csv'`, ou nome num `Catalogo` |
+| `WHERE` | comparações, `AND`/`OR`/`NOT`, parênteses, literais |
+| `GROUP BY`, `ORDER BY` (`ASC`/`DESC`), `LIMIT` | |
+
+`ORDER BY` por apelido ordena depois da projeção; por coluna que a projeção descarta,
+ordena antes. Coluna no `SELECT` fora do `GROUP BY` é recusada — não se escolhe um valor
+arbitrário do grupo.
+
+### Arrow
+
+| Entrada | Papel |
+|---|---|
+| `ler_arrow(caminho)` | lê um arquivo Arrow IPC |
+| `para_arrow(tabela, caminho)` | escreve |
+
+O Arrow é o layout **em memória**: os buffers do arquivo IPC têm o mesmo formato que outra
+implementação usa em RAM. Tipos cobertos: inteiro, real, lógico, texto, `date32[day]` e
+`timestamp[us]`, com ausentes.
+
+> A validade do Arrow é **invertida** em relação à do Tucano: lá bit 1 significa presente,
+> aqui o bitmap marca o ausente.
+
 ### Painel
 
 ```mojo
@@ -432,6 +470,8 @@ um leitor e um escritor com o mesmo mal-entendido concordam entre si.
 | `varredura_parquet` / `explicar` | estável |
 | `coletar_em_fluxo` / `pode_fluir` | estável |
 | `tucano.arquivo` / `tucano.fluxo` | **interno** |
+| `tucano.flatbuf` / `tucano.sql` | **interno** |
+| `ler_arrow` / `para_arrow` / `consultar_sql` | estável |
 | `ler_parquet` / `para_parquet` / `esquema_parquet` | estável |
 | `ler_csv_tipado` / `LeitorCSV` | estável |
 | `ler_csv` / `para_csv` | assinatura estável, implementação refeita em M5 |

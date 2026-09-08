@@ -13,6 +13,8 @@ from .tabela import (
     ler_parquet,
     para_parquet,
     varredura_parquet,
+    para_arrow,
+    ler_arrow,
 )
 from .csv import ler_csv, ler_csv_tipado, LeitorCSV, para_csv
 from .tipos import Tipo

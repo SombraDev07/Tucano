@@ -16,6 +16,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.feather as feather
 import pyarrow.parquet as pq
 
 DESTINO = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
@@ -108,7 +109,23 @@ def main():
         row_group_size=1000,
     )
 
-    print("pronto — os .parquet sao commitados; rode de novo so se mudarem")
+    # Arrow IPC escrito por outra implementacao: e contra estes que o leitor
+    # do Tucano e verificado. Ler o que a gente mesmo escreveu nao prova nada.
+    print("gerando fixtures Arrow IPC")
+    for nome, tabela in [
+        ("simples", simples),
+        ("com_na", com_na),
+        ("temporal", temporal),
+    ]:
+        caminho = DESTINO / f"{nome}.arrow"
+        feather.write_feather(tabela, caminho, compression="uncompressed")
+        lido = pa.ipc.open_file(caminho).read_all()
+        print(
+            f"  {nome + '.arrow':<28} {lido.num_rows:>6} linhas  "
+            f"{lido.num_columns} colunas  {caminho.stat().st_size:>6} bytes"
+        )
+
+    print("pronto — as fixtures sao commitadas; rode de novo so se mudarem")
 
 
 if __name__ == "__main__":

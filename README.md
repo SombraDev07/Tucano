@@ -61,6 +61,10 @@ o que for mais conveniente na hora.
   ninguém usa não sai do disco. `explicar()` mostra o plano antes e depois.
 - **Execução em memória limitada** — agregar não exige ter tudo em RAM. Sobre Parquet, o
   arquivo é lido row group por row group e nunca entra inteiro em memória.
+- **SQL sobre o mesmo motor** — `SELECT` vira as mesmas etapas da API fluente e passa pelo
+  mesmo otimizador. Não há um segundo interpretador.
+- **Arrow e Parquet nativos** — leitura e escrita, com interoperabilidade verificada contra
+  outra implementação nos dois sentidos.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
 
 ## Instalação
@@ -215,6 +219,28 @@ A ordenação é **estável**, com ausente sempre por último. Direções mistas
 passos: `ordenar(["b"], True).ordenar(["a"])` — por isso não existe uma segunda forma de
 ordenar.
 
+## SQL
+
+```mojo
+consultar_sql(
+    "SELECT grupo, SUM(valor) AS total FROM 'vendas.parquet'"
+    " WHERE valor > 100 GROUP BY grupo ORDER BY total DESC LIMIT 10"
+).mostrar()
+```
+
+Não há um segundo motor. O `SELECT` vira exatamente as mesmas etapas que a API fluente
+produz, e ganha de graça a poda de colunas, o empurrão de filtro e a varredura adiada:
+
+```
+LOGICO   SCAN -> FILTER (coluna(valor) > lit(100)) -> AGGREGATE [grupo] -> [soma(valor)]
+              -> PROJECT [grupo, total] -> SORT [total desc] -> RESULT
+COLUNAS  2 de 3 [grupo, valor]
+REGRAS   poda de colunas (3 -> 2)
+```
+
+`FROM` aceita `'arquivo.parquet'`, `'arquivo.csv'` ou um nome registrado num `Catalogo`.
+Erros apontam a posição no texto.
+
 ## Otimizador
 
 `coletar()` otimiza antes de executar, e `explicar()` mostra o que mudou:
@@ -333,6 +359,9 @@ cada conveniência parecia inofensiva sozinha.
 ## Leitura de arquivos
 
 ```mojo
+ler_arrow("vendas.arrow")                   # Arrow IPC
+para_arrow(tabela, "saida.arrow")
+
 ler_parquet("vendas.parquet")               # arquivo inteiro
 ler_parquet("vendas.parquet", ["mes", "valor"])   # só estas duas colunas saem do disco
 esquema_parquet("vendas.parquet")           # esquema, sem tocar nos dados
@@ -443,18 +472,20 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Painel: KPI, gráfico, tabela, filtro | ✅ |
 | Otimizador: dobra, fusão, empurrão, poda de colunas | ✅ |
 | Execução em fluxo com memória limitada | ✅ |
-| Interoperabilidade Arrow | próximo |
+| SQL sobre o mesmo planner | ✅ |
+| Arrow IPC: leitura e escrita, interop verificada | ✅ |
 | Painel de visualização | planejado |
 
-162 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+184 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do
 Mojo 1.0 não expõe primitiva de paralelismo de dados. O roadmap explica.
 
-A interoperabilidade do Parquet é verificada lendo com outra implementação os arquivos que o
-Tucano escreve — round-trip próprio não prova nada, já que um leitor e um escritor com o
-mesmo mal-entendido concordam entre si.
+A interoperabilidade de Parquet e Arrow é verificada **nos dois sentidos**: outra
+implementação lê o que o Tucano escreve, e o Tucano lê arquivos que ela escreveu.
+Round-trip próprio não prova nada — um leitor e um escritor com o mesmo mal-entendido
+concordam entre si.
 
 ## Desenvolvimento
 

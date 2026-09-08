@@ -107,7 +107,7 @@ São três provas, em ordem de honestidade:
 
 ## Estado atual do código (honestidade)
 
-**M0 → M9 fechados.** Próximo: **M10 — Interoperabilidade**. 162 testes verdes.
+**M0 → M10 fechados.** Próximo: **M11 — GPU [experimental]** ou o que a prática pedir. 184 testes verdes.
 
 Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo por thread**, sem primitiva no stdlib do Mojo 1.0. O Parquet, que estava bloqueado por falta de fixture, foi destravado e entregue — leitura e escrita, com interoperabilidade verificada contra outra implementação.
 
@@ -154,6 +154,8 @@ Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo p
 | Leitura por faixa (`pread`) e por row group | ✅ M9 |
 | Agregação em fluxo, memória limitada | ✅ M9 — pico 0,6% do arquivo |
 | Escrita em múltiplos row groups | ✅ M9 |
+| SQL sobre o mesmo planner | ✅ M10 |
+| Arrow IPC: leitura e escrita, interop verificada | ✅ M10 |
 
 ### Dívidas concretas identificadas
 
@@ -184,7 +186,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | **M7** | **Painel** | **alta** | **próximo** | dashboard nativo |
 | M8 | Optimizer | crítica | ✅ feito | pushdown + folding + reorder |
 | M9 | Out-of-Core | alta | ✅ feito | datasets > RAM |
-| **M10** | **Interop** | **alta** | **próximo** | Arrow (sem Python) + SQL |
+| M10 | Interop | alta | ✅ feito | Arrow (sem Python) + SQL |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
 | M12 | Excel | baixa | não iniciado | compatibilidade tardia |
 
@@ -771,18 +773,60 @@ ordenacao precisa do conjunto inteiro — use coletar()
 
 ---
 
-## M10 — Interoperabilidade
+## M10 — Interoperabilidade ✅
+
+### SQL sobre o mesmo planner
+
+Não há um segundo motor. O `SELECT` vira exatamente as mesmas etapas que a API fluente produz:
+
+```sql
+SELECT grupo, SUM(valor) AS total
+FROM 'vendas.parquet'
+WHERE valor > 100
+GROUP BY grupo
+ORDER BY total DESC
+```
 
 ```
-Tucano ↔ Arrow memory ↔ Polars / DuckDB / DataFusion
+LOGICO     SCAN -> FILTER (coluna(valor) > lit(100)) -> AGGREGATE [grupo] -> [soma(valor)]
+                -> PROJECT [grupo, total] -> SORT [total desc] -> RESULT
+COLUNAS    2 de 3 [grupo, valor]
+REGRAS     poda de colunas (3 -> 2)
 ```
 
-Depois: SQL → JSON → (muito depois) Excel.
+**Isso é um teste da arquitetura, não só um recurso.** Se o plano não fosse um valor manipulável, SQL exigiria um interpretador separado. Como é, o SQL ganha de graça a poda de colunas, o empurrão de filtro e a varredura adiada de Parquet.
+
+Suportado: `SELECT` com colunas e agregações (`SUM`, `AVG`, `COUNT`, `MIN`, `MAX`) e `AS`; `FROM` arquivo ou tabela registrada num `Catalogo`; `WHERE` com comparações, `AND`/`OR`/`NOT` e parênteses; `GROUP BY`; `ORDER BY` com `ASC`/`DESC`; `LIMIT`. Erros apontam a posição no texto.
+
+Dois cuidados de semântica: `ORDER BY` por apelido ordena depois da projeção, e por coluna descartada ordena antes — as duas formas funcionam sem o usuário saber a ordem interna das etapas. E coluna no `SELECT` fora do `GROUP BY` é recusada com a explicação, em vez de escolher um valor arbitrário do grupo.
+
+### Arrow IPC, nos dois sentidos
+
+O Parquet já dava interoperabilidade, mas em disco e comprimido. O Arrow é a forma **em memória**: os buffers do arquivo IPC têm exatamente o layout que outra implementação usa em RAM, então a leitura do outro lado é um mapeamento, não uma conversão.
+
+Escrever um arquivo Arrow exige escrever um FlatBuffer primeiro — `tucano/flatbuf.mojo` faz isso, construindo o buffer de trás para frente como o formato manda.
+
+**A verificação é dos dois lados**, e é o que dá sentido ao marco:
+
+| | verificação |
+|---|---|
+| escrita | `pixi run -e fixtures interop-arrow` lê com outra implementação tudo que o Tucano escreveu |
+| leitura | as fixtures `.arrow` são **escritas por outra implementação** — ler o próprio arquivo não prova nada |
+
+Cobertos: inteiro, real, lógico, texto, `date32[day]`, `timestamp[us]`, ausentes, e lotes de 3 mil linhas.
+
+> **A validade é invertida.** No Arrow, bit 1 significa *presente*; no Tucano, o bitmap marca o *ausente*. Trocar isso é uma linha, e esquecer disso é um arquivo em que todo valor vira nulo — sem erro nenhum, só dados errados.
+
+Três armadilhas de FlatBuffer que custaram tempo e ficam registradas: o `soffset` da vtable mora no **início** da tabela (escrevê-lo no fim põe os bytes antes da vtable); o alinhamento da string tem de contar o terminador; e o `finish` alinha pelo maior alinhamento usado, não por 4.
 
 ### Critério de saída
 
-- [ ] Export/import Arrow zero-copy onde possível, sem Python
-- [ ] Dialeto SQL mínimo sobre o mesmo planner (desejável)
+- [x] Export/import Arrow, com interoperabilidade verificada nos dois sentidos
+- [x] Dialeto SQL mínimo sobre o mesmo planner
+- [x] 184 testes verdes
+- [ ] Zero-copy de verdade (Arrow C Data Interface) — **fora por ora**
+
+> O C Data Interface passa ponteiros entre bibliotecas no mesmo processo. Não há como verificá-lo aqui: exigiria um consumidor C ou Python vivo no mesmo processo, e o princípio de Zero Python fecha essa porta. O IPC entrega a interoperabilidade; o zero-copy entra quando houver um consumidor real para provar contra.
 
 ---
 
