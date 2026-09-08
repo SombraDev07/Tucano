@@ -25,6 +25,7 @@ from .executor import (
     esquema_apos,
     esquema_do_lote,
     TipoJuncao,
+    coletar_linhas,
 )
 
 
@@ -137,6 +138,13 @@ struct Consulta(Copyable, Movable):
         for c in chaves:
             copia.append(c)
         self.chaves_pendentes = copia^
+        return self^
+
+    def agregar_total(var self, var agregacoes: List[Agregacao]) raises -> Self:
+        """Reduz a tabela inteira a uma linha, sem chave de grupo."""
+        if len(agregacoes) == 0:
+            raise Error("agregar exige pelo menos uma agregacao")
+        self.etapas.append(Etapa.agregacao(List[String](), agregacoes^))
         return self^
 
     def agregar(var self, var agregacoes: List[Agregacao]) raises -> Self:
@@ -363,6 +371,11 @@ struct Tabela(Copyable, Movable):
         var q = Consulta(self.lote())
         return q^.agrupar(chaves)
 
+    def agregar_total(self, var agregacoes: List[Agregacao]) raises -> Consulta:
+        """Reduz a tabela inteira a uma linha. Devolve `Consulta`."""
+        var q = Consulta(self.lote())
+        return q^.agregar_total(agregacoes^)
+
     def unir(
         self, outra: Tabela, por: List[String], tipo: String = "interno"
     ) raises -> Consulta:
@@ -483,6 +496,19 @@ struct Tabela(Copyable, Movable):
 
     def soma(self, nome: String) raises -> Float64:
         return self.pegar(nome).soma()
+
+    def primeiras_linhas(self, n: Int) raises -> Self:
+        """As primeiras `n` linhas, como Tabela."""
+        var limite = n
+        if limite > self.linhas():
+            limite = self.linhas()
+        var indices = List[Int](capacity=limite)
+        for i in range(limite):
+            indices.append(i)
+        var cols = List[Coluna]()
+        for c in self._colunas:
+            cols.append(coletar_linhas(c, indices))
+        return Self(cols^)
 
     def primeiras(self, n: Int = 5) raises:
         var limite = n

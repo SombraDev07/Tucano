@@ -1118,16 +1118,33 @@ def _agregar_uma(
     return vetor_para_coluna(nome, saida, tipo_saida)
 
 
+def grupo_unico(n: Int) -> Grupos:
+    """Tudo num grupo so — agregacao total, sem chave."""
+    var ids = List[Int](capacity=n)
+    for _ in range(n):
+        ids.append(0)
+    var rep = List[Int]()
+    if n > 0:
+        rep.append(0)
+    var n_grupos = 1 if n > 0 else 0
+    return Grupos(ids^, n_grupos, rep^, "grupo unico")
+
+
 def op_agrupar(
     cols: List[Coluna], chaves: List[String], agregacoes: List[Agregacao]
 ) raises -> List[Coluna]:
-    """HashAggregate: agrupa por chave e reduz cada grupo."""
-    if len(chaves) == 0:
-        raise Error("agrupar exige pelo menos uma chave")
+    """HashAggregate: agrupa por chave e reduz cada grupo.
+
+    Sem chave, agrega a tabela inteira num unico grupo — e o que um KPI pede.
+    """
     if len(agregacoes) == 0:
         raise Error("agregar exige pelo menos uma agregacao")
 
-    var grupos = calcular_grupos(cols, chaves)
+    var grupos: Grupos
+    if len(chaves) == 0:
+        grupos = grupo_unico(n_linhas(cols))
+    else:
+        grupos = calcular_grupos(cols, chaves)
     var esq = esquema_do_lote(cols)
     var saida = List[Coluna]()
     for chave in chaves:

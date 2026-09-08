@@ -41,7 +41,7 @@ A análise tabular em memória consagrou um conjunto de decisões que hoje custa
 | **`groupby.apply` com shape imprevisível** | O retorno muda conforme a função | Só agregações tipadas | M6 |
 | **`KeyError: 'idade'` e nada mais** | Um typo custa 5 minutos | `coluna inexistente: 'idade'. Você quis dizer 'idades'?` | M2.5 |
 | **Tudo precisa caber na RAM** | Morre em 50M linhas num laptop | Streaming out-of-core | M9 |
-| **Viz = PNG estático ou reenviar o dataset** | Streamlit re-executa o script; Dash reenvia o DataFrame | **Widget guarda uma `Consulta`, não uma `Tabela`** | M7 |
+| **Viz = PNG estático ou reenviar o dataset** | Ferramentas de painel re-executam o script inteiro ou reenviam a tabela | **Widget guarda uma `Consulta`, não uma `Tabela`** — payload medido na própria página | ✅ M7 |
 
 ---
 
@@ -107,7 +107,7 @@ São três provas, em ordem de honestidade:
 
 ## Estado atual do código (honestidade)
 
-**M0 → M6 fechados.** Próximo: **M7 — Painel**. 124 testes verdes.
+**M0 → M7 fechados.** Próximo: **M8 — Optimizer**. 137 testes verdes.
 
 Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo por thread**, sem primitiva no stdlib do Mojo 1.0. O Parquet, que estava bloqueado por falta de fixture, foi destravado e entregue — leitura e escrita, com interoperabilidade verificada contra outra implementação.
 
@@ -147,7 +147,8 @@ Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo p
 | `DType.DATAHORA` | ❌ adiado para M5 |
 | Coluna derivada (`com_coluna`) | ❌ M3 |
 | `agrupar` / `unir` / `ordenar` | ❌ M6 |
-| Painel | ❌ M7 |
+| Painel: KPI, gráfico, tabela, filtro | ✅ M7 |
+| Servidor HTTP sobre libc (`external_call`) | ✅ M7 |
 
 ### Dívidas concretas identificadas
 
@@ -176,7 +177,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M5 | I/O + Streaming | crítica | ✅ feito | scanner CSV, Parquet, fatias, datahora |
 | M6 | Aggregation + Join | crítica | ✅ feito | group/join como operadores |
 | **M7** | **Painel** | **alta** | **próximo** | dashboard nativo |
-| M8 | Optimizer | crítica | não iniciado | pushdown + folding + reorder |
+| **M8** | **Optimizer** | **crítica** | **próximo** | pushdown + folding + reorder |
 | M9 | Out-of-Core | alta | não iniciado | datasets > RAM |
 | M10 | Interop | alta | não iniciado | Arrow (sem Python) + SQL |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
@@ -586,63 +587,57 @@ O `resumo()` não inventa estatística: coluna não numérica traz contagens, e 
 
 ---
 
-## M7 — Painel
+## M7 — Painel ✅
 
-O dashboard como camada da biblioteca. A arquitetura vem direto da crítica às ferramentas existentes: o gráfico embutido gera PNG estático, Streamlit re-executa o script inteiro, Dash reenvia o DataFrame. Todos tratam o painel como consumidor de **dados**.
+O dashboard como camada da biblioteca, não como ecossistema à parte.
 
-### O widget guarda uma `Consulta`, não uma `Tabela`
+### O widget guarda uma consulta, não uma tabela
+
+É a diferença que decide a arquitetura. Mexer num filtro **muda o plano** e reexecuta; o navegador recebe o resultado agregado. Um gráfico de doze meses recebe doze pontos, mesmo que a fonte tenha milhões de linhas.
+
+E o rodapé da página mostra quantos bytes de fato atravessaram — a afirmação fica verificável, não apenas dita:
+
+```
+3.000 linhas na fonte · 1.000 após os filtros · 2.331 bytes trafegados
+```
 
 ```mojo
-var vendas = ler_parquet("vendas.parquet")
-var painel = vendas.painel("Vendas")
-
-painel.kpi("Faturamento", coluna("valor").soma())
-painel.grafico(tipo="linha", x=mes(coluna("data")), y=soma("valor"))
-painel.tabela(["cidade", "valor"])
-painel.filtro("estado")
-painel.filtro("cidade")
-
-painel.abrir()
+var p = Painel("Vendas", vendas)
+p.kpi("Faturamento", soma("valor"))
+p.grafico("Por cidade", "cidade", soma("valor"), "barra")
+p.tabela("Detalhe", ["data", "cidade", "valor"], 50)
+p.filtro("cidade")
+p.servir(8080)
 ```
 
-Mexer num filtro **muda o plano**, não os dados. O servidor reexecuta e devolve o agregado:
+### O risco registrado se confirmou — e teve saída
 
-```
-500.000 linhas → agrupar(mes) → 12 linhas → JSON → navegador
-```
+O roadmap avisava: *"se ainda não existe stack HTTP na stdlib do Mojo 1.0, você acaba escrevendo servidor HTTP em vez de executor"*. Não existe — não há `std.net`, não há sockets.
 
-```json
-[{"mes": "jan", "valor": 120000}, {"mes": "fev", "valor": 140000}]
-```
+Mas há `external_call` em `std.ffi`, e com ele a libc inteira: `socket`, `bind`, `listen`, `accept`, `recv`, `send`, `close`. O servidor cabe em 200 linhas, é sequencial de propósito, e **não desviou o projeto**: nenhuma linha do executor mudou por causa dele.
 
-Nenhuma cópia do dataset atravessa a rede. Com o M8, o filtro vira predicate pushdown e nem chega a varrer tudo.
+> Armadilha do caminho: `read` e `write` já são declarados pelo stdlib com outra assinatura, e a redeclaração não chega a linkar. `recv` e `send` — que são os próprios de socket — resolvem.
 
-### Arquitetura
+### Frontend embutido, sem CDN
 
-```
-Mojo
- │  Tucano (Tabela / Consulta / Executor)
- │  Servidor de painel
- ▼  HTTP + JSON  (SSE ou WebSocket para atualização)
-Navegador
-    HTML / CSS / JS estático, embutido na biblioteca
-```
+Página única servida pela própria biblioteca. Os gráficos são **SVG desenhado à mão em JavaScript**, sem biblioteca de terceiros: o painel roda em rede local ou sem rede nenhuma, e uma dependência externa quebraria isso. Um teste garante que a página não contém nenhuma URL.
 
-### Escopo deliberadamente magro
+Barras, linha e pizza; tema claro e escuro pelo `prefers-color-scheme`; números formatados em pt-BR; ausente aparece como `—`, nunca como zero.
 
-Servidor + JSON + frontend estático. KPI, gráfico (linha/barra/pizza), tabela, filtro. **Nada além disso no M7.** Layout customizável, temas, drill-down e exportação ficam para depois de o painel provar seu valor.
+### Escopo mantido magro
 
-### Risco a resolver antes de começar
+KPI, gráfico, tabela, filtro. Nada além disso — como o marco prometia. Eixo derivado (mês, ano) sai de `com_coluna` antes do painel: não há uma segunda linguagem só para o dashboard.
 
-Verificar se existe stack HTTP utilizável para Mojo 1.x. Historicamente isso era comunidade (`lightbug_http`), não stdlib. Se não houver, o M7 vira "escrever um servidor HTTP" em vez de "entregar um painel" — nesse caso, reavaliar escopo antes de abrir o marco.
+O eixo do gráfico sai **ordenado**. Um gráfico na ordem de aparição dos grupos não é um gráfico, é um sorteio.
 
 ### Critério de saída
 
-- [ ] `painel.abrir()` sobe servidor e abre no navegador
-- [ ] KPI, gráfico, tabela e filtro funcionando
-- [ ] Filtro recalcula plano e reenvia só o agregado
-- [ ] Payload medido: JSON proporcional ao agregado, não ao dataset
-- [ ] Demo pública com dataset de 1M+ linhas
+- [x] `servir()` sobe servidor e a página abre no navegador
+- [x] KPI, gráfico, tabela e filtro funcionando
+- [x] Filtro recalcula o plano e reenvia só o agregado
+- [x] Payload medido e exibido na própria página
+- [x] Sem dependência externa no frontend
+- [x] 137 testes verdes
 
 ---
 

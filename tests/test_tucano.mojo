@@ -46,6 +46,8 @@ from tucano import (
     primeiro,
     distintos,
     Agregacao,
+    Painel,
+    TipoWidget,
     esquema_parquet,
     metadados_parquet,
     Vetor,
@@ -55,6 +57,9 @@ from tucano import (
 )
 from tucano.codecs import decodificar_rle, descomprimir_snappy, largura_de_bits
 from tucano.thrift import LeitorThrift
+from tucano.json import escapar, tabela_para_json, lista_para_json
+from tucano.http import decodificar_url, parametros
+from tucano.painel_web import pagina
 from tucano.scanner import escanear, parse_float, parse_int, para_texto, eh_datahora
 from tucano.kernels import (
     add_f64,
@@ -1675,6 +1680,151 @@ def test_m6_plano_completo() raises:
     var r = q.coletar()
     assert_equal(r.pegar("estado").texto_em(0), "SP")
     assert_equal(r.pegar("soma_valor").texto_em(0), "4700.0")
+
+
+# ------------------------------------------------------------------ M7
+
+
+def _painel_de_vendas() raises -> Painel:
+    var v = (
+        ler_csv("tests/fixtures/vendas.csv")
+        .com_coluna("mes", mes(coluna("data")))
+        .coletar()
+    )
+    var p = Painel("Vendas", v)
+    p.kpi("Faturamento", soma("valor"))
+    p.kpi("Pedidos", contar())
+    p.grafico("Por cidade", "cidade", soma("valor"), "barra")
+    var cols = List[String]()
+    cols.append("data")
+    cols.append("cidade")
+    cols.append("valor")
+    p.tabela("Detalhe", cols, 3)
+    p.filtro("cidade")
+    return p^
+
+
+def test_m7_json_escapa_corretamente() raises:
+    assert_equal(escapar("simples"), '"simples"')
+    assert_equal(escapar('diz "oi"'), '"diz \\"oi\\""')
+    assert_equal(escapar("a\nb"), '"a\\nb"')
+    assert_equal(escapar("a\\b"), '"a\\\\b"')
+    # acentos passam intactos: JSON e UTF-8
+    assert_equal(escapar("São Paulo"), '"São Paulo"')
+
+
+def test_m7_json_ausente_vira_null() raises:
+    """Ausente nao pode virar zero nem string vazia na serializacao."""
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var j = tabela_para_json(t)
+    assert_true('"valor":null' in j)
+    assert_true('"cidade":"BH"' in j)
+    assert_false('"valor":0.0,"cidade":"BH"' in j)
+
+
+def test_m7_json_lista() raises:
+    var l = List[String]()
+    l.append("a")
+    l.append('b"c')
+    assert_equal(lista_para_json(l), '["a","b\\"c"]')
+
+
+def test_m7_url_decodificada() raises:
+    assert_equal(decodificar_url("S%C3%A3o+Paulo"), "São Paulo")
+    assert_equal(decodificar_url("sem-escape"), "sem-escape")
+    assert_equal(decodificar_url("a%2Bb"), "a+b")
+
+
+def test_m7_parametros_de_consulta() raises:
+    var ps = parametros("cidade=SP&ano=2024")
+    assert_equal(len(ps), 4)
+    assert_equal(ps[0], "cidade")
+    assert_equal(ps[1], "SP")
+    assert_equal(ps[2], "ano")
+    assert_equal(ps[3], "2024")
+    assert_equal(len(parametros("")), 0)
+    var vazio = parametros("cidade=")
+    assert_equal(vazio[1], "")
+
+
+def test_m7_pagina_embutida() raises:
+    var html = pagina("Meu Painel")
+    assert_true("<title>Meu Painel</title>" in html)
+    assert_true("<h1>Meu Painel</h1>" in html)
+    # sem CDN: o painel roda sem rede
+    assert_false("http://" in html)
+    assert_false("https://" in html)
+    assert_true("svgBarras" in html)
+
+
+def test_m7_descricao_do_painel() raises:
+    var p = _painel_de_vendas()
+    var j = p.json_painel()
+    assert_true('"titulo":"Vendas"' in j)
+    assert_true('"coluna":"cidade"' in j)
+    # as opcoes do filtro saem dos dados, nao de configuracao
+    assert_true('"SP"' in j)
+    assert_true('"BH"' in j)
+
+
+def test_m7_dados_sem_filtro() raises:
+    var p = _painel_de_vendas()
+    var j = p.json_dados("")
+    assert_true('"titulo":"Faturamento","tipo":"kpi","valor":5500.0' in j)
+    assert_true('"titulo":"Pedidos","tipo":"kpi","valor":5' in j)
+    assert_true('"linhas_fonte":5' in j)
+    assert_true('"linhas_filtradas":5' in j)
+
+
+def test_m7_filtro_muda_o_plano_e_o_resultado() raises:
+    """O widget guarda uma consulta: o filtro reexecuta, nao recorta no cliente."""
+    var p = _painel_de_vendas()
+    var j = p.json_dados("cidade=SP")
+    assert_true('"tipo":"kpi","valor":4700.0' in j)
+    assert_true('"titulo":"Pedidos","tipo":"kpi","valor":3' in j)
+    assert_true('"linhas_fonte":5' in j)
+    assert_true('"linhas_filtradas":3' in j)
+    # o grafico so tem SP
+    assert_true('"pontos":[{"x":"SP","y":4700.0}]' in j)
+
+
+def test_m7_so_o_agregado_atravessa() raises:
+    """A resposta e proporcional ao agregado, nao ao tamanho da fonte."""
+    var v = ler_parquet("tests/fixtures/grupos.parquet")
+    var p = Painel("Grande", v)
+    p.kpi("Total", soma("valor"))
+    p.grafico("Por grupo", "grupo", soma("valor"), "barra")
+    var j = p.json_dados("")
+    assert_true('"linhas_fonte":3000' in j)
+    # 3000 linhas na fonte, resposta na casa das centenas de bytes
+    assert_true(j.byte_length() < 400)
+
+
+def test_m7_tabela_respeita_o_limite() raises:
+    var p = _painel_de_vendas()
+    var j = p.json_dados("")
+    # limite 3 na fixture de 5 linhas
+    assert_true('"2024-02-28"' in j)
+    assert_false('"2024-03-10","cidade"' in j)
+
+
+def test_m7_filtro_em_coluna_inexistente_erra() raises:
+    var v = ler_csv("tests/fixtures/vendas.csv")
+    var p = Painel("X", v)
+    var pegou = False
+    try:
+        p.filtro("cidadee")
+    except e:
+        pegou = True
+        assert_true("Voce quis dizer 'cidade'" in String(e))
+    assert_true(pegou)
+
+
+def test_m7_filtro_desconhecido_e_ignorado() raises:
+    """Parametro que nao corresponde a um filtro declarado nao vira predicado."""
+    var p = _painel_de_vendas()
+    var j = p.json_dados("qualquer=coisa")
+    assert_true('"linhas_filtradas":5' in j)
 
 
 def main() raises:

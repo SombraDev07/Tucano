@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.8.0 — M0 → M6 fechados (paralelismo por thread à parte).
+Versão 0.9.0 — M0 → M7 fechados (paralelismo por thread à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -286,6 +286,27 @@ valor. Nome que colide fora das chaves é recusado com erro, não renomeado em s
 Estável, com ausente sempre por último nas duas direções. Direções mistas saem de dois
 passos: `ordenar(["b"], True).ordenar(["a"])`.
 
+### Painel
+
+```mojo
+var p = Painel("Vendas", tabela)
+p.kpi("Faturamento", soma("valor"))
+p.grafico("Por cidade", "cidade", soma("valor"), "barra")   # barra, linha, pizza
+p.tabela("Detalhe", ["data", "cidade", "valor"], 50)
+p.filtro("cidade")
+p.servir(8080)
+```
+
+**Cada widget guarda uma `Consulta`, não uma `Tabela`.** Mexer num filtro muda o plano e
+reexecuta; o navegador recebe só o resultado agregado, e a página mostra quantos bytes
+trafegaram.
+
+Eixo derivado (mês, ano) sai de `com_coluna` antes do painel — não há uma segunda linguagem
+para o dashboard. O eixo do gráfico sai ordenado.
+
+Servidor sequencial, sem dependência externa no frontend. `json_painel()` e `json_dados()`
+são públicos: dá para gerar o payload sem subir servidor.
+
 ### Avisos
 
 `avisos()` lista as operações que ainda não têm kernel vetorizado. O normal é a ferramenta
@@ -359,6 +380,8 @@ um leitor e um escritor com o mesmo mal-entendido concordam entre si.
 | `tucano.executor` / `tucano.vetor` / `tucano.plano` | **interno**, muda no M6 |
 | `tucano.kernels` | **interno**, contrato de ponteiros pode mudar |
 | `tucano.scanner` / `tucano.thrift` / `tucano.codecs` | **interno** |
+| `tucano.http` / `tucano.painel_web` | **interno** |
+| `Painel` / `tucano.json` | estável |
 | `ler_parquet` / `para_parquet` / `esquema_parquet` | estável |
 | `ler_csv_tipado` / `LeitorCSV` | estável |
 | `ler_csv` / `para_csv` | assinatura estável, implementação refeita em M5 |

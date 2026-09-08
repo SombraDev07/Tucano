@@ -55,6 +55,8 @@ o que for mais conveniente na hora.
   de verdade: as colunas que você não pediu nunca são lidas.
 - **Agrupamento e junção como operadores** — não funções soltas. Chave de texto repetida
   agrupa por indexação direta de array, sem hash: 14,7× mais rápido que chave composta.
+- **Painel embutido** — KPIs, gráficos e filtros servidos pela própria biblioteca. Cada
+  widget guarda uma *consulta*, não uma tabela: o filtro reexecuta e só o agregado atravessa.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
 
 ## Instalação
@@ -209,6 +211,33 @@ A ordenação é **estável**, com ausente sempre por último. Direções mistas
 passos: `ordenar(["b"], True).ordenar(["a"])` — por isso não existe uma segunda forma de
 ordenar.
 
+## Painel
+
+```mojo
+var p = Painel("Vendas", vendas)
+p.kpi("Faturamento", soma("valor"))
+p.grafico("Por cidade", "cidade", soma("valor"), "barra")
+p.tabela("Detalhe", ["data", "cidade", "valor"], 50)
+p.filtro("cidade")
+p.servir(8080)
+```
+
+```bash
+pixi run painel
+```
+
+Cada widget guarda uma **consulta**, não uma tabela. Mexer no filtro muda o plano e
+reexecuta no servidor; o navegador recebe o resultado agregado. Um gráfico de doze meses
+recebe doze pontos, mesmo que a fonte tenha milhões de linhas — e o rodapé da página mostra
+quantos bytes de fato atravessaram:
+
+```
+3.000 linhas na fonte · 1.000 após os filtros · 2.331 bytes trafegados
+```
+
+A página é servida pela própria biblioteca, com os gráficos em SVG desenhado à mão. Sem CDN,
+sem biblioteca de terceiros: o painel roda em rede local ou sem rede nenhuma.
+
 ## Semântica
 
 Três regras que não se renegociam. Elas decidem qualquer dúvida de implementação.
@@ -344,13 +373,13 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | I/O tipado: scanner CSV, datahora, leitura em fatias | ✅ |
 | Parquet: leitura, escrita, column pruning | ✅ |
 | Agregação, junção, ordenação e verbos de análise | ✅ |
-| Painel de visualização | próximo |
+| Painel: KPI, gráfico, tabela, filtro | ✅ |
+| Otimizador de consultas | próximo |
 | Painel de visualização | planejado |
-| Otimizador de consultas | planejado |
 | Execução out-of-core | planejado |
 | Interoperabilidade Arrow | planejado |
 
-124 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+137 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do
@@ -365,6 +394,7 @@ mesmo mal-entendido concordam entre si.
 ```bash
 pixi run test      # suíte de testes
 pixi run exemplo   # exemplo executável
+pixi run painel    # painel em http://127.0.0.1:8080
 pixi run bench     # benchmarks de fundação
 pixi run bench-m3  # escala do executor
 pixi run bench-m4  # SIMD contra o laço escalar

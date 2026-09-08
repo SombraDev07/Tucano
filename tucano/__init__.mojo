@@ -67,4 +67,5 @@ from .agregacao import (
     primeiro,
     distintos,
 )
+from .painel import Painel, Widget, TipoWidget
 from .consulta import Consulta, lazy
