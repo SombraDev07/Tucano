@@ -1,0 +1,5 @@
+idade,salario,cidade,ativo
+25,2000.0,SP,true
+30,NA,RJ,true
+40,5000.0,BH,false
+22,1800.5,SP,true

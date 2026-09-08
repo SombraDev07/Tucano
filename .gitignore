@@ -1,0 +1,11 @@
+# ambientes pixi
+.pixi/*
+!.pixi/config.toml
+/pixi
+
+# artefatos de build
+*.mojoc
+*.mojopkg
+
+# saidas de teste
+tests/fixtures/_saida_*.csv

@@ -1,0 +1,144 @@
+# Tucano
+
+Biblioteca tabular nativa em **Mojo** — ergonomia de pandas, semântica de banco de dados,
+motor columnar de ponta a ponta.
+
+Não é um clone da API do pandas. É uma biblioteca usável no primeiro dia por quem vem do
+pandas, **sem herdar os erros dele**.
+
+```mojo
+from tucano import ler_csv, lazy, coluna, lit, lit_data, mes
+
+def main() raises:
+    var vendas = ler_csv("vendas.csv")
+
+    var q = (
+        lazy(vendas)
+        .onde(coluna("data").ge(lit_data("2024-02-01")))
+        .onde(coluna("valor").gt(lit(1000.0)))
+        .selecionar(["data", "cidade", "valor"])
+    )
+
+    print(q.descrever())   # SCAN -> FILTER (...) -> PROJECT [...] -> RESULT
+    q.coletar().mostrar()
+```
+
+## Instalação
+
+Mojo 1.0+ é o único requisito. Enquanto o pacote não está publicado num canal conda,
+use a partir do fonte:
+
+```bash
+git clone <url-do-repo> && cd tucano
+pixi run test
+```
+
+Para usar em outro projeto, copie o diretório `tucano/` e compile com `-I .`:
+
+```bash
+mojo -I . meu_script.mojo
+```
+
+Precompilar acelera builds locais (o `.mojoc` é ligado à versão do compilador e **não** é
+formato de distribuição):
+
+```bash
+pixi run build
+```
+
+## O que o Tucano faz diferente
+
+| pandas | Tucano |
+|---|---|
+| Index implícito alinha em silêncio | Sem index de rótulo; join sempre explícito |
+| Int com um nulo vira `float64` | Validity bitmap separado — `inteiro` continua `inteiro` |
+| String é `object` (um ponteiro por célula) | `StringStore`: offsets + bytes UTF-8 contíguos |
+| `SettingWithCopyWarning` | Ownership do Mojo decide cópia vs. movimento em compile-time |
+| `df[df.a>5][['b','c']]` materializa o intermediário | Pipeline lazy com plano inspecionável |
+| `KeyError: 'idade'` | `coluna inexistente: 'idade'. Voce quis dizer 'idades'?` |
+| `NaN` como único ausente, semântica ad-hoc | Lógica de três valores (Verdadeiro / Falso / Desconhecido) |
+
+### NA é lógica de três valores
+
+Este é o ponto onde o pandas mais machuca em silêncio. Comparação com ausente não dá
+Falso — dá **Desconhecido**, e `onde()` mantém apenas Verdadeiro:
+
+```mojo
+lazy(t).onde(coluna("salario").gt(lit(1000.0)))        # linha NA sai
+lazy(t).onde(coluna("salario").gt(lit(1000.0)).nao())  # linha NA sai também
+```
+
+Nas duas. Sem negação e com negação. É o comportamento do SQL, e é o que impede uma linha
+ausente de reaparecer só porque alguém inverteu o predicado.
+
+## API
+
+### Tipos
+
+`inteiro` · `real` · `logico` · `texto` · `data`
+
+```mojo
+var c = Coluna.de_inteiros("idade", [Int64(25), Int64(30)])
+var d = Coluna.de_datas_texto("quando", ["2024-01-15", "2024-02-20"])
+var t = Tabela(colunas)
+```
+
+### Tabela
+
+| Operação | Método |
+|---|---|
+| ler coluna | `pegar(nome)` |
+| adicionar / remover | `adicionar(coluna)` · `remover(nome)` |
+| projetar | `selecionar([nomes])` |
+| metadados | `shape()` · `schema()` · `nomes()` · `linhas()` · `colunas()` · `dtype_de(nome)` |
+| agregar | `soma(nome)` · `media(nome)` |
+| exibir | `primeiras(n)` · `mostrar()` |
+
+Nenhuma operação muta a tabela original.
+
+### Expressões
+
+```mojo
+coluna("idade").gt(lit(18.0)).e(coluna("cidade").eq(lit_texto("SP")))
+mes(coluna("data")).eq(lit_int(2))
+ano(coluna("data")).ge(lit_int(2024))
+coluna("data").ge(lit_data("2024-02-01"))
+```
+
+Comparação `.gt .ge .lt .le .eq .ne` · booleanos `.e .ou .nao` ·
+aritmética `.mais .menos .vezes .sobre` · datas `ano() mes() dia()`
+
+Operadores nativos (`>`, `&`) ainda não estão disponíveis — a arena de nós evita o ciclo
+de tipo que `List[Expr]` criaria.
+
+### Consulta lazy
+
+```mojo
+var q = lazy(tabela).onde(pred).selecionar(["a", "b"])
+print(q.descrever())   # o plano, antes de executar
+var resultado = q.coletar()
+```
+
+## Estado
+
+M0 (fundação), M1 (memory engine columnar), M2 (expression engine) e M2.5 (biblioteca,
+correções de fundação, tipo data) estão fechados. 33 testes.
+
+Próximo: **M3 — Execution Engine** (executor coluna-a-coluna, `com_coluna()`, lazy por
+padrão). Depois: SIMD/paralelismo, Parquet, groupby/join, painel.
+
+Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+[tucano/CONTRATO.md](tucano/CONTRATO.md).
+
+## Desenvolvimento
+
+```bash
+pixi run test      # suíte de testes
+pixi run bench     # benchmarks
+pixi run exemplo   # exemplo executável
+pixi run build     # precompilar o pacote
+```
+
+## Licença
+
+Apache-2.0 — veja [LICENSE](LICENSE).
