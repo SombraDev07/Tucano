@@ -125,9 +125,17 @@ Publicar o número desfavorável é o ponto. Sem ele, "é rápido porque tem SIM
 
 ## Estado atual do código (honestidade)
 
-**M0 → M10 fechados.** Próximo: **M11 — GPU [experimental]** ou o que a prática pedir. 184 testes verdes.
+**M0 → M10 fechados.** 184 testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos, e a suíte comparativa pública no ar.
 
-Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo por thread**, sem primitiva no stdlib do Mojo 1.0. O Parquet, que estava bloqueado por falta de fixture, foi destravado e entregue — leitura e escrita, com interoperabilidade verificada contra outra implementação.
+Falta para o 1.0, e nada disso é questão de escopo:
+
+| O que falta | Por quê |
+|---|---|
+| **Paralelismo por thread** | Fechado por construção no Mojo 1.0 — a linguagem proíbe o apagamento de origem que um payload de thread exige. Vale de metade a dois terços da distância para os engines de referência. Detalhes no M4. |
+| **Publicação em canal conda** | `recipe.yaml` está pronto; falta um canal (prefix.dev ou equivalente). Decisão de projeto. |
+| **Slab de data em Int32** | Dívida rastreada com gatilho explícito — ver abaixo. |
+
+O próximo trabalho com retorno claro é **maturidade de decodificação e execução**: contra um único núcleo o atraso é de 7× a 10×, e nesta sessão três otimizações guiadas por medição já cortaram o tempo pela metade. GPU (M11) e Excel (M12) seguem fora do caminho crítico, como sempre estiveram.
 
 | Peça | Status |
 |------|--------|
@@ -159,12 +167,6 @@ Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo p
 | `unir` (hash join interno e à esquerda) | ✅ M6 |
 | `ordenar` / `concatenar` / `resumo` / `contar_valores` | ✅ M6 |
 | `remover_na` / `preencher_na` / `unicos` | ✅ M6 |
-| Paralelismo por chunk | ❌ **bloqueado** — sem primitiva no Mojo 1.0 |
-| Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
-| Publicação em canal conda | ❌ exige canal próprio |
-| `DType.DATAHORA` | ❌ adiado para M5 |
-| Coluna derivada (`com_coluna`) | ❌ M3 |
-| `agrupar` / `unir` / `ordenar` | ❌ M6 |
 | Painel: KPI, gráfico, tabela, filtro | ✅ M7 |
 | Servidor HTTP sobre libc (`external_call`) | ✅ M7 |
 | Otimizador: dobra, fusão, empurrão, poda | ✅ M8 |
@@ -174,6 +176,12 @@ Uma coisa ficou de fora, por bloqueio externo e não por escopo: **paralelismo p
 | Escrita em múltiplos row groups | ✅ M9 |
 | SQL sobre o mesmo planner | ✅ M10 |
 | Arrow IPC: leitura e escrita, interop verificada | ✅ M10 |
+| Suíte comparativa pública | ✅ — números publicados, inclusive os desfavoráveis |
+| Paralelismo por chunk | ❌ **bloqueado** — fechado por construção no Mojo 1.0 |
+| Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
+| Publicação em canal conda | ❌ exige canal próprio |
+| Coluna derivada (`com_coluna`) | ❌ M3 |
+| `agrupar` / `unir` / `ordenar` | ❌ M6 |
 
 ### Dívidas concretas identificadas
 
