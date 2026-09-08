@@ -17,6 +17,7 @@ from .expr import Expr, ExprNode, Kind
 from .dtype import DType
 from .vetor import Vetor, Unidade
 from .plano import Etapa, TipoEtapa
+from .codecs import real64_para_bits
 from .kernels import (
     contar_marcados,
     add_f64,
@@ -1028,6 +1029,89 @@ def _chave_texto(col: Coluna, i: Int) raises -> String:
     return "i" + String(col.ints[i])
 
 
+struct _CodigosColuna(Movable):
+    """Uma coluna reduzida a codigos densos 0..quantos-1.
+
+    O ausente ganha um codigo proprio, o ultimo — agrupar junta os ausentes num
+    grupo so, ao contrario de comparar, onde `NA = NA` e DESCONHECIDO.
+    """
+
+    var codigos: List[Int]
+    var quantos: Int
+
+    def __init__(out self, var codigos: List[Int], quantos: Int):
+        self.codigos = codigos^
+        self.quantos = quantos
+
+
+def _codigos_densos(col: Coluna) raises -> _CodigosColuna:
+    """Codigo denso por linha, sem passar por texto.
+
+    Coluna de texto dicionarizada ja vem pronta: o codigo do dicionario **e** o
+    codigo denso. As outras passam por um `Dict` uma vez por linha, mas sobre
+    inteiro — nao sobre `String` recem-formatada.
+    """
+    var n = col.tamanho()
+    var saida = List[Int](capacity=n)
+
+    if col.tipo == DType.TEXTO and col.eh_dicionarizada():
+        var d = col.cardinalidade()
+        for i in range(n):
+            if col.eh_ausente(i):
+                saida.append(d)
+            else:
+                saida.append(Int(col.codigos[i]))
+        return _CodigosColuna(saida^, d + 1)
+
+    var mapa = Dict[Int, Int]()
+    var proximo = 0
+    var ausente_visto = False
+    for i in range(n):
+        if col.eh_ausente(i):
+            ausente_visto = True
+            saida.append(-1)  # marcado depois, quando se souber o total
+            continue
+        var bruto: Int
+        if col.tipo == DType.REAL:
+            # os bits, nao o texto: formatar um float por linha era o maior
+            # custo isolado da chave composta
+            bruto = real64_para_bits(col.reals[i])
+        elif col.tipo == DType.LOGICO:
+            bruto = Int(col.logics[i])
+        elif col.tipo == DType.TEXTO:
+            # texto sem dicionario: nao ha atalho, o valor e o proprio texto
+            var t = col.texto_bruto(i)
+            var h = 0xCBF29CE484222325
+            for b in t.as_bytes():
+                h = (h ^ Int(b)) * 0x100000001B3
+            bruto = h
+        else:
+            bruto = Int(col.ints[i])
+        if bruto in mapa:
+            saida.append(mapa[bruto])
+        else:
+            mapa[bruto] = proximo
+            saida.append(proximo)
+            proximo += 1
+
+    var codigo_ausente = proximo
+    if ausente_visto:
+        for i in range(n):
+            if saida[i] < 0:
+                saida[i] = codigo_ausente
+        proximo += 1
+    return _CodigosColuna(saida^, proximo)
+
+
+# Acima disso a tabela de indexacao direta custa mais memoria do que o `Dict`
+# custaria em tempo. 4 milhoes de posicoes sao 32 MiB.
+comptime _LIMITE_INDEXACAO_DIRETA = 4_000_000
+
+# Teto do produto das cardinalidades para a chave em base mista continuar exata
+# dentro de um inteiro de 64 bits, com folga.
+comptime _LIMITE_COMBINACOES = 1 << 60
+
+
 def calcular_grupos(cols: List[Coluna], chaves: List[String]) raises -> Grupos:
     """Atribui um id de grupo a cada linha, preservando a ordem de aparicao.
 
@@ -1107,23 +1191,73 @@ def calcular_grupos(cols: List[Coluna], chaves: List[String]) raises -> Grupos:
                     n_grupos += 1
             return Grupos(ids^, n_grupos, representantes^, "hash de inteiros")
 
-    var mapa = Dict[String, Int]()
-    var n_grupos = 0
     var posicoes = List[Int]()
     for chave in chaves:
         posicoes.append(posicao_no_lote(cols, chave))
+
+    # cada coluna vira codigo denso, e a combinacao vira um numero em base
+    # mista: `k = k * quantos_j + codigo_j`. Duas colunas de cinquenta valores
+    # dao 2500 combinacoes possiveis — cabe num vetor, e ai nao ha hash nenhum.
+    var partes = List[_CodigosColuna]()
+    var produto = 1
+    var produto_cabe = True
+    for p in posicoes:
+        var parte = _codigos_densos(cols[p])
+        if parte.quantos <= 0 or produto > _LIMITE_COMBINACOES // parte.quantos:
+            produto_cabe = False
+        else:
+            produto *= parte.quantos
+        partes.append(parte^)
+
+    var n_grupos = 0
+    if produto_cabe and produto <= _LIMITE_INDEXACAO_DIRETA:
+        var mapa = List[Int]()
+        mapa.resize(produto, -1)
+        for i in range(linhas):
+            var k = 0
+            for j in range(len(partes)):
+                k = k * partes[j].quantos + partes[j].codigos[i]
+            if mapa[k] < 0:
+                mapa[k] = n_grupos
+                representantes.append(i)
+                n_grupos += 1
+            ids.append(mapa[k])
+        return Grupos(ids^, n_grupos, representantes^, "indexacao direta composta")
+
+    if produto_cabe:
+        # combinacoes demais para um vetor, mas a chave em base mista ainda e
+        # EXATA — nao ha colisao a tratar, so um `Dict` no lugar do vetor
+        var mapa_exato = Dict[Int, Int]()
+        for i in range(linhas):
+            var k = 0
+            for j in range(len(partes)):
+                k = k * partes[j].quantos + partes[j].codigos[i]
+            if k in mapa_exato:
+                ids.append(mapa_exato[k])
+            else:
+                mapa_exato[k] = n_grupos
+                representantes.append(i)
+                ids.append(n_grupos)
+                n_grupos += 1
+        return Grupos(ids^, n_grupos, representantes^, "chave composta em base mista")
+
+    # combinacoes demais ate para caber num inteiro: volta ao texto, que e
+    # lento mas exato. Misturar os codigos num hash seria mais rapido e ERRADO —
+    # duas combinacoes diferentes com o mesmo hash viram um grupo so, e o
+    # resultado nao denuncia. Grupo errado nao vale um ganho de tempo.
+    var mapa_texto = Dict[String, Int]()
     for i in range(linhas):
         var composta = String("")
-        for p in posicoes:
-            composta += _chave_texto(cols[p], i) + "\x01"
-        if composta in mapa:
-            ids.append(mapa[composta])
+        for j in range(len(partes)):
+            composta += String(partes[j].codigos[i]) + "\x01"
+        if composta in mapa_texto:
+            ids.append(mapa_texto[composta])
         else:
-            mapa[composta] = n_grupos
+            mapa_texto[composta] = n_grupos
             representantes.append(i)
             ids.append(n_grupos)
             n_grupos += 1
-    return Grupos(ids^, n_grupos, representantes^, "hash de chave composta")
+    return Grupos(ids^, n_grupos, representantes^, "chave composta em texto")
 
 
 def coletar_linhas(col: Coluna, indices: List[Int]) raises -> Coluna:

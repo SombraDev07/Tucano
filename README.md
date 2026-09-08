@@ -432,12 +432,12 @@ E `pixi run bench-m6`, sobre 1 milhão de linhas com chave de 50 valores distint
 
 | | ns/linha | |
 |---|---|---|
-| formar grupos por chave **dicionarizada** | **12** | indexação direta, sem hash |
-| formar grupos por chave inteira | 16 | |
-| `agrupar` + 3 agregações | 18 | |
-| `unir` à esquerda | **74** | era 470: a chave vira código, não `String` |
-| `ordenar` estável | **100** | era 335; por texto, era 1320 ms e são 98 |
-| formar grupos por chave composta | 221 | monta uma `String` por linha — o próximo alvo |
+| formar grupos por chave **dicionarizada** | **13** | indexação direta, sem hash |
+| formar grupos por chave inteira | 22 | |
+| `agrupar` + 3 agregações | 18 | era 43 |
+| formar grupos por chave composta | **34** | era 221: base mista, sem `String` por linha |
+| `unir` à esquerda | **66** | era 470: a chave vira código, não `String` |
+| `ordenar` estável | **98** | era 335; por texto, era 1320 ms e são 98 |
 
 E `pixi run bench-m8`, sobre 500 mil linhas em 5 colunas:
 
@@ -534,7 +534,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Excel `.xlsx`: leitura | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-232 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+234 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Por muitos marcos o roadmap registrou paralelismo como bloqueado pela linguagem. **Estava

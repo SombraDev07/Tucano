@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13, M15 e M16 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13 e M15 → M17 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -194,7 +194,7 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. **Sa
 | Paralelismo na leitura (uma thread por coluna) | ✅ M13 |
 | Paralelismo nos operadores de execução | ❌ **medido e recusado** — banda de memória, não CPU (M15) |
 | Junção e ordenação mais baratas | ✅ M16 — 74 e 100 ns/linha |
-| Chave de grupo composta | ⏳ próximo — 221 ns/linha, uma `String` por linha |
+| Chave de grupo composta | ✅ M17 — 34 ns/linha |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
 
@@ -238,7 +238,8 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M12 | Excel (leitura) | alta | ✅ feito | `ler_xlsx`, primeira aba ou pelo nome |
 | M13 | Paralelismo por thread | crítica | ✅ feito | leitura 105 → 69 ms |
 | M15 | Operadores | crítica | ✅ feito | filtro 47 → 16 ms; paralelizar operador medido e recusado |
-| M16 | Junção e ordenação | crítica | ✅ feito | 470 → 74 e 335 → 100 ns/linha |
+| M16 | Junção e ordenação | crítica | ✅ feito | 470 → 66 e 335 → 98 ns/linha |
+| M17 | Chave de grupo composta | crítica | ✅ feito | 221 → 34 ns/linha |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -1697,6 +1698,73 @@ combinação — a mesma doença, no último lugar onde ela ainda mora.
 - [x] junção sem `Dict` no laço de sondagem e sem `String` por linha de saída
 - [x] os dois conferidos contra referência externa ao motor
 - [x] 232 testes verdes, interoperabilidade nos dois formatos
+
+---
+
+## M17 — Chave composta: o último lugar onde a `String` morava ✅
+
+O M16 terminou apontando o número: `grupos por chave composta` em 221 ns/linha,
+contra 12 pela chave dicionarizada. Dezoito vezes mais caro para fazer a mesma
+coisa com duas colunas em vez de uma.
+
+A causa era a mesma de todo o ciclo, no último lugar onde ainda morava: uma
+`String` montada por linha. E o pior caso era pior do que parecia — para coluna
+real, `_chave_texto` **formatava o float como texto**, uma vez por linha.
+
+### Código denso por coluna, número em base mista
+
+Cada coluna vira código denso `0..d-1`. Texto dicionarizado já vem pronto: o
+código do dicionário **é** o código denso, custo zero. As outras passam por um
+`Dict` uma vez por linha, mas sobre inteiro — para real, os bits, não o texto.
+
+A combinação é um número em base mista: `k = k * quantos_j + codigo_j`. Duas
+colunas de cinquenta valores dão 2.500 combinações possíveis — cabe num vetor, e
+aí não há hash nenhum, só indexação direta.
+
+| | |
+|---|---|
+| produto ≤ 4 milhões | vetor de indexação direta |
+| produto cabe em 64 bits | `Dict` na chave em base mista, **exata** |
+| nem isso | volta ao texto: lento, e exato |
+
+### O hash que eu quase deixei passar
+
+A primeira versão usava, no caminho de reserva, um **hash** dos códigos como
+chave do `Dict`. Duas combinações diferentes com o mesmo hash viram um grupo só,
+e o resultado não denuncia — a soma sai errada e parece plausível.
+
+O caminho antigo, com `String`, não tinha esse defeito: `Dict[String, Int]`
+compara o texto inteiro. Trocar exatidão por velocidade num agrupamento é o tipo
+de regressão que nenhum benchmark mostra.
+
+A chave em base mista é **exata** enquanto o produto couber no inteiro, e é por
+isso que ela substitui o hash em vez de acompanhá-lo. Onde não couber, volta ao
+texto. Grupo errado não vale ganho de tempo.
+
+### Resultado
+
+| 1M linhas | antes | depois | |
+|---|---|---|---|
+| grupos por chave composta | 221 ns/linha | **34 ns/linha** | 6,5× |
+
+E o quadro dos operadores, fechado o ciclo:
+
+| | início do ciclo | agora |
+|---|---|---|
+| grupos por chave dicionarizada | 11 | 13 |
+| grupos por chave inteira | 16 | 22 |
+| grupos por chave composta | 221 | **34** |
+| `agrupar` + 3 agregações | 43 | 18 |
+| junção à esquerda | 470 | **66** |
+| ordenação estável | 335 | **98** |
+
+### Critério de saída
+
+- [x] chave composta sem `String` por linha e sem formatar float por linha
+- [x] os três caminhos exatos — nenhum agrupa por hash
+- [x] conferido contra implementação própria do teste, e o caminho de muitas
+      combinações tem teste que o alcança
+- [x] 234 testes verdes, interoperabilidade nos dois formatos
 
 ---
 

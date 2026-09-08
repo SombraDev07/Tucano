@@ -3,6 +3,37 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.25.0] — Chave de grupo composta
+
+O ultimo lugar onde a `String` por linha ainda morava. Para coluna real,
+`_chave_texto` chegava a **formatar o float como texto** uma vez por linha.
+
+| 1M linhas | antes | depois | |
+|---|---|---|---|
+| grupos por chave composta | 221 ns/linha | **34 ns/linha** | 6,5x |
+
+### Alterado
+
+- Cada coluna vira **codigo denso** `0..d-1`. Texto dicionarizado ja vem pronto:
+  o codigo do dicionario e o codigo denso. As outras passam por um `Dict` uma
+  vez por linha, mas sobre inteiro — para real, os bits, nao o texto.
+- A combinacao e um numero em **base mista** (`k * quantos + codigo`). Duas
+  colunas de cinquenta valores dao 2.500 combinacoes: cabe num vetor, e nao ha
+  hash nenhum.
+- Tres caminhos, todos **exatos**: vetor de indexacao direta ate 4 milhoes de
+  combinacoes; `Dict` na chave em base mista enquanto ela couber em 64 bits;
+  texto acima disso.
+- `Grupos.caminho` passa a reportar `"indexacao direta composta"` ou
+  `"chave composta em base mista"` no lugar de `"hash de chave composta"`.
+
+### Nota sobre o que nao entrou
+
+A primeira versao usava um **hash** dos codigos como chave do `Dict` no caminho
+de reserva. Duas combinacoes diferentes com o mesmo hash viram um grupo so, e o
+resultado nao denuncia: a soma sai errada e parece plausivel. O caminho antigo,
+com `String`, nao tinha esse defeito. A chave em base mista e exata, e por isso
+substitui o hash em vez de acompanha-lo.
+
 ## [0.24.0] — Juncao e ordenacao: o valor vira codigo
 
 As duas tinham a mesma doenca, e e a mesma de todo este ciclo: materializar por

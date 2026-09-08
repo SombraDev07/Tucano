@@ -1719,7 +1719,9 @@ def test_m6_grupos_por_chave_composta() raises:
     chaves.append("cidade")
     chaves.append("data")
     var g = calcular_grupos(t.lote(), chaves)
-    assert_equal(g.caminho, "hash de chave composta")
+    # duas colunas de poucos valores cabem numa tabela de indexacao direta; o
+    # hash de `String` por linha era o caminho antigo
+    assert_equal(g.caminho, "indexacao direta composta")
     assert_equal(g.n_grupos, 5)
 
 
@@ -3177,6 +3179,105 @@ def test_filtro_escalar_bate_com_oraculo() raises:
     var esp_i = _tri_esperado(v, aus, ">", 10.0)
     for i in range(n):
         assert_equal(Int(i_lit[i]), Int(esp_i[i]))
+
+
+def _grupos_oraculo(
+    texto: List[String], numero: List[Float64], aus: List[Bool]
+) raises -> List[Int]:
+    """Ids de grupo por comparacao direta das celulas, na ordem de aparicao.
+
+    Implementacao propria do teste: se ela e o motor concordarem, os dois teriam
+    de estar errados do mesmo jeito para a conferencia passar.
+    """
+    var chaves = List[String]()
+    var ids = List[Int]()
+    for i in range(len(texto)):
+        var k: String
+        if aus[i]:
+            k = "<NA>|" + String(numero[i])
+        else:
+            k = texto[i] + "|" + String(numero[i])
+        var achou = -1
+        for j in range(len(chaves)):
+            if chaves[j] == k:
+                achou = j
+        if achou < 0:
+            achou = len(chaves)
+            chaves.append(k)
+        ids.append(achou)
+    return ids^
+
+
+def test_grupos_chave_composta_bate_com_oraculo() raises:
+    """Chave composta virou codigo denso; antes era uma `String` por linha.
+
+    A combinacao e um numero em base mista — `k * quantos + codigo` — e isso e
+    **exato**, nao um hash: duas combinacoes diferentes nunca caem no mesmo
+    grupo. O teste confere contra uma implementacao propria, e tambem que os
+    ausentes se juntam num grupo so (agrupar junta o que comparar nao junta:
+    `NA = NA` e DESCONHECIDO, mas `NA` agrupa com `NA`).
+    """
+    var n = 600
+    var texto = List[String](capacity=n)
+    var numero = List[Float64](capacity=n)
+    var aus = List[Bool](capacity=n)
+    for i in range(n):
+        texto.append("c" + String(i % 7))
+        numero.append(Float64(i % 11) * 0.5)
+        aus.append(i % 23 == 0)
+
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("cidade", texto.copy(), aus.copy()))
+    cols.append(Coluna.de_reais("valor", numero.copy()))
+    var chaves = List[String]()
+    chaves.append("cidade")
+    chaves.append("valor")
+
+    var g = calcular_grupos(cols, chaves)
+    assert_equal(g.caminho, "indexacao direta composta")
+
+    var esperado = _grupos_oraculo(texto, numero, aus)
+    assert_equal(len(g.ids), len(esperado))
+    # os ids nao precisam ser os MESMOS numeros, mas a particao tem de ser a
+    # mesma: duas linhas juntas de um lado tem de estar juntas do outro
+    var de_para = Dict[Int, Int]()
+    var difs = 0
+    for i in range(len(esperado)):
+        if esperado[i] in de_para:
+            if de_para[esperado[i]] != g.ids[i]:
+                difs += 1
+        else:
+            de_para[esperado[i]] = g.ids[i]
+    assert_equal(difs, 0)
+    assert_equal(g.n_grupos, len(de_para))
+
+
+def test_grupos_chave_composta_muitas_combinacoes() raises:
+    """Combinacoes demais para o vetor caem na base mista, que segue exata.
+
+    Duas colunas com 2500 valores distintos cada dao 6,25 milhoes de
+    combinacoes possiveis — acima do teto do vetor de indexacao direta. A chave
+    continua sendo o numero em base mista, entao continua sem colisao.
+    """
+    var n = 2500
+    var a = List[Int64](capacity=n)
+    var b = List[Int64](capacity=n)
+    for i in range(n):
+        a.append(Int64(i))
+        b.append(Int64(n - 1 - i))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("a", a^))
+    cols.append(Coluna.de_inteiros("b", b^))
+    var chaves = List[String]()
+    chaves.append("a")
+    chaves.append("b")
+
+    var g = calcular_grupos(cols, chaves)
+    assert_equal(g.caminho, "chave composta em base mista")
+    # cada linha e um par unico: um grupo por linha
+    assert_equal(g.n_grupos, n)
+    for i in range(n):
+        assert_equal(g.ids[i], i)
 
 
 def test_juncao_bate_com_forca_bruta() raises:
