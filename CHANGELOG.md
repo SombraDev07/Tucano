@@ -52,8 +52,8 @@ Leitura de CSV passou de **7226 ns/linha para 715** (10,1x). Com schema explicit
 
 ### Bloqueado
 
-- **Parquet.** Nao ha nesta maquina `pyarrow`, `pandas`, `fastparquet`, `parquet-tools`
-  nem `duckdb` — nenhuma forma de gerar um arquivo Parquet real para testar contra. Um
+- **Parquet.** Nao ha nesta maquina nenhuma ferramenta capaz de gerar um arquivo
+  Parquet real para testar contra. Um
   leitor sao 1500+ linhas de parsing binario (Thrift compact, RLE/bit-packed, paginas de
   dicionario, Snappy); escrever isso sem fixture produziria codigo que parece pronto e
   nao e. `pyarrow` esta disponivel no conda-forge: adota-lo como dependencia **de
@@ -135,13 +135,13 @@ soma 2,33x | comparacao 3,07x | mes(data) 4,70x | `cidade == "SP"` 4,21x |
   eager, execucao lazy.
 - **Materializacao automatica**: `mostrar`, `primeiras`, `linhas`, `colunas`, `shape`,
   `schema`, `nomes`, `pegar`, `soma`, `media` executam o plano sozinhos.
-- **`com_coluna`** — o `df['x'] = ...` do pandas, com inferencia de tipo derivado sem
+- **`com_coluna`** — atribuicao de coluna calculada, com inferencia de tipo derivado sem
   coercao silenciosa. Substitui a coluna se o nome ja existir.
 - **Propagacao de esquema** (`esquema_apos`): o planejador raciocina sobre nome+tipo, nao
   sobre dados. Da `Consulta.esquema_previsto()` — tipos do resultado **sem executar** — e
   e a base do otimizador do M8.
 - **`avisos()`**: lista as operacoes sem kernel vetorizado (comparacao de texto, extrator
-  de data). O pandas nunca avisa que voce caiu do caminho rapido.
+  de data). O normal e a ferramenta nao avisar que voce saiu do caminho rapido.
 - Comparacao lexicografica entre textos (`.gt`, `.lt`, ...), alem de igualdade.
 - `bench/bench_m3.mojo` + tarefa `pixi run bench-m3`: mede ns/linha em 25k..200k.
 
@@ -193,7 +193,7 @@ soma 2,33x | comparacao 3,07x | mes(data) 4,70x | `cidade == "SP"` 4,21x |
 
 ### Removido
 
-- **`Tabela.indice`** (Decisao 1). Era o Index do pandas nascendo: `linhas()`
+- **`Tabela.indice`** (Decisao 1). Era um indice implicito nascendo: `linhas()`
   vinha de um campo paralelo que podia divergir das colunas. A contagem agora
   vem das proprias colunas.
 

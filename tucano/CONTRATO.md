@@ -1,6 +1,6 @@
 # Tucano — contrato da API
 
-Engine tabular **100% Mojo**, com ergonomia de pandas e semântica de banco de dados.
+Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
 Versão 0.6.0 — M0 → M5 fechados (paralelismo e Parquet à parte).
 
@@ -8,8 +8,9 @@ Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve 
 
 ## Tese
 
-Não é "pandas em Mojo". É uma biblioteca tabular usável no primeiro dia por quem vem do
-pandas, sobre um execution engine columnar que não repete os erros dele.
+Não é a reimplementação de uma API existente. É uma biblioteca tabular usável no primeiro
+dia por quem já analisa dados, sobre um execution engine columnar que não repete os vícios
+que a prática consagrou.
 
 ---
 
@@ -73,7 +74,7 @@ Não há sinônimos. Antes de qualquer método novo: *já existe um jeito de faz
 
 ### 7. Zero Python
 
-Sem `std.python`, sem pandas, sem pyarrow como runtime.
+Sem `std.python`, sem biblioteca de dados em Python no runtime.
 
 ---
 
@@ -256,8 +257,8 @@ Comparar texto com número levanta erro — nunca converte em silêncio.
 
 ### Avisos
 
-`avisos()` lista as operações que ainda não têm kernel vetorizado. O pandas nunca avisa que
-você caiu do caminho rápido; aqui avisa.
+`avisos()` lista as operações que ainda não têm kernel vetorizado. O normal é a ferramenta
+não avisar que você saiu do caminho rápido; aqui avisa.
 
 Depois do M4, sobra um caso: comparação em coluna de texto **não dicionarizada** (todos os
 valores distintos, ou coluna derivada). Aritmética, comparação numérica, extrator de data e

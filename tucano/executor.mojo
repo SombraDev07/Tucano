@@ -679,7 +679,7 @@ def op_com_coluna(
 ) raises -> List[Coluna]:
     """ExpressionExec: avalia a expressao e materializa a coluna nova.
 
-    Substitui a coluna se o nome ja existir — o `df['x'] = ...` do pandas.
+    Substitui a coluna se o nome ja existir.
     """
     var v = avaliar(expr, cols)
     var tipo = tipo_resultado(expr, expr.root, esquema_do_lote(cols))
@@ -747,8 +747,8 @@ def avisos_expr(
 ) raises:
     """Marca os nos que ainda nao tem kernel vetorizado.
 
-    O pandas nunca avisa que voce caiu do caminho rapido. Aqui avisa — e o aviso
-    some quando o kernel chega.
+    O normal e a ferramenta nao avisar que voce saiu do caminho rapido. Aqui avisa
+    — e o aviso some quando o kernel chega.
     """
     if idx < 0:
         return

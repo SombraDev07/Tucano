@@ -1,6 +1,6 @@
 """Mensagens de erro que ensinam (Decisao 5 do CONTRATO).
 
-Um nome de coluna errado no pandas custa um `KeyError` seco. Aqui custa uma
+Um nome de coluna errado costuma custar um erro de chave seco. Aqui custa uma
 sugestao.
 """
 

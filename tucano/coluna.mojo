@@ -43,8 +43,8 @@ struct Coluna(Copyable, Movable):
 
     Dictionary encoding: quando ha repeticao, `textos` guarda so os valores
     distintos e `codigos` guarda um Int32 por linha. E o que transforma
-    `cidade == "SP"` em comparacao de inteiros, vetorizavel — o pandas compara
-    ponteiros de objeto Python, um por vez.
+    `cidade == "SP"` em comparacao de inteiros, vetorizavel. A alternativa
+    consagrada e comparar ponteiros de objeto, um por vez.
     """
 
     var nome: String

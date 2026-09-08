@@ -1,9 +1,9 @@
 # Roadmap Tucano
 
-**Tese:** biblioteca tabular nativa em Mojo — **ergonomia de pandas, semântica de banco de dados, motor moderno de ponta a ponta**.
+**Tese:** biblioteca tabular nativa em Mojo — **ergonomia direta, semântica de banco de dados, motor moderno de ponta a ponta**.
 
-**Não é:** clone da API do pandas.
-**É:** usável no primeiro dia por quem vem do pandas, sem herdar nenhum dos erros dele.
+**Não é:** mais uma camada de conveniência sobre um modelo de dados frouxo.
+**É:** usável no primeiro dia por quem já analisa dados, sem herdar os vícios que a prática consagrou.
 
 Três objetivos, nesta ordem de dependência:
 
@@ -22,11 +22,11 @@ Polars, DuckDB e DataFusion já cobrem DataFrame/SQL moderno. A oportunidade do 
 
 ---
 
-## Por que existir: a autópsia do pandas
+## Por que existir: as armadilhas herdadas
 
-Isto não é decoração. Cada linha abaixo é uma decisão de design do Tucano.
+A análise tabular em memória consagrou um conjunto de decisões que hoje custam caro. Isto não é decoração: cada linha abaixo é uma decisão de design do Tucano, tomada contra uma dessas heranças.
 
-| Pecado do pandas | Custo real | Resposta do Tucano | Marco |
+| Armadilha herdada | Custo real | Decisão do Tucano | Marco |
 |---|---|---|---|
 | **Index implícito com alinhamento automático** | `a + b` vira NaN silencioso; `reset_index()` em todo lugar | Sem index de rótulo. Join é sempre explícito | M2.5 |
 | **NaN como único missing** | Int com 1 nulo vira `float64` e perde precisão | Validity bitmap separado do valor: Int64 continua Int64 com NA | ✅ M1 |
@@ -77,7 +77,7 @@ Tipos incompatíveis levantam erro com mensagem acionável. Nunca `object`, nunc
 
 ### 4. Uma forma por operação
 
-Antes de adicionar um método, a pergunta é: *já existe um jeito de fazer isso?* Se existe, o novo é recusado. A explosão de API do pandas começou com conveniências.
+Antes de adicionar um método, a pergunta é: *já existe um jeito de fazer isso?* Se existe, o novo é recusado. As bibliotecas que chegaram a centenas de métodos começaram assim, uma conveniência de cada vez.
 
 ### 5. Erros ensinam
 
@@ -85,7 +85,7 @@ Toda mensagem de erro diz o que aconteceu, onde, e qual é a correção prováve
 
 ### 6. Zero Python
 
-Sem `std.python`, sem pandas, sem pyarrow como runtime.
+Sem `std.python`, sem biblioteca de dados em Python no runtime.
 
 ### 7. Frontend não é Mojo
 
@@ -95,13 +95,13 @@ Mojo faz dado e execução. Navegador faz gráfico, layout e interação. O pain
 
 ## Métrica de sucesso
 
-**Não é** "80% da API do pandas". **Nem** "ganhar do DuckDB em TPC-H" — isso levaria anos e não é onde o Tucano é diferente.
+**Não é** "80% da API da biblioteca mais usada". **Nem** "ganhar do DuckDB em TPC-H" — isso levaria anos e não é onde o Tucano é diferente.
 
 São três provas, em ordem de honestidade:
 
-1. **Usabilidade** — um analista que sabe pandas resolve uma tarefa real (ler, filtrar, derivar coluna, agrupar, exportar) sem consultar documentação além do README.
+1. **Usabilidade** — um analista acostumado a bibliotecas tabulares resolve uma tarefa real (ler, filtrar, derivar coluna, agrupar, exportar) sem consultar documentação além do README.
 2. **Query interativa** — filtro de painel sobre 10M linhas responde em tempo de interação. Aqui pesam startup e replanejamento, onde binário AOT bate stack Python de verdade.
-3. **Escala** — suíte pública vs. Pandas / Polars / DuckDB (1M → 1B linhas): tempo, RAM, throughput, startup, scaling por cores.
+3. **Escala** — suíte pública contra os engines tabulares de referência (1M → 1B linhas): tempo, RAM, throughput, startup, scaling por cores.
 
 ---
 
@@ -146,7 +146,7 @@ Duas coisas ficaram de fora, ambas por bloqueio externo e não por escopo: **par
 
 ### Dívidas concretas identificadas
 
-**1. ~~`Tabela.indice` é o Index do pandas nascendo.~~** ✅ Removido em M2.5. `linhas()` vem de `_colunas[0].tamanho()`.
+**1. ~~`Tabela.indice` era um índice implícito nascendo.~~** ✅ Removido em M2.5. `linhas()` vem de `_colunas[0].tamanho()`.
 
 **2. ~~`Consulta.coletar()` é quadrático.~~** ✅ Resolvido em M3. O executor lê cada coluna **uma vez** para um `Vetor` contíguo (com `ref` sobre o lote, sem cópia) e opera sobre ele. `bench/bench_m3.mojo` mede ns/linha praticamente constante de 25k a 200k linhas — escala linear.
 
@@ -257,7 +257,7 @@ coluna("idade").gt(lit(18)).e(coluna("pais").eq(lit_texto("BR")))
 
 > **Correção de fato:** `mojo package` foi substituído por `mojo precompile`, e `.mojopkg` por `.mojoc`. O `.mojoc` é ligado à versão exata do compilador e a própria documentação do Mojo diz que **não é formato de distribuição** — serve para acelerar builds locais. A distribuição de bibliotecas Mojo é **por fonte**: canal conda ou repositório. O `recipe.yaml` cobre o primeiro caso quando houver canal.
 
-> Empacotar cedo força a decisão de superfície pública. Foi a ausência dessa disciplina que produziu os 600 métodos do pandas.
+> Empacotar cedo força a decisão de superfície pública. Foi a ausência dessa disciplina que produziu bibliotecas com centenas de métodos e cinco formas de indexar.
 
 ### Correções
 
@@ -311,7 +311,7 @@ resultado.mostrar()   # materializa aqui
 
 ### Coluna derivada
 
-O `df['x'] = ...` do pandas é metade do uso real e hoje não existe:
+Atribuir uma coluna calculada é metade do uso real e hoje não existe:
 
 ```mojo
 var t = tabela.com_coluna("total", coluna("preco").vezes(coluna("qtd")))
@@ -352,7 +352,7 @@ otimizador do M8.
 
 ## M4 — SIMD ✅ (+ Parallel ⛔ bloqueado)
 
-A justificativa de usar Mojo: kernels especializados que o pandas não pode ter.
+A justificativa de usar Mojo: kernels especializados que uma biblioteca com runtime interpretado não pode ter.
 
 ### Ganhos medidos
 
@@ -391,8 +391,8 @@ caso sem ausentes, foi para **2,33×**.
 
 Coluna de texto com repetição guarda valores distintos + um `Int32` por linha.
 `cidade == "SP"` resolve o literal para um código **uma vez** — varrendo só os distintos — e
-o filtro vira comparação de inteiros vetorizada. O pandas compara ponteiros de objeto
-Python, um por vez.
+o filtro vira comparação de inteiros vetorizada. A alternativa consagrada é comparar
+ponteiros de objeto, um por vez.
 
 No M6 a mesma estrutura faz groupby por chave dicionarizada virar **indexação direta de
 array**, sem hash.
@@ -459,7 +459,7 @@ O último item saiu de graça de uma decisão pequena: o `Vetor` passou a carreg
 
 ### Parquet — bloqueado por verificação
 
-Não entrou, e a razão não é escopo: **não há como verificar**. A máquina não tem `pyarrow`, `pandas`, `fastparquet`, `parquet-tools` nem `duckdb` — nenhuma forma de produzir um único arquivo Parquet real para testar contra.
+Não entrou, e a razão não é escopo: **não há como verificar**. A máquina não tem nenhuma ferramenta capaz de produzir um único arquivo Parquet real para testar contra.
 
 Um leitor de Parquet são 1500+ linhas de parsing de formato binário: Thrift compact protocol, níveis de definição em RLE/bit-packed, páginas de dicionário, descompressão Snappy. Escrever isso sem fixture seria produzir código que *parece* pronto e não é — exatamente o que este roadmap se recusa a marcar como feito.
 
@@ -524,7 +524,7 @@ Herdado do M5: **slab de data em Int32**, junto da reescrita de storage para lot
 
 ## M7 — Painel
 
-O dashboard como camada da biblioteca. A arquitetura vem direto da crítica ao pandas: `df.plot()` gera PNG estático, Streamlit re-executa o script inteiro, Dash reenvia o DataFrame. Todos tratam o painel como consumidor de **dados**.
+O dashboard como camada da biblioteca. A arquitetura vem direto da crítica às ferramentas existentes: o gráfico embutido gera PNG estático, Streamlit re-executa o script inteiro, Dash reenvia o DataFrame. Todos tratam o painel como consumidor de **dados**.
 
 ### O widget guarda uma `Consulta`, não uma `Tabela`
 
@@ -657,7 +657,7 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **Distribuição** — pacote instalável, README, documentação de API
 
-**Fora do 1.0** — Python, Excel, clonagem da API do pandas, GPU obrigatória
+**Fora do 1.0** — Python, Excel, clonagem de API alheia, GPU obrigatória
 
 ---
 
@@ -691,7 +691,7 @@ Por baixo: Expression → Logical Plan → Optimizer → Physical Plan → SIMD/
 
 ## Suíte de benchmarks
 
-Tucano × Pandas × Polars × DuckDB em 1M / 10M / 100M / 1B linhas:
+Tucano × Polars × DuckDB × a biblioteca tabular mais usada em Python, de 1M a 1B linhas:
 
 tempo, RAM, throughput, **startup**, scaling por cores, I/O
 

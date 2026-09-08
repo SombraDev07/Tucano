@@ -4,7 +4,7 @@ As duas vivem no mesmo modulo porque sao mutuamente recursivas: `Tabela.onde()`
 devolve `Consulta` e `Consulta.coletar()` devolve `Tabela`. O Mojo aceita
 recursao mutua dentro de um modulo, mas nao ciclo entre modulos.
 
-**Ergonomia eager, execucao lazy.** `tabela.onde(...)` parece pandas mas devolve
+**Ergonomia eager, execucao lazy.** `tabela.onde(...)` parece imediato mas devolve
 um plano; `mostrar()`, `linhas()`, `soma()` e companhia materializam sozinhos.
 `coletar()` continua existindo para quem quer o controle.
 
@@ -90,7 +90,7 @@ struct Consulta(Copyable, Movable):
     def esquema_previsto(self) raises -> Schema:
         """Esquema do resultado **sem executar o plano**.
 
-        O pandas so descobre o tipo de uma coluna derivada depois de calcula-la.
+        O usual e so descobrir o tipo de uma coluna derivada depois de calcula-la.
         Aqui o planejador sabe antes — e e sobre isso que o otimizador do M8 vai
         raciocinar.
         """
@@ -268,7 +268,7 @@ struct Tabela(Copyable, Movable):
         return q^.selecionar(nomes)
 
     def com_coluna(self, nome: String, var expr: Expr) -> Consulta:
-        """Coluna derivada — o `df['x'] = ...` do pandas.
+        """Coluna derivada: atribui uma coluna calculada.
 
         Substitui a coluna se o nome ja existir. Devolve `Consulta`.
         """
