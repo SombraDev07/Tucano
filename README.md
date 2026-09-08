@@ -63,7 +63,8 @@ o que for mais conveniente na hora.
 - **Execução em memória limitada** — agregar não exige ter tudo em RAM. Sobre Parquet, o
   arquivo é lido row group por row group e nunca entra inteiro em memória.
 - **SQL sobre o mesmo motor** — `SELECT` vira as mesmas etapas da API fluente e passa pelo
-  mesmo otimizador. `JOIN ... USING` é o `unir`. Não há um segundo interpretador.
+  mesmo otimizador. `JOIN ... USING` é o `unir`; `HAVING` é o `onde` depois de agregar;
+  `COUNT(DISTINCT)` é o `distintos`. Não há um segundo interpretador.
 - **Arrow e Parquet nativos** — leitura e escrita, com interoperabilidade verificada contra
   outra implementação nos dois sentidos.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
@@ -225,7 +226,8 @@ ordenar.
 ```mojo
 consultar_sql(
     "SELECT grupo, SUM(valor) AS total FROM 'vendas.parquet'"
-    " WHERE valor > 100 GROUP BY grupo ORDER BY total DESC LIMIT 10"
+    " WHERE valor > 100 GROUP BY grupo HAVING SUM(valor) > 1000"
+    " ORDER BY total DESC LIMIT 10"
 ).mostrar()
 ```
 
@@ -505,7 +507,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Arrow IPC: leitura e escrita, interop verificada | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-199 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+205 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do

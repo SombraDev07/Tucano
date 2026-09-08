@@ -2895,6 +2895,98 @@ def test_sql_juncao_direita_erra() raises:
     assert_true(pegou)
 
 
+def test_sql_analise_tendo_e_count_distinct() raises:
+    var c = analisar(
+        "SELECT cidade, SUM(valor) AS total, COUNT(DISTINCT data) AS n"
+        " FROM vendas GROUP BY cidade HAVING SUM(valor) > 1000"
+    )
+    assert_true(c.tem_tendo)
+    assert_equal(len(c.extras_tendo), 0)
+    assert_true(c.itens[2].eh_agregacao)
+    assert_equal(c.itens[2].apelido, "n")
+
+    var extra = analisar(
+        "SELECT cidade FROM vendas GROUP BY cidade HAVING COUNT(*) > 1"
+    )
+    assert_true(extra.tem_tendo)
+    assert_equal(len(extra.extras_tendo), 1)
+
+
+def test_sql_tendo_por_apelido() raises:
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var r = consultar_sql_em(
+        "SELECT cidade, SUM(valor) AS total FROM v"
+        " GROUP BY cidade HAVING total > 1000",
+        cat,
+    )
+    assert_equal(r.linhas(), 1)
+    assert_equal(r.pegar("cidade").texto_em(0), "SP")
+    assert_equal(r.pegar("total").texto_em(0), "4700.0")
+
+    var q = plano_do_sql(
+        "SELECT cidade, SUM(valor) AS total FROM v"
+        " GROUP BY cidade HAVING SUM(valor) > 1000",
+        cat,
+    )
+    var plano = q.descrever()
+    assert_true("AGGREGATE [cidade]" in plano)
+    assert_true("FILTER" in plano)
+
+
+def test_sql_tendo_agg_fora_do_select() raises:
+    """HAVING COUNT(*) sem estar no SELECT: calcula, filtra, projeta so o pedido."""
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var r = consultar_sql_em(
+        "SELECT cidade FROM v GROUP BY cidade HAVING COUNT(*) > 1",
+        cat,
+    )
+    assert_equal(r.linhas(), 1)
+    assert_equal(r.colunas(), 1)
+    assert_equal(r.pegar("cidade").texto_em(0), "SP")
+
+
+def test_sql_count_distinct() raises:
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var r = consultar_sql_em(
+        "SELECT COUNT(DISTINCT cidade) AS n FROM v",
+        cat,
+    )
+    assert_equal(r.linhas(), 1)
+    assert_equal(r.pegar("n").texto_em(0), "3")
+
+    var g = consultar_sql_em(
+        "SELECT cidade FROM v GROUP BY cidade HAVING COUNT(DISTINCT data) > 1",
+        cat,
+    )
+    assert_equal(g.linhas(), 1)
+    assert_equal(g.pegar("cidade").texto_em(0), "SP")
+
+
+def test_sql_count_distinct_estrela_erra() raises:
+    var pegou = False
+    try:
+        _ = analisar("SELECT COUNT(DISTINCT *) FROM t")
+    except e:
+        pegou = True
+        assert_true("COUNT(DISTINCT *)" in String(e))
+    assert_true(pegou)
+
+
+def test_sql_tendo_sem_agregacao_erra() raises:
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var pegou = False
+    try:
+        _ = consultar_sql_em("SELECT cidade FROM v HAVING cidade = 'SP'", cat)
+    except e:
+        pegou = True
+        assert_true("HAVING exige agregacao" in String(e))
+    assert_true(pegou)
+
+
 # ----------------------------------------------------------- M10 Arrow
 
 

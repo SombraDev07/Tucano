@@ -7,6 +7,7 @@ fluente produz, passa pelo mesmo otimizador e pelo mesmo executor:
     FROM 'vendas.parquet'
     WHERE valor > 1000
     GROUP BY cidade
+    HAVING SUM(valor) > 5000
     ORDER BY total DESC
 
     SELECT cidade, estado
@@ -23,8 +24,9 @@ manipulavel, seria preciso um interpretador separado para SQL.
 
 Suportado: `SELECT` com colunas e agregacoes (`SUM`, `AVG`, `COUNT`, `MIN`,
 `MAX`), `AS`, `FROM` (arquivo ou tabela registrada), `JOIN` / `LEFT JOIN`
-com `USING (colunas)`, `WHERE`, `GROUP BY`, `ORDER BY` com `ASC`/`DESC`,
-`LIMIT`. O resto e recusado com a posicao do erro.
+com `USING (colunas)`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` com `ASC`/`DESC`,
+`LIMIT`. `COUNT(DISTINCT coluna)` e `distintos`. O resto e recusado com a posicao
+do erro.
 """
 
 from std.collections import Dict
@@ -36,7 +38,16 @@ from .expr import (
     lit_texto,
     lit_bool,
 )
-from .agregacao import Agregacao, soma, media, contar, contar_de, minimo, maximo
+from .agregacao import (
+    Agregacao,
+    soma,
+    media,
+    contar,
+    contar_de,
+    minimo,
+    maximo,
+    distintos,
+)
 
 
 struct TipoToken:
@@ -161,6 +172,9 @@ struct ConsultaSQL(Movable):
     var tem_onde: Bool
     var onde: Expr
     var agrupar: List[String]
+    var tem_tendo: Bool
+    var tendo: Expr
+    var extras_tendo: List[Agregacao]
     var ordenar: List[String]
     var descendente: Bool
     var limite: Int
@@ -176,6 +190,9 @@ struct ConsultaSQL(Movable):
         self.tem_onde = False
         self.onde = Expr()
         self.agrupar = List[String]()
+        self.tem_tendo = False
+        self.tendo = Expr()
+        self.extras_tendo = List[Agregacao]()
         self.ordenar = List[String]()
         self.descendente = False
         self.limite = -1
@@ -190,10 +207,16 @@ struct ConsultaSQL(Movable):
 struct Analisador(Movable):
     var tokens: List[Token]
     var pos: Int
+    var modo_tendo: Bool
+    var itens_sel: List[ItemSelecao]
+    var extras_tendo: List[Agregacao]
 
     def __init__(out self, var tokens: List[Token]):
         self.tokens = tokens^
         self.pos = 0
+        self.modo_tendo = False
+        self.itens_sel = List[ItemSelecao]()
+        self.extras_tendo = List[Agregacao]()
 
     def atual(self) -> Token:
         return self.tokens[self.pos].copy()
@@ -253,6 +276,39 @@ struct Analisador(Movable):
             raise erro^
         _ = self.avancar()
         return t.texto
+
+    def _chamada_agregacao(mut self, nome: String) raises -> Agregacao:
+        """Nome ja lido; o token atual e `(`. COUNT(DISTINCT coluna) e `distintos`."""
+        self.consumir_simbolo("(")
+        var distinto = self.aceitar_palavra("DISTINCT")
+        var alvo: String
+        if self.aceitar_simbolo("*"):
+            if distinto:
+                raise Error("SQL: COUNT(DISTINCT *) nao existe")
+            alvo = "*"
+        else:
+            alvo = self.nome()
+        self.consumir_simbolo(")")
+        if distinto:
+            if _maiusculo(nome) != "COUNT":
+                raise Error("SQL: DISTINCT so vale em COUNT(DISTINCT coluna)")
+            return distintos(alvo)
+        return _agregacao_de(nome, alvo)
+
+    def _saida_da_agg(mut self, ag: Agregacao) raises -> String:
+        """HAVING SUM(valor) usa o apelido do SELECT, ou calcula a extra e descarta depois."""
+        for item in self.itens_sel:
+            if item.eh_agregacao:
+                if item.agregacao.tipo == ag.tipo and item.agregacao.coluna == ag.coluna:
+                    if item.apelido != "":
+                        return item.apelido
+                    return item.agregacao.nome_saida()
+        for e in self.extras_tendo:
+            if e.tipo == ag.tipo and e.coluna == ag.coluna:
+                return e.nome_saida()
+        var saida = ag.nome_saida()
+        self.extras_tendo.append(ag.copy())
+        return saida
 
     # ------------------------------------------------------------ expressao
 
@@ -350,6 +406,9 @@ struct Analisador(Movable):
                 _ = self.avancar()
                 return lit_bool(False)
             _ = self.avancar()
+            if self.modo_tendo and self.eh_simbolo("("):
+                var ag = self._chamada_agregacao(t.texto)
+                return coluna(self._saida_da_agg(ag^))
             return coluna(t.texto)
         var erro = self._erro("um valor ou nome de coluna")
         raise erro^
@@ -371,7 +430,7 @@ def _agregacao_de(nome: String, alvo: String) raises -> Agregacao:
         return contar_de(alvo)
     raise Error(
         "SQL: funcao '" + nome + "' nao suportada"
-        + " (use SUM, AVG, COUNT, MIN ou MAX)"
+        + " (use SUM, AVG, COUNT, COUNT(DISTINCT), MIN ou MAX)"
     )
 
 
@@ -393,18 +452,12 @@ def analisar(texto: String) raises -> ConsultaSQL:
             var nome = a.avancar().texto
 
             if a.eh_simbolo("("):
-                _ = a.avancar()
-                var alvo: String
-                if a.aceitar_simbolo("*"):
-                    alvo = "*"
-                else:
-                    alvo = a.nome()
-                a.consumir_simbolo(")")
-                var ag = _agregacao_de(nome, alvo)
+                var ag = a._chamada_agregacao(nome)
                 var apelido = String("")
                 if a.aceitar_palavra("AS"):
                     apelido = a.nome()
                     ag = ag^.como(apelido)
+                var alvo = ag.coluna
                 c.itens.append(ItemSelecao(True, alvo, ag^, apelido))
             else:
                 var apelido = String("")
@@ -477,6 +530,17 @@ def analisar(texto: String) raises -> ConsultaSQL:
             c.agrupar.append(a.nome())
             if not a.aceitar_simbolo(","):
                 break
+
+    if a.aceitar_palavra("HAVING"):
+        a.modo_tendo = True
+        a.itens_sel = List[ItemSelecao]()
+        for item in c.itens:
+            a.itens_sel.append(item.copy())
+        c.tendo = a.expressao()
+        c.tem_tendo = True
+        for e in a.extras_tendo:
+            c.extras_tendo.append(e.copy())
+        a.modo_tendo = False
 
     if a.aceitar_palavra("ORDER"):
         a.consumir_palavra("BY")

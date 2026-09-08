@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.18.0 — M0 → M10.10 fechados; HTTP do painel fora do caminho crítico.
+Versão 0.19.0 — M0 → M10.11 fechados; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -355,15 +355,16 @@ dá para chamar `explicar()` nela.
 
 | Suportado | |
 |---|---|
-| `SELECT` | colunas, `SUM`/`AVG`/`COUNT`/`MIN`/`MAX`, `AS` |
+| `SELECT` | colunas, `SUM`/`AVG`/`COUNT`/`COUNT(DISTINCT)`/`MIN`/`MAX`, `AS` |
 | `FROM` | `'arquivo.parquet'`, `'arquivo.csv'`, ou nome num `Catalogo` |
 | `JOIN` / `LEFT JOIN` | `USING (colunas)` — as chaves existem nos dois lados com o mesmo nome. Vira `unir`. |
 | `WHERE` | comparações, `AND`/`OR`/`NOT`, parênteses, literais |
-| `GROUP BY`, `ORDER BY` (`ASC`/`DESC`), `LIMIT` | |
+| `GROUP BY`, `HAVING`, `ORDER BY` (`ASC`/`DESC`), `LIMIT` | |
 
 `ORDER BY` por apelido ordena depois da projeção; por coluna que a projeção descarta,
 ordena antes. Coluna no `SELECT` fora do `GROUP BY` é recusada — não se escolhe um valor
-arbitrário do grupo.
+arbitrário do grupo. `HAVING` filtra depois de agregar; agregação só no `HAVING` é
+calculada e descartada na projeção. `COUNT(DISTINCT *)` não existe.
 
 ### Arrow
 

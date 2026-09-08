@@ -5,7 +5,8 @@ segundo motor: o `SELECT` vira etapas, passa pelo mesmo otimizador e pelo mesmo
 executor.
 
     var t = consultar_sql("SELECT cidade, SUM(valor) AS total FROM 'v.parquet'"
-                          " WHERE valor > 1000 GROUP BY cidade ORDER BY total DESC")
+                          " WHERE valor > 1000 GROUP BY cidade"
+                          " HAVING SUM(valor) > 5000 ORDER BY total DESC")
     t.mostrar()
 """
 
@@ -114,7 +115,11 @@ def plano_do_sql(texto: String, catalogo: Catalogo) raises -> Consulta:
     for item in c.itens:
         nomes_saida.append(_nome_de_saida(item))
 
-    if c.tem_agregacao() or len(c.agrupar) > 0:
+    if c.tem_tendo:
+        if not c.tem_agregacao() and len(c.agrupar) == 0 and len(c.extras_tendo) == 0:
+            raise Error("SQL: HAVING exige agregacao ou GROUP BY")
+
+    if c.tem_agregacao() or len(c.agrupar) > 0 or len(c.extras_tendo) > 0:
         var aggs = List[Agregacao]()
         for item in c.itens:
             if item.eh_agregacao:
@@ -130,6 +135,8 @@ def plano_do_sql(texto: String, catalogo: Catalogo) raises -> Consulta:
                         "SQL: a coluna '" + item.coluna + "' esta no SELECT mas"
                         + " nao no GROUP BY — agregue-a ou agrupe por ela"
                     )
+        for e in c.extras_tendo:
+            aggs.append(e.copy())
         if len(aggs) == 0:
             raise Error("SQL: GROUP BY sem nenhuma agregacao no SELECT")
 
@@ -140,6 +147,9 @@ def plano_do_sql(texto: String, catalogo: Catalogo) raises -> Consulta:
             for g in c.agrupar:
                 chaves.append(g)
             q = q^.agrupar(chaves).agregar(aggs^)
+
+        if c.tem_tendo:
+            q = q^.onde(c.tendo.copy())
 
     # ordenar por coluna que sobrevive a projecao vai depois dela; por coluna
     # que a projecao descarta, vai antes — assim `ORDER BY` por apelido funciona

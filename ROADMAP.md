@@ -120,7 +120,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M10.10 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby. SQL junta com `USING`. O escritor comprime páginas com Snappy. O servidor HTTP do painel está estacionado.
+**M0 → M10.11 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -180,6 +180,7 @@ GPU (M11), Excel (M12) e o servidor HTTP do painel (M7) seguem fora do caminho c
 | `distinct_count` + hash join no lado mais barato | ✅ M10.8 |
 | SQL `JOIN` / `LEFT JOIN` com `USING` | ✅ M10.9 |
 | Escritor emite Snappy | ✅ M10.10 |
+| SQL `HAVING` + `COUNT(DISTINCT)` | ✅ M10.11 |
 | Paralelismo por chunk | ❌ **bloqueado** — fechado por construção no Mojo 1.0 |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
@@ -220,6 +221,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M10.8 | distinct_count + join | crítica | ✅ feito | NDV no rodapé; hash no lado barato |
 | M10.9 | SQL JOIN | crítica | ✅ feito | `USING` sobre o mesmo `unir` |
 | M10.10 | Snappy na escrita | crítica | ✅ feito | páginas comprimidas por padrão |
+| M10.11 | SQL HAVING + COUNT(DISTINCT) | crítica | ✅ feito | mesmo `onde` / `distintos` |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
 | M12 | Excel | baixa | não iniciado | compatibilidade tardia |
 
@@ -257,6 +259,8 @@ M10.8 distinct_count + reordenação de junção
 M10.9 SQL JOIN
  ↓
 M10.10 Snappy na escrita
+ ↓
+M10.11 SQL HAVING + COUNT(DISTINCT)
  ↓
 Tucano 1.0
    └── M11 GPU [experimental]   M12 Excel [depois]
@@ -863,7 +867,7 @@ REGRAS     poda de colunas (3 -> 2)
 
 **Isso é um teste da arquitetura, não só um recurso.** Se o plano não fosse um valor manipulável, SQL exigiria um interpretador separado. Como é, o SQL ganha de graça a poda de colunas, o empurrão de filtro e a varredura adiada de Parquet.
 
-Suportado: `SELECT` com colunas e agregações (`SUM`, `AVG`, `COUNT`, `MIN`, `MAX`) e `AS`; `FROM` arquivo ou tabela registrada num `Catalogo`; `JOIN` / `LEFT JOIN` com `USING (colunas)`; `WHERE` com comparações, `AND`/`OR`/`NOT` e parênteses; `GROUP BY`; `ORDER BY` com `ASC`/`DESC`; `LIMIT`. Erros apontam a posição no texto.
+Suportado: `SELECT` com colunas e agregações (`SUM`, `AVG`, `COUNT`, `COUNT(DISTINCT)`, `MIN`, `MAX`) e `AS`; `FROM` arquivo ou tabela registrada num `Catalogo`; `JOIN` / `LEFT JOIN` com `USING (colunas)`; `WHERE` com comparações, `AND`/`OR`/`NOT` e parênteses; `GROUP BY`; `HAVING`; `ORDER BY` com `ASC`/`DESC`; `LIMIT`. Erros apontam a posição no texto.
 
 Dois cuidados de semântica: `ORDER BY` por apelido ordena depois da projeção, e por coluna descartada ordena antes — as duas formas funcionam sem o usuário saber a ordem interna das etapas. E coluna no `SELECT` fora do `GROUP BY` é recusada com a explicação, em vez de escolher um valor arbitrário do grupo.
 
@@ -1163,6 +1167,33 @@ o chunk no rodapé também.
 
 ---
 
+## M10.11 — SQL HAVING e COUNT(DISTINCT) ✅
+
+O executor já filtrava depois de agregar (`agrupar.agregar.onde`) e já contava
+distintos (`distintos(coluna)`). O dialeto SQL parava no `GROUP BY`. `HAVING` e
+`COUNT(DISTINCT)` são o mesmo plano, não um segundo interpretador.
+
+```sql
+SELECT cidade, SUM(valor) AS total
+FROM vendas
+GROUP BY cidade
+HAVING SUM(valor) > 1000
+```
+
+`HAVING SUM(valor)` reescreve para a coluna de saída (`total` se houver `AS`, senão
+`soma_valor`). Agregação só no `HAVING` entra como extra, filtra, e a projeção descarta.
+`SELECT grupo FROM t GROUP BY grupo HAVING COUNT(*) > 1` é válido. `HAVING` sem agregação
+e sem `GROUP BY` é recusado. `COUNT(DISTINCT *)` também.
+
+### Critério de saída
+
+- [x] `HAVING` depois de `GROUP BY` (ou sobre agregação total)
+- [x] `COUNT(DISTINCT coluna)` no SELECT e no HAVING
+- [x] extra do HAVING não vaza na projeção
+- [x] 205 testes verdes
+
+---
+
 ## M11 — GPU [experimental]
 
 Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / Aggregate / Sort estarem maduros na CPU, e só onde o workload justificar.
@@ -1187,7 +1218,7 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **I/O** — CSV, Parquet (column pruning + predicate pushdown + distinct_count + Snappy na escrita)
 
-**SQL** — SELECT/WHERE/GROUP BY/ORDER BY/LIMIT e JOIN (`USING`), sobre o mesmo planner
+**SQL** — SELECT/WHERE/GROUP BY/HAVING/ORDER BY/LIMIT, JOIN (`USING`) e COUNT(DISTINCT), sobre o mesmo planner
 
 **Performance** — SIMD, dictionary encoding (leitura e escrita), streaming, predicate pushdown, benchmarks públicos. Multithreading quando o Mojo 1.0 expuser primitiva.
 
@@ -1246,3 +1277,5 @@ tempo, RAM, throughput, **startup**, scaling por cores, I/O
 15. ~~**Próximo com retorno:** `JOIN` no SQL (`USING`)~~ — M10.9
 16. Painel HTTP — **fora por ora.** Reavalia quando o Mojo expuser `std.net`.
 17. ~~**Próximo com retorno:** Snappy na escrita~~ — M10.10
+18. ~~**Próximo com retorno:** `HAVING` + `COUNT(DISTINCT)` no SQL~~ — M10.11
+19. **Próximo com retorno:** `SELECT DISTINCT` (`unicos`) — o operador existe; o dialeto ainda não chega

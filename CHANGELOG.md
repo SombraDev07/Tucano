@@ -3,6 +3,19 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.19.0] — SQL HAVING e COUNT(DISTINCT)
+
+O dialeto chega no que o executor ja fazia: `HAVING` e o `onde` depois da
+agregacao, `COUNT(DISTINCT coluna)` e o `distintos` da API fluente. Agregacao
+so no HAVING e calculada, filtra, e some da projecao. `COUNT(DISTINCT *)` e
+recusado.
+
+### Adicionado
+
+- **`HAVING`** depois de `GROUP BY` (ou sobre agregacao total). Apelido do
+  SELECT vale; funcao que nao esta no SELECT vira extra e e descartada.
+- **`COUNT(DISTINCT coluna)`** no SELECT e no HAVING.
+
 ## [0.18.0] — Escritor emite Snappy
 
 O leitor ja descomprimia Snappy; o escritor so emitia pagina crua. Agora o
