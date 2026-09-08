@@ -163,6 +163,7 @@ struct ConsultaSQL(Movable):
     """O que o SELECT pediu, ainda sem virar plano."""
 
     var tudo: Bool
+    var distinto: Bool
     var itens: List[ItemSelecao]
     var fonte: String
     var tem_juncao: Bool
@@ -181,6 +182,7 @@ struct ConsultaSQL(Movable):
 
     def __init__(out self):
         self.tudo = False
+        self.distinto = False
         self.itens = List[ItemSelecao]()
         self.fonte = ""
         self.tem_juncao = False
@@ -440,6 +442,12 @@ def analisar(texto: String) raises -> ConsultaSQL:
     var c = ConsultaSQL()
 
     a.consumir_palavra("SELECT")
+
+    # `DISTINCT` aqui e o modificador da selecao. O `DISTINCT` de dentro de
+    # `COUNT(DISTINCT coluna)` e outro token, consumido pela chamada de
+    # agregacao — nao ha ambiguidade porque este so vale colado no SELECT.
+    if a.aceitar_palavra("DISTINCT"):
+        c.distinto = True
 
     if a.aceitar_simbolo("*"):
         c.tudo = True

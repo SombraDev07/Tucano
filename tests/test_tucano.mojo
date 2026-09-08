@@ -3046,6 +3046,121 @@ def test_sql_count_distinct_estrela_erra() raises:
     assert_true(pegou)
 
 
+def test_sql_distinct_uma_coluna() raises:
+    """`SELECT DISTINCT` e um GROUP BY sem agregacao — sem operador novo."""
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var todas = consultar_sql_em("SELECT cidade FROM v", cat)
+    var r = consultar_sql_em("SELECT DISTINCT cidade FROM v", cat)
+    assert_true(r.linhas() < todas.linhas())
+    assert_equal(r.linhas(), 3)
+    assert_equal(r.colunas(), 1)
+    # ordem de primeira aparicao, como no `unicos`
+    assert_equal(r.pegar("cidade").texto_em(0), "SP")
+    assert_equal(r.pegar("cidade").texto_em(1), "RJ")
+    assert_equal(r.pegar("cidade").texto_em(2), "BH")
+
+
+def test_sql_distinct_varias_colunas() raises:
+    """Com mais de uma coluna, o distinto e da combinacao, nao de cada uma."""
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var r = consultar_sql_em("SELECT DISTINCT cidade, valor FROM v", cat)
+    # nenhum par cidade+valor se repete no fixture
+    assert_equal(r.linhas(), consultar_sql_em("SELECT cidade FROM v", cat).linhas())
+    assert_equal(r.colunas(), 2)
+
+
+def test_sql_distinct_tudo() raises:
+    """`SELECT DISTINCT *` precisa das colunas antes de executar.
+
+    O esquema previsto responde isso sem tocar em dado.
+    """
+    var cat = Catalogo()
+    cat.registrar("g", ler_parquet("tests/fixtures/grupos.parquet"))
+    var r = consultar_sql_em("SELECT DISTINCT * FROM g", cat)
+    assert_equal(r.colunas(), 3)
+    # id e unico, entao nenhuma linha inteira se repete
+    assert_equal(r.linhas(), 3000)
+
+    var so_grupo = consultar_sql_em("SELECT DISTINCT grupo FROM g", cat)
+    assert_equal(so_grupo.linhas(), 3)
+
+
+def test_sql_distinct_junta_os_ausentes() raises:
+    """Duas linhas ausentes viram uma so.
+
+    E onde `DISTINCT` diverge do `=`: `NA = NA` e DESCONHECIDO, mas o distinto
+    trata ausencia como um valor que ja apareceu. E o que o SQL manda, e e o que
+    o `agrupar` ja fazia.
+    """
+    var cid = List[String]()
+    for x in ["SP", "RJ", "SP", "", "RJ", ""]:
+        cid.append(String(x))
+    var aus = List[Bool]()
+    for b in [False, False, False, True, False, True]:
+        aus.append(Bool(b))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("cidade", cid^, aus^))
+    var cat = Catalogo()
+    cat.registrar("v", Tabela(cols^))
+
+    var r = consultar_sql_em("SELECT DISTINCT cidade FROM v", cat)
+    assert_equal(r.linhas(), 3)
+    assert_true(r.pegar("cidade").eh_ausente(2))
+
+
+def test_sql_distinct_ordenar_fora_do_select_erra() raises:
+    """Ordenar antes de destilar ordena linhas que vao sumir; depois, a coluna
+    ja nao existe. Sem resposta certa, a pergunta e recusada."""
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var pegou = False
+    try:
+        _ = consultar_sql_em("SELECT DISTINCT cidade FROM v ORDER BY valor", cat)
+    except e:
+        pegou = True
+        assert_true("SELECT DISTINCT" in String(e))
+        assert_true("valor" in String(e))
+    assert_true(pegou)
+    # a mesma consulta sem DISTINCT continua valendo
+    var ok = consultar_sql_em("SELECT cidade FROM v ORDER BY valor", cat)
+    assert_true(ok.linhas() > 0)
+
+
+def test_sql_apelido_de_coluna_simples() raises:
+    """Regressao: `AS` em coluna simples era lido e nunca aplicado.
+
+    A projecao ia procurar uma coluna com o nome novo, que so existia na
+    descricao da consulta. Nada falhava no analisador — falhava depois, dizendo
+    que a coluna nao existia.
+    """
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var r = consultar_sql_em("SELECT cidade AS onde FROM v", cat)
+    assert_equal(r.colunas(), 1)
+    assert_equal(r.pegar("onde").texto_em(0), "SP")
+
+    # e o apelido serve para ordenar e para destilar
+    var d = consultar_sql_em(
+        "SELECT DISTINCT cidade AS onde FROM v ORDER BY onde", cat
+    )
+    assert_equal(d.linhas(), 3)
+    assert_equal(d.pegar("onde").texto_em(0), "BH")
+
+
+def test_sql_apelido_colidindo_erra() raises:
+    var cat = Catalogo()
+    cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))
+    var pegou = False
+    try:
+        _ = consultar_sql_em("SELECT cidade AS valor FROM v", cat)
+    except e:
+        pegou = True
+        assert_true("apelido" in String(e))
+    assert_true(pegou)
+
+
 def test_sql_tendo_sem_agregacao_erra() raises:
     var cat = Catalogo()
     cat.registrar("v", ler_csv("tests/fixtures/vendas.csv"))

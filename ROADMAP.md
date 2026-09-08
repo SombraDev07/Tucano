@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M10.12 fechados, leitura .xlsx no M12.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M10.13 fechados, leitura .xlsx no M12.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -187,6 +187,7 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Escr
 | Escritor emite Snappy | ✅ M10.10 |
 | SQL `HAVING` + `COUNT(DISTINCT)` | ✅ M10.11 |
 | Leitura `.xlsx` | ✅ M12 |
+| SQL `SELECT DISTINCT` | ✅ M10.13 |
 | Paralelismo por chunk | ❌ **bloqueado** — fechado por construção no Mojo 1.0 |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
@@ -230,6 +231,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M10.11 | SQL HAVING + COUNT(DISTINCT) | crítica | ✅ feito | mesmo `onde` / `distintos` |
 | M12 | Excel (leitura) | alta | ✅ feito | `ler_xlsx`, primeira aba ou pelo nome |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
+| M10.13 | SQL SELECT DISTINCT | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
 | M12b | Excel (escrita) | baixa | não iniciado | compatibilidade tardia |
 
@@ -1279,6 +1281,67 @@ diz que o ganho é ruído, a forma simples ganha.
 
 ---
 
+## M10.13 — SELECT DISTINCT ✅
+
+O operador já existia: `unicos` é `agrupar` + `contar` + ficar só com a chave. O
+dialeto é que não chegava lá. `SELECT DISTINCT` **é** um `GROUP BY` sem
+agregação — escrever assim não trouxe operador novo, nem caso novo no otimizador,
+nem no executor. O `explicar()` mostra a composição, sem inventar um verbo.
+
+### A linha, não a coluna
+
+`SELECT DISTINCT cidade, uf` devolve as **combinações** distintas, não os valores
+distintos de cada coluna lado a lado. É a leitura do SQL e é a única que faz
+sentido: colunas destiladas separadamente não teriam como formar linhas.
+
+### Ausência é um valor que já apareceu
+
+Duas linhas ausentes viram uma só. É onde `DISTINCT` diverge do `=` do próprio
+Tucano: `NA = NA` é DESCONHECIDO na lógica de três valores, mas o distinto trata
+ausência como valor visto. É o que o SQL manda e o que o `agrupar` já fazia — a
+divergência está documentada no contrato em vez de escondida.
+
+### `ORDER BY` com `DISTINCT` é recusado quando a coluna sumiu
+
+Ordenar antes de destilar ordena linhas que vão desaparecer; ordenar depois exige
+uma coluna que a projeção já descartou. Não há resposta certa a dar, então a
+pergunta é recusada — mesmo motivo pelo qual o SQL padrão a recusa.
+
+```
+> SELECT DISTINCT cidade FROM v ORDER BY valor
+com SELECT DISTINCT, ORDER BY so aceita coluna do SELECT — 'valor' nao esta na
+lista. Acrescente-a ao SELECT ou tire-a do ORDER BY
+```
+
+### `DISTINCT *` exigiu o esquema previsto de valer para arquivo
+
+Para agrupar por todas as colunas é preciso saber quais são, antes de executar.
+`esquema_previsto()` existia para isso desde o M8, mas partia do lote em memória
+— e num plano que lê de arquivo o lote está vazio até o `coletar()`. Devolvia um
+esquema **vazio**: resposta errada com cara de resposta. Agora a base vem do
+rodapé do Parquet, sem tocar em dado.
+
+### Um bug achado no caminho
+
+`SELECT cidade AS c` nunca funcionou. O apelido de coluna simples era lido pelo
+analisador e nunca aplicado: a projeção ia procurar uma coluna com o nome novo,
+que só existia na descrição da consulta. Falhava depois, dizendo que a coluna não
+existia — mensagem correta sobre a causa errada.
+
+Como não há operação de renomear, a coluna apelidada passa a ser criada como
+derivada da original. Apelido que colide com uma coluna existente é recusado, em
+vez de sobrescrevê-la em silêncio.
+
+### Critério de saída
+
+- [x] `SELECT DISTINCT` sobre lista de colunas e sobre `*`
+- [x] combinação, não coluna a coluna; ausência agrupa
+- [x] `ORDER BY` fora do `SELECT` recusado com a correção
+- [x] `AS` em coluna simples funciona; apelido ambíguo recusado
+- [x] 220 testes verdes, interoperabilidade nos dois formatos
+
+---
+
 ## M12 — Ler .xlsx ✅
 
 Abrir a planilha é o que o analista pede. `.xlsx` é ZIP de XML; o Tucano passa a
@@ -1385,4 +1448,4 @@ tempo, RAM, throughput, **startup**, scaling por cores, I/O
 18. ~~**Próximo com retorno:** `HAVING` + `COUNT(DISTINCT)` no SQL~~ — M10.11
 19. ~~**Próximo com retorno:** abrir `.xlsx`~~ — M12
 20. ~~**Próximo com retorno:** decodificador Snappy~~ — M10.12
-21. **Próximo com retorno:** `SELECT DISTINCT` (`unicos`) — o operador existe; o dialeto ainda não chega
+21. ~~**Próximo com retorno:** `SELECT DISTINCT`~~ — M10.13

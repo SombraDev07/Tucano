@@ -64,7 +64,7 @@ o que for mais conveniente na hora.
   arquivo é lido row group por row group e nunca entra inteiro em memória.
 - **SQL sobre o mesmo motor** — `SELECT` vira as mesmas etapas da API fluente e passa pelo
   mesmo otimizador. `JOIN ... USING` é o `unir`; `HAVING` é o `onde` depois de agregar;
-  `COUNT(DISTINCT)` é o `distintos`. Não há um segundo interpretador.
+  `SELECT DISTINCT` é o `agrupar` sem agregação. Não há um segundo interpretador.
 - **Excel `.xlsx`** — `ler_xlsx` abre a planilha como `Tabela`. Primeira aba, ou
   `planilha="Nome"`. Sem `.xls` antigo, sem escrita.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
@@ -239,6 +239,14 @@ LOGICO   SCAN -> FILTER (coluna(valor) > lit(100)) -> AGGREGATE [grupo] -> [soma
               -> PROJECT [grupo, total] -> SORT [total desc] -> RESULT
 COLUNAS  2 de 3 [grupo, valor]
 REGRAS   poda de colunas (3 -> 2)
+```
+
+`SELECT DISTINCT` destila a linha inteira da projeção — é um `GROUP BY` sem agregação, e
+por isso não trouxe operador novo nem caso novo no otimizador:
+
+```mojo
+consultar_sql("SELECT DISTINCT cidade, uf FROM 'vendas.parquet'").mostrar()
+consultar_sql("SELECT DISTINCT * FROM 'vendas.parquet'").mostrar()
 ```
 
 `FROM` aceita `'arquivo.parquet'`, `'arquivo.csv'` ou um nome registrado num `Catalogo`.
@@ -515,7 +523,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Excel `.xlsx`: leitura | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-213 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+220 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Um item está bloqueado por causa externa: **paralelismo por thread**, porque o stdlib do

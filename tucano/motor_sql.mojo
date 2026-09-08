@@ -12,7 +12,8 @@ executor.
 
 from .tabela import Tabela, Consulta, varredura_parquet, ler_parquet
 from .csv import ler_csv
-from .agregacao import Agregacao
+from .agregacao import Agregacao, contar
+from .expr import coluna
 from .sql import ConsultaSQL, ItemSelecao, analisar
 from .erros import erro_coluna
 
@@ -151,9 +152,29 @@ def plano_do_sql(texto: String, catalogo: Catalogo) raises -> Consulta:
         if c.tem_tendo:
             q = q^.onde(c.tendo.copy())
 
+    # `SELECT cidade AS c`: o apelido de coluna simples era lido e nunca
+    # aplicado — a projecao ia procurar uma coluna com o nome novo, que nao
+    # existia. Como nao ha operacao de renomear, a coluna apelidada e criada
+    # como derivada da original. Agregacao nao passa por aqui: `AS` nela ja vira
+    # `nome_saida` na propria agregacao.
+    var presentes = q.esquema_previsto().nomes()
+    for item in c.itens:
+        if item.eh_agregacao or item.apelido == "" or item.apelido == item.coluna:
+            continue
+        for n in presentes:
+            if n == item.apelido:
+                raise Error(
+                    "SQL: o apelido '" + item.apelido + "' e o nome de uma"
+                    + " coluna que ja existe — a projecao ficaria ambigua."
+                    + " Escolha outro nome"
+                )
+        q = q^.com_coluna(item.apelido, coluna(item.coluna))
+        presentes.append(item.apelido)
+
     # ordenar por coluna que sobrevive a projecao vai depois dela; por coluna
     # que a projecao descarta, vai antes — assim `ORDER BY` por apelido funciona
     var ordenar_depois = True
+    var descartada = String("")
     for o in c.ordenar:
         var achou = False
         for n in nomes_saida:
@@ -161,6 +182,18 @@ def plano_do_sql(texto: String, catalogo: Catalogo) raises -> Consulta:
                 achou = True
         if not achou:
             ordenar_depois = False
+            descartada = o
+
+    if c.distinto and not c.tudo and not ordenar_depois:
+        # ordenar antes de destilar e ordenar linhas que vao sumir; ordenar
+        # depois exige uma coluna que a projecao ja descartou. Nao ha resposta
+        # certa a dar, entao a pergunta e recusada — mesmo motivo pelo qual o
+        # SQL padrao a recusa.
+        raise Error(
+            "SQL: com SELECT DISTINCT, ORDER BY so aceita coluna do SELECT —"
+            + " '" + descartada + "' nao esta na lista. Acrescente-a ao SELECT"
+            + " ou tire-a do ORDER BY"
+        )
 
     if len(c.ordenar) > 0 and not ordenar_depois:
         var por = List[String]()
@@ -170,6 +203,26 @@ def plano_do_sql(texto: String, catalogo: Catalogo) raises -> Consulta:
 
     if not c.tudo:
         q = q^.selecionar(nomes_saida)
+
+    if c.distinto:
+        # destilar e agrupar por tudo que sobrou e ficar so com a chave. Nao ha
+        # operador proprio: `SELECT DISTINCT` **e** um GROUP BY sem agregacao,
+        # e escrever assim deixa o otimizador e o executor sem caso novo.
+        var chaves = List[String]()
+        if c.tudo:
+            # `SELECT DISTINCT *`: as colunas so se sabem do esquema previsto,
+            # que o planejador conhece sem executar
+            for n in q.esquema_previsto().nomes():
+                chaves.append(n)
+        else:
+            for n in nomes_saida:
+                chaves.append(n)
+        if len(chaves) == 0:
+            raise Error("SQL: SELECT DISTINCT sem nenhuma coluna")
+        var so_chave = chaves.copy()
+        var aggs = List[Agregacao]()
+        aggs.append(contar())
+        q = q^.agrupar(chaves).agregar(aggs^).selecionar(so_chave)
 
     if len(c.ordenar) > 0 and ordenar_depois:
         var por = List[String]()

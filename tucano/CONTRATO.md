@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.20.1 — M0 → M10.12 + leitura .xlsx; HTTP do painel fora do caminho crítico.
+Versão 0.21.0 — M0 → M10.13 + leitura .xlsx; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -356,6 +356,7 @@ dá para chamar `explicar()` nela.
 | Suportado | |
 |---|---|
 | `SELECT` | colunas, `SUM`/`AVG`/`COUNT`/`COUNT(DISTINCT)`/`MIN`/`MAX`, `AS` |
+| `SELECT DISTINCT` | linhas distintas da projeção, inclusive `DISTINCT *` |
 | `FROM` | `'arquivo.parquet'`, `'arquivo.csv'`, ou nome num `Catalogo` |
 | `JOIN` / `LEFT JOIN` | `USING (colunas)` — as chaves existem nos dois lados com o mesmo nome. Vira `unir`. |
 | `WHERE` | comparações, `AND`/`OR`/`NOT`, parênteses, literais |
@@ -365,6 +366,15 @@ dá para chamar `explicar()` nela.
 ordena antes. Coluna no `SELECT` fora do `GROUP BY` é recusada — não se escolhe um valor
 arbitrário do grupo. `HAVING` filtra depois de agregar; agregação só no `HAVING` é
 calculada e descartada na projeção. `COUNT(DISTINCT *)` não existe.
+
+`SELECT DISTINCT` destila a **linha inteira da projeção**, não cada coluna por si:
+`SELECT DISTINCT cidade, uf` devolve as combinações distintas. Duas ausências contam como
+o mesmo valor e viram uma linha só — é onde `DISTINCT` diverge de `=`, para quem `NA = NA`
+é DESCONHECIDO. Com `DISTINCT`, `ORDER BY` só aceita coluna que está no `SELECT`: ordenar
+antes de destilar ordenaria linhas que vão sumir, e depois a coluna já não existe.
+
+`AS` em coluna simples cria a coluna com o nome novo; um apelido igual ao nome de uma
+coluna existente é recusado, em vez de sobrescrevê-la.
 
 ### Arrow
 

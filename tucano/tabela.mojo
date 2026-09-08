@@ -232,8 +232,15 @@ struct Consulta(Copyable, Movable):
         O usual e so descobrir o tipo de uma coluna derivada depois de calcula-la.
         Aqui o planejador sabe antes — e e sobre isso que o otimizador do M8 vai
         raciocinar.
+
+        Quando a fonte e arquivo, a base vem do rodape, sem tocar em dado: o
+        lote esta vazio ate o `coletar()`, e prever a partir dele devolveria um
+        esquema vazio — resposta errada com cara de resposta.
         """
-        return Schema(esquema_apos(esquema_do_lote(self.fonte), self.etapas))
+        var base = esquema_do_lote(self.fonte)
+        if self.le_de_arquivo():
+            base = esquema_parquet(self.caminho).campos.copy()
+        return Schema(esquema_apos(base, self.etapas))
 
     # ----------------------------------------------------- materializacao
 

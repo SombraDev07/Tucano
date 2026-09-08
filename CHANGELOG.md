@@ -3,6 +3,37 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.21.0] — SELECT DISTINCT
+
+O operador ja existia (`unicos` e `agrupar` + `contar` + so a chave); o dialeto
+e que nao chegava la. `SELECT DISTINCT` **e** um GROUP BY sem agregacao, entao
+nao entrou operador novo, nem caso novo no otimizador ou no executor.
+
+### Adicionado
+
+- **`SELECT DISTINCT`** sobre lista de colunas e sobre `*`. Destila a **linha
+  inteira da projecao**: `SELECT DISTINCT cidade, uf` devolve as combinacoes
+  distintas, nao os valores de cada coluna lado a lado.
+- Duas linhas ausentes viram uma so. E onde `DISTINCT` diverge do `=` do proprio
+  Tucano — `NA = NA` e DESCONHECIDO na logica de tres valores, mas o distinto
+  trata ausencia como valor visto. E o que o SQL manda; fica no contrato.
+- Com `DISTINCT`, `ORDER BY` por coluna fora do `SELECT` e recusado com a
+  correcao: ordenar antes de destilar ordena linhas que vao sumir, e depois a
+  coluna ja nao existe.
+
+### Corrigido
+
+- **`SELECT cidade AS c` nunca funcionou.** O apelido de coluna simples era lido
+  pelo analisador e nunca aplicado: a projecao procurava uma coluna com o nome
+  novo, que so existia na descricao da consulta, e falhava dizendo que a coluna
+  nao existia — mensagem correta sobre a causa errada. A coluna apelidada passa
+  a ser criada como derivada da original. Apelido que colide com coluna
+  existente e recusado, em vez de sobrescreve-la em silencio.
+- **`esquema_previsto()` devolvia esquema vazio em plano que le de arquivo.**
+  Partia do lote em memoria, que so e preenchido no `coletar()`. Agora a base
+  vem do rodape do Parquet, sem tocar em dado. E disso que o `DISTINCT *`
+  precisa para saber quais colunas agrupar.
+
 ## [0.20.1] — Decodificador Snappy sem copia byte a byte
 
 O [0.19.0] ligou Snappy por padrao na escrita e ninguem remediu a leitura depois.
