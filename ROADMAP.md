@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13 e M15 → M19 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13 e M15 → M20 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -242,6 +242,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M17 | Chave de grupo composta | crítica | ✅ feito | 221 → 30 ns/linha |
 | M18 | Chave de grupo inteira | crítica | ✅ feito | 22 → 11 ns/linha |
 | M19 | Execução em fluxo | crítica | ✅ feito | 900 → 93 ms, mesmo pico de memória |
+| M20 | Leitura em faixas | crítica | ✅ feito | 75 → 50 ms; pipeline 88 → 69 |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -1883,6 +1884,77 @@ onde a identidade é mais fácil de perder. `coletar_em_fluxo(2)` contra
 - [x] fluxo sem `String` por linha e sem cópia de coluna por agregação
 - [x] pico de memória inalterado — 13 KiB contra o arquivo inteiro, no bench-m9
 - [x] grupo que reaparece em fatia posterior coberto por teste, com ausente
+- [x] 237 testes verdes, interoperabilidade nos dois formatos
+
+---
+
+## M20 — Leitura: faixas de row group, e uma cópia que estava lá desde o M13 ✅
+
+Último número desfavorável publicado: a leitura fazia 75 ms contra 54 do pyarrow.
+
+### A ideia era dividir a coluna; o ganho veio de outro lugar
+
+A unidade de trabalho desde o M13 é a coluna. O tempo total é o da coluna mais
+cara — e ela costuma ser a de **maior entropia**, que é justamente a que menos
+comprime e mais custa a decodificar. No arquivo de 5 milhões, `id` (todos os
+valores distintos) levava 51 ms sozinha; `peso` (41 valores repetidos) levava 7.
+
+Então a coluna passou a poder ser dividida em faixas de row group, cada faixa
+uma tarefa que continua dona do que precisa. E a medição disse que **quase não
+adiantava**: 72–81 ms contra 67–69 sem dividir.
+
+Juntar as faixas custa fixo — alocar e escrever o slab da coluna inteira outra
+vez. Com cinco colunas já há threads de sobra, e a junção só atrapalha. Com
+duas, é o único jeito de usar os núcleos que sobraram:
+
+| | dividindo | sem dividir |
+|---|---|---|
+| 5 colunas, 3 faixas cada | 72–81 ms | **67–69 ms** |
+| 2 colunas, 8 faixas cada | **35–36 ms** | 42–44 ms |
+
+Daí a regra, que é a medida virada em código: divide-se só quando houver faixas
+o bastante — quatro — para a decodificação cair bem abaixo do custo da junção.
+
+### E a cópia que ninguém tinha visto
+
+Investigando por que a versão com faixas ficava *pior* do que devia, apareceu o
+que estava errado desde o M13: a coluna pronta era entregue com `.copy()`.
+Quarenta MiB copiados por coluna, uma vez por leitura, sem que nada precisasse
+disso — o dono anterior morria logo em seguida.
+
+Trocar por mover é uma palavra. Vale mais que toda a divisão em faixas:
+
+| 5M linhas × 5 colunas | antes | depois |
+|---|---|---|
+| ler tudo | 75 ms | **50 ms** |
+| ler 2 de 5 colunas | 42 ms | **27 ms** |
+| pipeline completo | 88 ms | **69 ms** |
+
+Fica registrado porque a lição não é sobre `copy()`: **a otimização que não
+funcionou foi o que fez a cópia aparecer.** Ela estava escondida atrás de um
+número que parecia razoável.
+
+### Onde o Tucano está agora
+
+| 5M linhas, uma thread | Tucano | pandas | Polars | DuckDB |
+|---|---|---|---|---|
+| ler 5 colunas | 50 ms | 90 ms | 32 ms | 4 ms |
+| ler 2 de 5 | 27 ms | 37 ms | 13 ms | 3 ms |
+| pipeline completo | **69 ms** | 222 ms | 137 ms | 91 ms |
+
+Na leitura o Tucano encostou no pyarrow (50 contra 48) e passou o pandas por
+1,8×. No pipeline completo passa o pandas por 3,2×, o Polars por 2× e o DuckDB
+por 1,3× — todos em uma thread.
+
+O que separa do Polars e do DuckDB na leitura pura é decodificação madura, e do
+DuckDB em dezesseis núcleos é paralelismo além do que a leitura já usa.
+
+### Critério de saída
+
+- [x] coluna divisível em faixas de row group, com a regra vinda da medição
+- [x] nenhuma cópia de coluna inteira no caminho de leitura
+- [x] o caminho dividido é exercitado por teste — antes nenhuma fixture chegava
+      ao limiar — e conferido contra a fórmula que gerou os dados
 - [x] 237 testes verdes, interoperabilidade nos dois formatos
 
 ---

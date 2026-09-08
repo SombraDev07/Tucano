@@ -3679,7 +3679,11 @@ def test_paralelo_le_igual_ao_sequencial() raises:
     A comparacao e contra a leitura **de uma coluna por vez**, que por ter uma
     tarefa so cai no caminho sequencial. Os dois lados leem o mesmo arquivo.
     """
-    var n = LINHAS_MINIMAS_POR_TAREFA + 500
+    # linhas o bastante para a coluna ser dividida em faixas de row group: sem
+    # isso, cada tarefa fica abaixo do minimo e a divisao nem acontece — o
+    # caminho ficaria sem teste, que foi como o Snappy passou verde estando 4x
+    # mais lento
+    var n = LINHAS_MINIMAS_POR_TAREFA * 2 + 500
     var ids = List[Int64](capacity=n)
     var vals = List[Float64](capacity=n)
     var aus = List[Bool](capacity=n)
@@ -3698,6 +3702,20 @@ def test_paralelo_le_igual_ao_sequencial() raises:
     cols.append(Coluna.de_textos("grupo", txt^, txt_aus^))
     var caminho = String("tests/fixtures/_saida_paralelo.parquet")
     para_parquet(Tabela(cols^), caminho, 2_000)
+
+    # o oraculo e a formula que gerou os dados, nao outra leitura: se as duas
+    # leituras errassem do mesmo jeito, so a formula denunciaria
+    var conferidas = ler_parquet(caminho)
+    for i in range(n):
+        assert_equal(conferidas.pegar("id").texto_em(i), String(i * 3 - 7))
+        if i % 101 == 0:
+            assert_true(conferidas.pegar("valor").eh_ausente(i))
+        if i % 53 == 0:
+            assert_true(conferidas.pegar("grupo").eh_ausente(i))
+        else:
+            assert_equal(
+                conferidas.pegar("grupo").texto_em(i), "g" + String(i % 37)
+            )
 
     var juntas = ler_parquet(caminho)
     assert_equal(juntas.linhas(), n)

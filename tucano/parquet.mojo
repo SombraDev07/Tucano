@@ -18,7 +18,7 @@ from std.ffi import external_call
 from std.memory import UnsafePointer
 from .thrift import LeitorThrift, TTipo, CampoThrift, ListaThrift
 from .arquivo import LeitorArquivo
-from .paralelo import threads_para
+from .paralelo import threads_para, nucleos, LINHAS_MINIMAS_POR_TAREFA
 from .expr import Expr, ExprNode, Kind
 from .codecs import bits_para_real64, bits_para_real32
 
@@ -1924,7 +1924,8 @@ def esquema_parquet(caminho: String) raises -> Schema:
 
 
 def _decodificar_coluna(
-    caminho: String, c: Int, filtro: Expr
+    caminho: String, c: Int, filtro: Expr,
+    grupo_ini: Int = 0, grupo_fim: Int = -1,
 ) raises -> Coluna:
     """Decodifica **uma** coluna do arquivo, do zero ao `Coluna` pronto.
 
@@ -1935,7 +1936,13 @@ def _decodificar_coluna(
     """
     var leitor = LeitorArquivo(caminho)
     var m = _metadados_do_leitor(leitor, caminho)
-    var grupos = _grupos_a_ler(m, filtro)
+    var todos = _grupos_a_ler(m, filtro)
+    var grupos = List[Int]()
+    var ate = grupo_fim
+    if ate < 0 or ate > len(todos):
+        ate = len(todos)
+    for k in range(grupo_ini, ate):
+        grupos.append(todos[k])
     var esperado = 0
     for g in grupos:
         esperado += m.grupos[g].num_linhas
@@ -1987,13 +1994,20 @@ struct _TarefaColuna(Movable):
     var caminho: String
     var indice: Int
     var filtro: Expr
+    var grupo_ini: Int
+    var grupo_fim: Int
     var saida: List[Coluna]
     var erro: String
 
-    def __init__(out self, caminho: String, indice: Int, filtro: Expr):
+    def __init__(
+        out self, caminho: String, indice: Int, filtro: Expr,
+        grupo_ini: Int = 0, grupo_fim: Int = -1,
+    ):
         self.caminho = caminho
         self.indice = indice
         self.filtro = filtro.copy()
+        self.grupo_ini = grupo_ini
+        self.grupo_fim = grupo_fim
         self.saida = List[Coluna]()
         self.erro = ""
 
@@ -2009,11 +2023,103 @@ def _trabalhador_coluna(
     """
     try:
         p[].saida.append(
-            _decodificar_coluna(p[].caminho, p[].indice, p[].filtro)
+            _decodificar_coluna(
+                p[].caminho, p[].indice, p[].filtro,
+                p[].grupo_ini, p[].grupo_fim,
+            )
         )
     except e:
         p[].erro = String(e)
     return 0
+
+
+# Abaixo disso a juncao das faixas custa mais que a divisao economiza.
+comptime _FAIXAS_MINIMAS_PARA_DIVIDIR = 4
+
+
+def _pode_dividir(tipo_tucano: Int) -> Bool:
+    """Coluna que se junta por copia de bloco pode ser dividida em faixas.
+
+    Texto dicionarizado fica de fora: cada faixa construiria o proprio
+    dicionario, e junta-los e trabalho de verdade — nao a copia de dois slabs.
+    Como as colunas de texto ja sao as baratas depois do M10.6, dividi-las nao
+    pagaria a complicacao.
+    """
+    return (
+        tipo_tucano == DType.INTEIRO
+        or tipo_tucano == DType.REAL
+        or tipo_tucano == DType.DATA
+        or tipo_tucano == DType.DATAHORA
+        or tipo_tucano == DType.LOGICO
+    )
+
+
+def _juntar_pedacos(nome: String, var pedacos: List[Coluna]) raises -> Coluna:
+    """Empilha as faixas de uma coluna numerica, na ordem.
+
+    Cada faixa decodificou row groups contiguos, entao empilhar na ordem
+    reconstroi a coluna exatamente como a leitura sequencial a teria feito.
+    """
+    if len(pedacos) == 1:
+        # assume a faixa unica em vez de copia-la: copiar aqui custaria a coluna
+        # inteira de novo, e e o caso comum — sem divisao, ha sempre uma so
+        return pedacos.pop()
+
+    var total = 0
+    var tem_ausente = False
+    for p in pedacos:
+        total += p.tamanho()
+        if p.validity_bits.n_ausentes > 0:
+            tem_ausente = True
+
+    var ausentes = List[Bool]()
+    if tem_ausente:
+        ausentes = List[Bool](capacity=total)
+        for p in pedacos:
+            for i in range(p.tamanho()):
+                ausentes.append(p.eh_ausente(i))
+
+    var tipo = pedacos[0].tipo
+    if tipo == DType.REAL:
+        # copia em bloco: as faixas ja sao slabs contiguos, e empilhar valor a
+        # valor gastaria mais que a decodificacao economizou
+        var vals = List[Float64](capacity=total)
+        vals.resize(unsafe_uninit_length=total)
+        var em = 0
+        for p in pedacos:
+            var quantos = p.tamanho()
+            if quantos > 0:
+                _ = external_call["memcpy", Int](
+                    vals.unsafe_ptr().unsafe_offset(em).unsafe_bitcast[UInt8](),
+                    p.reals.unsafe_ptr().unsafe_bitcast[UInt8](),
+                    quantos * 8,
+                )
+            em += quantos
+        return Coluna.de_reais(nome, vals^, ausentes^)
+    if tipo == DType.LOGICO:
+        var vals = List[Bool](capacity=total)
+        for p in pedacos:
+            for i in range(p.tamanho()):
+                vals.append(Int(p.logics[i]) != 0)
+        return Coluna.de_logicos(nome, vals^, ausentes^)
+
+    var vals = List[Int64](capacity=total)
+    vals.resize(unsafe_uninit_length=total)
+    var em = 0
+    for p in pedacos:
+        var quantos = p.tamanho()
+        if quantos > 0:
+            _ = external_call["memcpy", Int](
+                vals.unsafe_ptr().unsafe_offset(em).unsafe_bitcast[UInt8](),
+                p.ints.unsafe_ptr().unsafe_bitcast[UInt8](),
+                quantos * 8,
+            )
+        em += quantos
+    if tipo == DType.DATA:
+        return Coluna.de_datas(nome, vals^, ausentes^)
+    if tipo == DType.DATAHORA:
+        return Coluna.de_datahoras(nome, vals^, ausentes^)
+    return Coluna.de_inteiros(nome, vals^, ausentes^)
 
 
 def ler_parquet_lote(
@@ -2061,9 +2167,52 @@ def ler_parquet_lote(
             saida.append(_decodificar_coluna(caminho, c, filtro))
         return saida^
 
+    # Os nucleos sao divididos entre as colunas: cada uma recebe faixas de row
+    # groups, e cada faixa e uma tarefa que continua dona do que precisa. Sem
+    # isso, o tempo total e o da coluna mais cara — e ela costuma ser a de maior
+    # entropia, que e justamente a que menos comprime e mais custa a decodificar.
+    var fatias_por_coluna = nucleos() // len(querer)
+    if fatias_por_coluna > len(grupos):
+        fatias_por_coluna = len(grupos)
+    # Juntar as faixas custa fixo — alocar e escrever o slab da coluna inteira
+    # outra vez. So compensa quando ha faixas o bastante para a decodificacao
+    # cair bem abaixo disso. Medido, 5M linhas x 5 colunas:
+    #
+    #   5 colunas, 3 faixas cada    72-81 ms   (dividindo)   67-69 ms (sem)
+    #   2 colunas, 8 faixas cada    35-36 ms   (dividindo)   42-44 ms (sem)
+    #
+    # Com muitas colunas ja ha threads de sobra e a juncao so atrapalha; com
+    # poucas, e o unico jeito de usar os nucleos que sobraram.
+    if fatias_por_coluna < _FAIXAS_MINIMAS_PARA_DIVIDIR:
+        fatias_por_coluna = 1
+
     var tarefas = List[_TarefaColuna]()
+    var quantas_de = List[Int]()
     for c in querer:
-        tarefas.append(_TarefaColuna(caminho, c, filtro))
+        var divisoes = 1
+        if _pode_dividir(_tipo_tucano(m.coluna_do_esquema(c))):
+            divisoes = fatias_por_coluna
+        # linhas de menos nao pagam a thread, mesmo com nucleo sobrando
+        while divisoes > 1 and linhas // divisoes < LINHAS_MINIMAS_POR_TAREFA:
+            divisoes -= 1
+        var passo = (len(grupos) + divisoes - 1) // divisoes
+        if passo < 1:
+            passo = 1
+        # conta o que foi criado, nao o que se previa criar: `passo` arredonda
+        # para cima, entao o numero de faixas pode sair menor que `divisoes`
+        var criadas = 0
+        var ini = 0
+        while ini < len(grupos):
+            var fim = ini + passo
+            if fim > len(grupos):
+                fim = len(grupos)
+            tarefas.append(_TarefaColuna(caminho, c, filtro, ini, fim))
+            criadas += 1
+            ini = fim
+        if criadas == 0:
+            tarefas.append(_TarefaColuna(caminho, c, filtro, 0, 0))
+            criadas = 1
+        quantas_de.append(criadas)
 
     var n = len(tarefas)
     var tids = List[Int]()
@@ -2083,21 +2232,31 @@ def ler_parquet_lote(
 
     # o que nao coube em thread sai aqui, na mesma funcao que a thread chamaria
     for i in range(criadas, n):
+        # o que nao coube em thread sai aqui, com a MESMA faixa que a thread
+        # teria lido — senao esta tarefa devolveria a coluna inteira
         tarefas[i].saida.append(
-            _decodificar_coluna(tarefas[i].caminho, tarefas[i].indice, filtro)
+            _decodificar_coluna(
+                tarefas[i].caminho, tarefas[i].indice, filtro,
+                tarefas[i].grupo_ini, tarefas[i].grupo_fim,
+            )
         )
 
     var saida = List[Coluna]()
-    for i in range(n):
-        if tarefas[i].erro != "":
-            raise Error(tarefas[i].erro)
-        if len(tarefas[i].saida) != 1:
-            raise Error(
-                "parquet: a coluna '"
-                + m.coluna_do_esquema(tarefas[i].indice).nome
-                + "' nao voltou da decodificacao"
-            )
-        saida.append(tarefas[i].saida[0].copy())
+    var t = 0
+    for k in range(len(querer)):
+        var nome = m.coluna_do_esquema(querer[k]).nome
+        var pedacos = List[Coluna]()
+        for _ in range(quantas_de[k]):
+            if tarefas[t].erro != "":
+                raise Error(tarefas[t].erro)
+            if len(tarefas[t].saida) != 1:
+                raise Error(
+                    "parquet: a coluna '" + nome
+                    + "' nao voltou da decodificacao"
+                )
+            pedacos.append(tarefas[t].saida.pop())
+            t += 1
+        saida.append(_juntar_pedacos(nome, pedacos^))
     return saida^
 
 

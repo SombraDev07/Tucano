@@ -465,31 +465,30 @@ pixi run -e comparativo referencia-1t   # pipeline, uma thread
 
 | | ler tudo | ler 2 de 5 colunas |
 |---|---|---|
-| Tucano | **75 ms** | 45 ms |
-| pandas 3.0.5 | 99 ms | **44 ms** |
-| pyarrow | 54 ms | 26 ms |
-| Polars 1.44 | 35 ms | 14 ms |
-| DuckDB 1.5.5 | 5 ms | 3 ms |
+| Tucano | **50 ms** | **27 ms** |
+| pandas 3.0.5 | 90 ms | 37 ms |
+| pyarrow | 48 ms | 21 ms |
+| Polars 1.44 | 32 ms | 13 ms |
+| DuckDB 1.5.5 | 4 ms | 3 ms |
 
 O arquivo é o que o próprio Tucano escreve com o padrão de hoje: texto repetido
-em `RLE_DICTIONARY`, páginas em Snappy. A leitura usa **uma thread por coluna** —
-com `TUCANO_THREADS=1` as mesmas 5 colunas levam 105 ms. O caso podado ganha
-menos porque duas colunas só dão duas threads.
+em `RLE_DICTIONARY`, páginas em Snappy. A leitura usa **uma thread por coluna**, e
+divide a coluna em faixas de row group quando sobram núcleos — é o que faz o caso
+podado, com só duas colunas, ganhar tanto quanto o completo.
 
 **Pipeline completo — Parquet → filtro → groupby → 3 agregações, 5M linhas:**
 
 | | tempo | vs Tucano |
 |---|---|---|
-| Tucano | **88 ms** | — |
-| Tucano **em fluxo** (pico de 1 row group) | 93 ms | era 900 ms |
-| pandas 3.0.5 (1 thread) | 242 ms | Tucano **2,7×** mais rápido |
-| Polars (1 thread) | 146 ms | Tucano **1,7×** mais rápido |
-| DuckDB (1 thread) | 94 ms | Tucano **1,1×** mais rápido |
-| Polars (16 threads) | 60 ms | 1,5× |
-| DuckDB (16 threads) | 15 ms | 5,9× |
+| Tucano | **69 ms** | — |
+| Tucano **em fluxo** (pico de 1 row group) | 92 ms | era 900 ms |
+| pandas 3.0.5 (1 thread) | 222 ms | Tucano **3,2×** mais rápido |
+| Polars (1 thread) | 137 ms | Tucano **2,0×** mais rápido |
+| DuckDB (1 thread) | 91 ms | Tucano **1,3×** mais rápido |
+| Polars (16 threads) | 56 ms | 1,2× |
+| DuckDB (16 threads) | 15 ms | 4,6× |
 
-Uma thread contra uma thread: o Tucano passa pandas, Polars e — por pouco — o DuckDB neste
-workload. O que resta para o DuckDB em 16 núcleos é paralelismo, e nos operadores ele foi
+Uma thread contra uma thread: o Tucano passa pandas, Polars e o DuckDB neste workload. O que resta para o DuckDB em 16 núcleos é paralelismo, e nos operadores ele foi
 **medido e recusado**: compactar três colunas em três threads mediu 20 ms contra 13 da versão
 de uma thread. Depois de tirar o desperdício, os operadores ficam limitados por banda de
 memória, e oito threads entregam só ~1,75× mais banda que uma. O roadmap registra o número.

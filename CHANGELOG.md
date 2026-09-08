@@ -3,6 +3,48 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.28.0] — Leitura em faixas de row group
+
+Ultimo numero desfavoravel publicado: a leitura fazia 75 ms contra 54 do pyarrow.
+
+| 5M linhas x 5 colunas | antes | depois |
+|---|---|---|
+| ler tudo | 75 ms | **50 ms** |
+| ler 2 de 5 colunas | 42 ms | **27 ms** |
+| pipeline completo | 88 ms | **69 ms** |
+
+### Alterado
+
+- **A coluna pode ser dividida em faixas de row group.** A unidade de trabalho
+  era a coluna inteira, entao o tempo total era o da coluna mais cara — a de
+  maior entropia, que menos comprime e mais custa a decodificar. Cada faixa e
+  uma tarefa que continua dona do que precisa.
+- **Divide-se so quando ha faixas o bastante.** Juntar as faixas custa fixo:
+  alocar e escrever o slab da coluna outra vez. Medido, 5M linhas:
+
+  | | dividindo | sem dividir |
+  |---|---|---|
+  | 5 colunas, 3 faixas cada | 72-81 ms | **67-69 ms** |
+  | 2 colunas, 8 faixas cada | **35-36 ms** | 42-44 ms |
+
+  Com muitas colunas ja ha threads de sobra; com poucas, dividir e o unico jeito
+  de usar os nucleos que sobraram.
+
+### Corrigido
+
+- **A coluna pronta era entregue com `.copy()`.** Quarenta MiB copiados por
+  coluna, uma vez por leitura, desde o [0.22.0] — o dono anterior morria logo em
+  seguida. Trocar por mover vale mais que toda a divisao em faixas. Foi a
+  otimizacao que NAO funcionou que fez a copia aparecer: ela estava escondida
+  atras de um numero que parecia razoavel.
+
+### Adicionado
+
+- O caminho dividido passou a ser exercitado por teste — nenhuma fixture
+  chegava ao limiar — e a conferencia e contra a formula que gerou os dados, nao
+  contra outra leitura: se as duas errassem do mesmo jeito, so a formula
+  denunciaria.
+
 ## [0.27.0] — Execucao em fluxo
 
 O modo em fluxo cumpria o que prometia — pico de memoria de um row group — mas

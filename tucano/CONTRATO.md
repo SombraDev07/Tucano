@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.27.0 — M0 → M19; leitura multithread; HTTP do painel fora do caminho crítico.
+Versão 0.28.0 — M0 → M20; leitura multithread; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -463,7 +463,8 @@ estilo da célula é data. `.xls` antigo (BIFF) é recusado. Não há escritor.
 ### Threads
 
 A leitura de Parquet usa **uma thread por coluna** quando há mais de uma coluna a ler e ao
-menos 10 mil linhas — abaixo disso a thread custa mais do que rende, medido. Nada mais na
+menos 10 mil linhas; quando sobram núcleos, a coluna numérica é dividida em faixas de row
+group, uma tarefa cada — abaixo disso a thread custa mais do que rende, medido. Nada mais na
 biblioteca cria thread: filtro, groupby, junção e ordenação são de uma thread só.
 
 Nenhuma tarefa escreve onde outra lê. Cada coluna abre o próprio descritor, lê o próprio
