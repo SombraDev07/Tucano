@@ -69,6 +69,8 @@ o que for mais conveniente na hora.
   `planilha="Nome"`. Sem `.xls` antigo, sem escrita.
 - **Leitura em várias threads** — uma por coluna, acima de 10 mil linhas. `TUCANO_THREADS`
   fixa quantas, para quem embute o Tucano onde já existe um conjunto de threads.
+- **Filtro sem materializar** — `coluna > literal` compara o slab contra o escalar difundido
+  no registrador, sem copiar a coluna nem repetir o literal por linha.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
 
 ## Instalação
@@ -461,11 +463,11 @@ pixi run -e comparativo referencia-1t   # pipeline, uma thread
 
 | | ler tudo | ler 2 de 5 colunas |
 |---|---|---|
-| Tucano | **70 ms** | 42 ms |
-| pandas 3.0.5 | 98 ms | **36 ms** |
-| pyarrow | 54 ms | 28 ms |
-| Polars 1.44 | 31 ms | 14 ms |
-| DuckDB 1.5.5 | 5 ms | 2 ms |
+| Tucano | **75 ms** | 45 ms |
+| pandas 3.0.5 | 99 ms | **44 ms** |
+| pyarrow | 54 ms | 26 ms |
+| Polars 1.44 | 35 ms | 14 ms |
+| DuckDB 1.5.5 | 5 ms | 3 ms |
 
 O arquivo é o que o próprio Tucano escreve com o padrão de hoje: texto repetido
 em `RLE_DICTIONARY`, páginas em Snappy. A leitura usa **uma thread por coluna** —
@@ -476,16 +478,18 @@ menos porque duas colunas só dão duas threads.
 
 | | tempo | vs Tucano |
 |---|---|---|
-| Tucano | **117 ms** | — |
-| pandas 3.0.5 (1 thread) | 224 ms | Tucano **1,9×** mais rápido |
-| Polars (1 thread) | 134 ms | Tucano **1,1×** mais rápido |
-| DuckDB (1 thread) | 89 ms | 1,3× |
-| Polars (16 threads) | 56 ms | 2,1× |
-| DuckDB (16 threads) | 13 ms | 9,0× |
+| Tucano | **88 ms** | — |
+| pandas 3.0.5 (1 thread) | 242 ms | Tucano **2,7×** mais rápido |
+| Polars (1 thread) | 146 ms | Tucano **1,7×** mais rápido |
+| DuckDB (1 thread) | 94 ms | Tucano **1,1×** mais rápido |
+| Polars (16 threads) | 60 ms | 1,5× |
+| DuckDB (16 threads) | 15 ms | 5,9× |
 
-Uma thread contra uma thread: o Tucano passa pandas e Polars neste workload.
-O que resta para DuckDB em 16 núcleos é paralelismo nos **operadores** — a leitura já usa
-várias threads; filtro, groupby e junção ainda não.
+Uma thread contra uma thread: o Tucano passa pandas, Polars e — por pouco — o DuckDB neste
+workload. O que resta para o DuckDB em 16 núcleos é paralelismo, e nos operadores ele foi
+**medido e recusado**: compactar três colunas em três threads mediu 20 ms contra 13 da versão
+de uma thread. Depois de tirar o desperdício, os operadores ficam limitados por banda de
+memória, e oito threads entregam só ~1,75× mais banda que uma. O roadmap registra o número.
 
 Publicar o número desfavorável continua valendo. Foi assim que se descobriu que
 ligar Snappy por padrão tinha deixado a leitura 4,3× mais lenta sem que nenhum
@@ -528,7 +532,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Excel `.xlsx`: leitura | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-226 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+227 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Por muitos marcos o roadmap registrou paralelismo como bloqueado pela linguagem. **Estava

@@ -209,6 +209,151 @@ def cmp_f64(
         i += 1
 
 
+def cmp_f64_escalar(
+    op: Int,
+    a: List[Float64],
+    escalar: Float64,
+    na: List[UInt8],
+    mut out: List[UInt8],
+    n: Int,
+):
+    """Coluna contra um numero, sem materializar o numero.
+
+    `valor > 1000` nao precisa de um vetor com cinco milhoes de copias do mil.
+    O escalar entra no registrador SIMD por difusao, e a comparacao le so a
+    coluna — um terco do trafego de memoria do caminho geral.
+    """
+    var pa = a.unsafe_ptr()
+    var pn = na.unsafe_ptr()
+    var po = out.unsafe_ptr()
+    var largo = SIMD[DType.float64, W_F64](escalar)
+    var i = 0
+
+    # o tipo da comparacao e decidido FORA do laco
+    if op == 0:
+        while i + W_F64 <= n:
+            var m = pa.unsafe_load[width=W_F64](i).gt(largo)
+            po.unsafe_store(i, _combinar[W_F64](m, pn.unsafe_load[width=W_F64](i)))
+            i += W_F64
+    elif op == 1:
+        while i + W_F64 <= n:
+            var m = pa.unsafe_load[width=W_F64](i).ge(largo)
+            po.unsafe_store(i, _combinar[W_F64](m, pn.unsafe_load[width=W_F64](i)))
+            i += W_F64
+    elif op == 2:
+        while i + W_F64 <= n:
+            var m = pa.unsafe_load[width=W_F64](i).lt(largo)
+            po.unsafe_store(i, _combinar[W_F64](m, pn.unsafe_load[width=W_F64](i)))
+            i += W_F64
+    elif op == 3:
+        while i + W_F64 <= n:
+            var m = pa.unsafe_load[width=W_F64](i).le(largo)
+            po.unsafe_store(i, _combinar[W_F64](m, pn.unsafe_load[width=W_F64](i)))
+            i += W_F64
+    elif op == 4:
+        while i + W_F64 <= n:
+            var m = pa.unsafe_load[width=W_F64](i).eq(largo)
+            po.unsafe_store(i, _combinar[W_F64](m, pn.unsafe_load[width=W_F64](i)))
+            i += W_F64
+    else:
+        while i + W_F64 <= n:
+            var m = pa.unsafe_load[width=W_F64](i).ne(largo)
+            po.unsafe_store(i, _combinar[W_F64](m, pn.unsafe_load[width=W_F64](i)))
+            i += W_F64
+
+    while i < n:
+        var x = pa.unsafe_load(i)
+        var c: Bool
+        if op == 0:
+            c = x > escalar
+        elif op == 1:
+            c = x >= escalar
+        elif op == 2:
+            c = x < escalar
+        elif op == 3:
+            c = x <= escalar
+        elif op == 4:
+            c = x == escalar
+        else:
+            c = x != escalar
+        po.unsafe_store(i, _cmp_tri_escalar(c, pn.unsafe_load(i)))
+        i += 1
+
+
+def cmp_f64_escalar_densa(
+    op: Int, a: List[Float64], escalar: Float64, mut out: List[UInt8], n: Int
+):
+    """A mesma comparacao, em coluna sem nenhum ausente.
+
+    Sem ausentes o resultado nunca e DESCONHECIDO, entao some a leitura da
+    mascara de validade e a combinacao — como ja e o caso em `soma_f64_densa`.
+    """
+    var pa = a.unsafe_ptr()
+    var po = out.unsafe_ptr()
+    var largo = SIMD[DType.float64, W_F64](escalar)
+    var verdadeiro = SIMD[DType.uint8, W_F64](2)  # Tri.VERDADEIRO
+    var falso = SIMD[DType.uint8, W_F64](0)  # Tri.FALSO
+    var i = 0
+
+    if op == 0:
+        while i + W_F64 <= n:
+            po.unsafe_store(
+                i, pa.unsafe_load[width=W_F64](i).gt(largo).select(verdadeiro, falso)
+            )
+            i += W_F64
+    elif op == 1:
+        while i + W_F64 <= n:
+            po.unsafe_store(
+                i, pa.unsafe_load[width=W_F64](i).ge(largo).select(verdadeiro, falso)
+            )
+            i += W_F64
+    elif op == 2:
+        while i + W_F64 <= n:
+            po.unsafe_store(
+                i, pa.unsafe_load[width=W_F64](i).lt(largo).select(verdadeiro, falso)
+            )
+            i += W_F64
+    elif op == 3:
+        while i + W_F64 <= n:
+            po.unsafe_store(
+                i, pa.unsafe_load[width=W_F64](i).le(largo).select(verdadeiro, falso)
+            )
+            i += W_F64
+    elif op == 4:
+        while i + W_F64 <= n:
+            po.unsafe_store(
+                i, pa.unsafe_load[width=W_F64](i).eq(largo).select(verdadeiro, falso)
+            )
+            i += W_F64
+    else:
+        while i + W_F64 <= n:
+            po.unsafe_store(
+                i, pa.unsafe_load[width=W_F64](i).ne(largo).select(verdadeiro, falso)
+            )
+            i += W_F64
+
+    while i < n:
+        var x = pa.unsafe_load(i)
+        var c: Bool
+        if op == 0:
+            c = x > escalar
+        elif op == 1:
+            c = x >= escalar
+        elif op == 2:
+            c = x < escalar
+        elif op == 3:
+            c = x <= escalar
+        elif op == 4:
+            c = x == escalar
+        else:
+            c = x != escalar
+        if c:
+            po.unsafe_store(i, UInt8(2))
+        else:
+            po.unsafe_store(i, UInt8(0))
+        i += 1
+
+
 def _combinar[w: Int](
     m: SIMD[DType.bool, w], na: SIMD[DType.uint8, w]
 ) -> SIMD[DType.uint8, w]:

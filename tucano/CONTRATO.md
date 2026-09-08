@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.22.0 — M0 → M13; leitura multithread; HTTP do painel fora do caminho crítico.
+Versão 0.23.0 — M0 → M15; leitura multithread; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -469,6 +469,11 @@ biblioteca cria thread: filtro, groupby, junção e ordenação são de uma thre
 Nenhuma tarefa escreve onde outra lê. Cada coluna abre o próprio descritor, lê o próprio
 rodapé e escreve no próprio destino; o encontro é depois do `join`. Não há mutex no caminho
 quente porque não há estado compartilhado a proteger.
+
+Os operadores de execução não usam thread, e isso é uma decisão medida, não uma pendência:
+compactar três colunas em três threads mede 20 ms contra 13 da versão de uma thread. Depois
+de tirar o desperdício eles ficam limitados por banda de memória, e oito threads entregam
+só ~1,75× mais banda que uma.
 
 `TUCANO_THREADS=n` fixa o teto de threads; `TUCANO_THREADS=1` desliga o paralelismo por
 completo. Valor ausente ou inválido usa os núcleos do sistema. É a saída para quem embute o

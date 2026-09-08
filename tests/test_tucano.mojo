@@ -1,5 +1,4 @@
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
-from std.time import perf_counter_ns
 from std.ffi import external_call
 from std.memory import UnsafePointer
 from tucano import (
@@ -98,6 +97,7 @@ from tucano.otimizador import (
     otimizar,
 )
 from tucano.plano import Etapa, TipoEtapa
+from tucano.expr import Expr as ExprArvore
 from tucano.json import escapar, tabela_para_json, lista_para_json
 from tucano.http import decodificar_url, parametros
 from tucano.painel_web import pagina
@@ -3053,6 +3053,129 @@ def test_sql_count_distinct_estrela_erra() raises:
         pegou = True
         assert_true("COUNT(DISTINCT *)" in String(e))
     assert_true(pegou)
+
+
+def _tri_esperado(
+    valores: List[Float64], ausentes: List[Bool], op: String, alvo: Float64
+) raises -> List[UInt8]:
+    """Oraculo independente: a mesma pergunta, respondida sem o executor.
+
+    Comparar o caminho rapido com `avaliar_tri` nao provaria nada — `avaliar_tri`
+    passou a usar o caminho rapido, entao seria ele contra si mesmo.
+    """
+    var out = List[UInt8]()
+    for i in range(len(valores)):
+        if ausentes[i]:
+            out.append(UInt8(Tri.DESCONHECIDO))
+            continue
+        var x = valores[i]
+        var c: Bool
+        if op == ">":
+            c = x > alvo
+        elif op == ">=":
+            c = x >= alvo
+        elif op == "<":
+            c = x < alvo
+        elif op == "<=":
+            c = x <= alvo
+        elif op == "==":
+            c = x == alvo
+        else:
+            c = x != alvo
+        if c:
+            out.append(UInt8(Tri.VERDADEIRO))
+        else:
+            out.append(UInt8(Tri.FALSO))
+    return out^
+
+
+def test_filtro_escalar_bate_com_oraculo() raises:
+    """Coluna real contra literal nao materializa nem a coluna nem o literal.
+
+    O caminho geral copiava a coluna para um `Vetor` e fazia cinco milhoes de
+    copias do literal — 16 ms de copia mais 10 ms de constante para 5 ms de
+    comparacao. O atalho le o slab no lugar. Como atalho que discorda do geral e
+    resposta errada em silencio, a conferencia e contra um oraculo escrito a
+    parte, nos seis operadores, nas duas ordens e com e sem ausentes.
+    """
+    var n = 1000
+    var v = List[Float64](capacity=n)
+    var aus = List[Bool](capacity=n)
+    for i in range(n):
+        v.append(Float64(i % 97) - 40.0)
+        aus.append(i % 37 == 0)
+
+    var com_na = List[Coluna]()
+    com_na.append(Coluna.de_reais("x", v.copy(), aus.copy()))
+    var sem_na = List[Coluna]()
+    sem_na.append(Coluna.de_reais("x", v.copy()))
+    var nenhum = List[Bool]()
+    nenhum.resize(n, False)
+
+    var ops = List[String]()
+    ops.append(">")
+    ops.append(">=")
+    ops.append("<")
+    ops.append("<=")
+    ops.append("==")
+    ops.append("!=")
+
+    for op in ops:
+        var e: ExprArvore
+        var invertida: ExprArvore
+        if op == ">":
+            e = coluna("x").gt(lit(10.0))
+            invertida = lit(10.0).lt(coluna("x"))
+        elif op == ">=":
+            e = coluna("x").ge(lit(10.0))
+            invertida = lit(10.0).le(coluna("x"))
+        elif op == "<":
+            e = coluna("x").lt(lit(10.0))
+            invertida = lit(10.0).gt(coluna("x"))
+        elif op == "<=":
+            e = coluna("x").le(lit(10.0))
+            invertida = lit(10.0).ge(coluna("x"))
+        elif op == "==":
+            e = coluna("x").eq(lit(10.0))
+            invertida = lit(10.0).eq(coluna("x"))
+        else:
+            e = coluna("x").ne(lit(10.0))
+            invertida = lit(10.0).ne(coluna("x"))
+
+        var esperado_na = _tri_esperado(v, aus, op, 10.0)
+        var esperado_sem = _tri_esperado(v, nenhum, op, 10.0)
+
+        var obtidos = List[List[UInt8]]()
+        obtidos.append(avaliar_tri(e, com_na))
+        obtidos.append(avaliar_tri(invertida, com_na))
+        for m in obtidos:
+            assert_equal(len(m), n)
+            var difs = 0
+            for i in range(n):
+                if m[i] != esperado_na[i]:
+                    difs += 1
+            if difs != 0:
+                raise Error(
+                    "operador " + op + " com ausentes: " + String(difs)
+                    + " divergencias contra o oraculo"
+                )
+
+        var denso = avaliar_tri(e, sem_na)
+        var difs_d = 0
+        for i in range(n):
+            if denso[i] != esperado_sem[i]:
+                difs_d += 1
+        if difs_d != 0:
+            raise Error(
+                "operador " + op + " sem ausentes: " + String(difs_d)
+                + " divergencias contra o oraculo"
+            )
+
+    # inteiro cai no caminho geral de proposito, e tem de continuar certo
+    var i_lit = avaliar_tri(coluna("x").gt(lit_int(10)), com_na)
+    var esp_i = _tri_esperado(v, aus, ">", 10.0)
+    for i in range(n):
+        assert_equal(Int(i_lit[i]), Int(esp_i[i]))
 
 
 def test_paralelo_politica() raises:

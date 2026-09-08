@@ -1,6 +1,6 @@
 [workspace]
 name = "tucano"
-version = "0.22.0"
+version = "0.23.0"
 channels = ["https://conda.modular.com/max", "conda-forge"]
 platforms = ["linux-64"]
 

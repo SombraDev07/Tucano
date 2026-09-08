@@ -124,17 +124,18 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13 e M15 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
 | O que falta | Por quê |
 |---|---|
+| **Escrita `.xlsx`** | `para_csv` já grava a tabela; falta `para_xlsx` — a planilha que o analista abre. M14. |
 | ~~**Paralelismo por thread**~~ | Feito no M13: leitura usa uma thread por coluna, 105 → 69 ms. Os operadores de execução ainda são de uma thread — é o que separa o Tucano do DuckDB em 16 núcleos. |
 | **Publicação em canal conda** | `recipe.yaml` está pronto; falta um canal (prefix.dev ou equivalente). Decisão de projeto. |
 | **Slab de data em Int32** | Dívida rastreada com gatilho explícito — ver abaixo. |
 
-GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Escrita de Excel fica para depois da leitura.
+GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. **Saída para o analista:** `para_csv` já existe (M5); **escrita `.xlsx` entra no 1.0** — é o simétrico do `ler_xlsx`.
 
 | Peça | Status |
 |------|--------|
@@ -187,9 +188,12 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Escr
 | Escritor emite Snappy | ✅ M10.10 |
 | SQL `HAVING` + `COUNT(DISTINCT)` | ✅ M10.11 |
 | Leitura `.xlsx` | ✅ M12 |
+| Escrita `.csv` | ✅ M5 — `para_csv` |
+| Escrita `.xlsx` | ❌ M14 — `para_xlsx`, próximo |
 | SQL `SELECT DISTINCT` / `SELECT ALL` | ✅ M10.13 |
 | Paralelismo na leitura (uma thread por coluna) | ✅ M13 |
-| Paralelismo nos operadores de execução | ⏳ próximo — filtro, groupby e junção ainda em uma thread |
+| Paralelismo nos operadores de execução | ❌ **medido e recusado** — banda de memória, não CPU (M15) |
+| Junção e ordenação mais baratas | ⏳ próximo — 459 e 321 ns/linha, sem estar limitadas por banda |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
 
@@ -231,11 +235,12 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M10.10 | Snappy na escrita | crítica | ✅ feito | páginas comprimidas por padrão |
 | M10.11 | SQL HAVING + COUNT(DISTINCT) | crítica | ✅ feito | mesmo `onde` / `distintos` |
 | M12 | Excel (leitura) | alta | ✅ feito | `ler_xlsx`, primeira aba ou pelo nome |
-| M13 | Paralelismo por thread | crítica | ✅ feito | leitura 105 → 69 ms; operadores ainda em uma thread |
+| M13 | Paralelismo por thread | crítica | ✅ feito | leitura 105 → 69 ms |
+| M15 | Operadores | crítica | ✅ feito | filtro 47 → 16 ms; paralelizar operador medido e recusado |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
+| M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
-| M12b | Excel (escrita) | baixa | não iniciado | compatibilidade tardia |
 
 ```
 M0 Fundação
@@ -276,8 +281,12 @@ M10.11 SQL HAVING + COUNT(DISTINCT)
  ↓
 M12 Excel leitura (`.xlsx`)
  ↓
+M13 Paralelismo na leitura
+ ↓
+M14 Excel escrita (`para_xlsx`)
+ ↓
 Tucano 1.0
-   └── M11 GPU [experimental]   escrita Excel [depois]
+   └── M11 GPU [experimental]
        M7 Painel HTTP [estacionado]
 ```
 
@@ -1367,8 +1376,7 @@ descomprimir DEFLATE cru, achar o membro e montar uma `Tabela`. Uma forma:
 primeira linha, como no CSV. Serial de data do Excel vira `data` quando o estilo
 da célula é data.
 
-`.xls` antigo (BIFF) é recusado com a correção. Não há escritor — isso continua
-compatibilidade tardia, não o caminho do engine.
+`.xls` antigo (BIFF) é recusado com a correção. A escrita simétrica é o M14.
 
 ### Critério de saída
 
@@ -1477,15 +1485,131 @@ sistema.
 
 ---
 
-## M11 — GPU [experimental]
+## M14 — Escrever .xlsx
 
-Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / Aggregate / Sort estarem maduros na CPU, e só onde o workload justificar.
+A leitura já existe. A saída que o analista pede é a planilha: `para_xlsx(tabela, caminho)`, uma aba, valores, sem fórmula e sem estilo. O CSV já cobre o caso “arquivo de tabela” (`para_csv`, M5); o `.xlsx` é o mesmo dado no formato que o Excel abre nativo.
+
+Uma forma: `para_xlsx(tabela, caminho)` grava a primeira aba; `planilha="Nome"` nomeia a aba. Round-trip com o próprio `ler_xlsx` e leitura por outra implementação (o Excel, ou o gerador de fixture invertido). Sem `.xls`. Sem várias abas no mesmo arquivo neste marco — uma tabela, um arquivo.
+
+### Critério de saída
+
+- [ ] `para_xlsx(tabela, caminho)` e `para_xlsx(tabela, caminho, planilha="Nome")`
+- [ ] tipos: inteiro, real, lógico, texto, data, ausente
+- [ ] `ler_xlsx` lê de volta o que o Tucano escreveu
+- [ ] outra implementação abre o arquivo (fixture invertida)
+- [ ] `.xls` continua recusado
 
 ---
 
-## Escrita Excel [baixa]
+## M15 — Operadores: o desperdício primeiro, o paralelismo medido ✅
 
-Último. Compatibilidade, não inovação. A leitura já existe; gravar `.xlsx` não é o engine.
+Pedido: paralelizar os operadores de execução. O que se mediu primeiro mudou o
+que valia fazer.
+
+### O filtro gastava 10× o necessário
+
+`avaliar_tri` sobre `valor > 1000.0` custava 32 ms em 5 milhões de linhas. A
+comparação em si custa 5. Os outros 27 eram materialização:
+
+| | |
+|---|---|
+| `extrair_coluna` copia a coluna inteira para um `Vetor` | 16 ms |
+| `constante_numerica` materializa 5 milhões de cópias do literal | 10 ms |
+| a comparação SIMD de verdade | 5 ms |
+
+O avaliador é uma árvore que materializa em cada nó, e para `coluna OP literal`
+isso significa três passagens de memória onde uma bastava. Já existia o atalho
+para texto dicionarizado (`_cmp_dicionario`, do M4); faltava o numérico.
+
+`cmp_f64_escalar` lê o slab no lugar e difunde o escalar no registrador SIMD.
+Coluna sem nenhum ausente tem variante própria — sem ausentes o resultado nunca
+é DESCONHECIDO, então some a leitura da máscara de validade, como já era o caso
+em `soma_f64_densa`.
+
+**`avaliar_tri`: 32 → 3 ms.** O pipeline completo foi de 110 para 88.
+
+Só vale para coluna REAL. Em INTEIRO o caminho geral converte para f64, e
+reproduzir essa conversão no atalho seria uma segunda regra de coerção — o
+contrário da Decisão 4. Inteiro cai no caminho geral, e um teste garante que
+continua certo.
+
+Atalho que discorda do caminho geral é resposta errada em silêncio, então a
+conferência é contra um **oráculo escrito à parte** — não contra `avaliar_tri`,
+que passou a usar o próprio atalho e responderia a si mesmo. Seis operadores,
+duas ordens de operandos, com e sem ausentes.
+
+### Paralelizar a compactação: medido, e é pior
+
+Construída e medida antes de entrar na biblioteca. Três colunas, três threads,
+resultado conferido valor a valor:
+
+| | |
+|---|---|
+| compactar 3 colunas, sequencial | **13 ms** |
+| compactar 3 colunas, em 3 threads | 20–22 ms |
+
+Zero divergências e mais lento. A compactação lê e escreve dezenas de MiB por
+coluna: é limitada por **banda de memória**, e nessa máquina oito threads
+entregam só ~1,75× mais banda que uma (medido no M13). O que sobra do ganho não
+paga a criação da thread mais a disputa no alocador, que precisa servir três
+slabs novos de dezenas de MiB ao mesmo tempo.
+
+O mesmo raciocínio vale para o resto do pipeline depois do desperdício removido:
+agregação com 24 grupos sobre 4,6 milhões de linhas faz 15 ms lendo ~120 MiB —
+também banda, não cálculo.
+
+**Resultado negativo, e fica registrado como resultado.** Custou uma tarde
+descobrir; sem o registro, custaria outra.
+
+### O que isso exigiu descobrir sobre o Mojo
+
+Ao contrário da leitura — onde cada tarefa é dona do que precisa — um operador
+precisa **compartilhar a entrada**. E aí o erro do M4 morde de verdade:
+
+```
+error: struct fields cannot expose AnyOrigin in their type
+```
+
+A saída é o endereço viajar como `Int` e o ponteiro ser reconstruído dentro da
+thread (`unsafe_from_address` com a origem fixada). Funciona, e foi assim que a
+medição acima foi feita — mas é tráfego de ponteiro cru, sem verificação de
+tempo de vida, no meio do executor. **Não entrou na biblioteca**, porque a
+medição disse que não haveria o que ganhar em troca do risco.
+
+### Onde o custo realmente está agora
+
+Depois deste marco, o pipeline de 88 ms se divide em ~40 de leitura (já em
+várias threads) e ~48 de execução. Dentro da execução, o filtro caiu para 16 ms
+e a agregação está em 22.
+
+Os operadores caros de verdade são outros, e `pixi run bench-m6` os mostra em
+1 milhão de linhas: **junção a 459 ns/linha e ordenação a 321 ns/linha**, contra
+14 ns/linha para formar grupos por chave dicionarizada. Uma junção por hash a
+459 ns/linha não está limitada por banda — está fazendo trabalho demais. É onde
+a próxima medição deve começar, e a lição deste marco é que ela vem antes de
+qualquer thread.
+
+### Resultado
+
+| 5M linhas, uma thread | Tucano | pandas | Polars | DuckDB |
+|---|---|---|---|---|
+| pipeline (filtro + groupby + 3 agregações) | **88 ms** | 242 ms | 146 ms | 94 ms |
+
+Contra uma thread, o Tucano passa o pandas em 2,7×, o Polars em 1,7× — e o
+DuckDB, pela primeira vez, por pouco.
+
+### Critério de saída
+
+- [x] `coluna OP literal` em coluna real não materializa nem coluna nem literal
+- [x] atalho conferido contra oráculo independente, não contra o próprio motor
+- [x] paralelismo de operador medido antes de construído — e recusado com número
+- [x] 227 testes verdes, interoperabilidade nos dois formatos
+
+---
+
+## M11 — GPU [experimental]
+
+Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / Aggregate / Sort estarem maduros na CPU, e só onde o workload justificar.
 
 ---
 
@@ -1499,7 +1623,7 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **Analytics** — groupby, join, concat, resumo, estatísticas básicas
 
-**I/O** — CSV, Parquet (column pruning + predicate pushdown + distinct_count + Snappy na escrita), leitura `.xlsx`
+**I/O** — CSV (leitura e `para_csv`), Parquet (column pruning + predicate pushdown + distinct_count + Snappy na escrita), `.xlsx` (`ler_xlsx` e `para_xlsx`)
 
 **SQL** — SELECT/WHERE/GROUP BY/HAVING/ORDER BY/LIMIT, JOIN (`USING`) e COUNT(DISTINCT), sobre o mesmo planner
 
@@ -1507,14 +1631,14 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **Distribuição** — pacote instalável, README, documentação de API
 
-**Fora do 1.0** — Python, escrita Excel, clonagem de API alheia, GPU obrigatória, servidor HTTP / dashboard nativo
+**Fora do 1.0** — Python, clonagem de API alheia, GPU obrigatória, servidor HTTP / dashboard nativo
 
 ---
 
 ## API de destino
 
 ```mojo
-from tucano import ler_parquet, coluna, lit, soma, mes
+from tucano import ler_parquet, coluna, lit, soma, mes, para_csv, para_xlsx
 
 def main() raises:
     var vendas = ler_parquet("vendas.parquet")
@@ -1527,6 +1651,8 @@ def main() raises:
 
     resumo.mostrar()
     resumo.para_parquet("saida.parquet")
+    para_csv(resumo, "saida.csv")
+    para_xlsx(resumo, "saida.xlsx")
 ```
 
 Por baixo: Expression → Logical Plan → Optimizer → Physical Plan → SIMD/Parallel/Streaming → Memory Engine.
@@ -1564,3 +1690,4 @@ tempo, RAM, throughput, **startup**, scaling por cores, I/O
 19. ~~**Próximo com retorno:** abrir `.xlsx`~~ — M12
 20. ~~**Próximo com retorno:** decodificador Snappy~~ — M10.12
 21. ~~**Próximo com retorno:** `SELECT DISTINCT`~~ — M10.13
+22. **Próximo com retorno:** `para_xlsx` — `para_csv` já existe; falta a planilha que o Excel abre nativo

@@ -25,6 +25,8 @@ from .kernels import (
     div_f64,
     ou_na,
     cmp_f64,
+    cmp_f64_escalar,
+    cmp_f64_escalar_densa,
     cmp_i32,
     tri_e,
     tri_ou,
@@ -391,6 +393,11 @@ def _tri_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> List[UInt8]:
         if len(rapido) == linhas:
             return rapido^
 
+        # caminho rapido: coluna real vs. literal numerico
+        var rapido_num = _cmp_escalar_real(expr, n, cols, k)
+        if len(rapido_num) == linhas:
+            return rapido_num^
+
         var a = _avaliar_no(expr, n.left, cols)
         var b = _avaliar_no(expr, n.right, cols)
         if a.eh_texto != b.eh_texto:
@@ -416,6 +423,75 @@ def _tri_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> List[UInt8]:
         return out^
 
     raise Error("expressao de filtro nao booleana")
+
+
+def _op_invertido(k: Int) -> Int:
+    """`10 < coluna` e `coluna > 10`. Inverter o operador poupa um vetor."""
+    if k == Kind.GT:
+        return Kind.LT
+    if k == Kind.LT:
+        return Kind.GT
+    if k == Kind.GE:
+        return Kind.LE
+    if k == Kind.LE:
+        return Kind.GE
+    return k
+
+
+def _cmp_escalar_real(
+    expr: Expr, n: ExprNode, cols: List[Coluna], k: Int
+) raises -> List[UInt8]:
+    """Caminho rapido: coluna REAL vs. literal numerico, sem materializar nada.
+
+    O caminho geral copia a coluna para um `Vetor` e materializa o literal em
+    cinco milhoes de copias — medido, 16 ms de copia mais 10 ms de constante
+    para 5 ms de comparacao de verdade. Aqui o slab e lido no lugar e o escalar
+    entra por difusao no registrador.
+
+    So vale para coluna REAL: em INTEIRO o caminho geral converte para f64, e
+    reproduzir essa conversao aqui seria uma segunda regra de coercao — o
+    contrario da Decisao 4. Inteiro cai no caminho geral.
+
+    Devolve lista vazia quando o padrao nao se aplica.
+    """
+    var esq = expr.nodes[n.left].copy()
+    var dir = expr.nodes[n.right].copy()
+
+    var nome: String
+    var escalar: Float64
+    var op = k
+    if esq.kind == Kind.COLUNA and dir.kind == Kind.LIT_F64:
+        nome = esq.nome
+        escalar = dir.f64
+    elif esq.kind == Kind.COLUNA and dir.kind == Kind.LIT_I64:
+        nome = esq.nome
+        escalar = Float64(dir.i64)
+    elif dir.kind == Kind.COLUNA and esq.kind == Kind.LIT_F64:
+        nome = dir.nome
+        escalar = esq.f64
+        op = _op_invertido(k)
+    elif dir.kind == Kind.COLUNA and esq.kind == Kind.LIT_I64:
+        nome = dir.nome
+        escalar = Float64(esq.i64)
+        op = _op_invertido(k)
+    else:
+        return List[UInt8]()
+
+    var pos = posicao_no_lote(cols, nome)
+    if pos < 0:
+        return List[UInt8]()
+    ref col = cols[pos]
+    if col.tipo != DType.REAL:
+        return List[UInt8]()
+
+    var linhas = col.tamanho()
+    var out = _zeros_u8(linhas)
+    if col.validity_bits.n_ausentes == 0:
+        cmp_f64_escalar_densa(_codigo_op(op), col.reals, escalar, out, linhas)
+    else:
+        var na = col.validity_bits.para_bytes()
+        cmp_f64_escalar(_codigo_op(op), col.reals, escalar, na, out, linhas)
+    return out^
 
 
 def _cmp_dicionario(

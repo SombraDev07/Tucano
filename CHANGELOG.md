@@ -3,6 +3,54 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.23.0] — Filtro sem materializar; paralelismo de operador medido e recusado
+
+Pedido: paralelizar os operadores. O que se mediu primeiro mudou o que valia
+fazer.
+
+| 5M linhas, uma thread | antes | depois |
+|---|---|---|
+| avaliar `valor > 1000.0` | 32 ms | **3 ms** |
+| pipeline completo | 110 ms | **88 ms** |
+
+Contra uma thread: 2,7x o pandas, 1,7x o Polars, e — pela primeira vez — a
+frente do DuckDB (88 contra 94 ms).
+
+### Alterado
+
+- **`coluna OP literal` em coluna REAL nao materializa nada.** O avaliador copiava
+  a coluna inteira para um `Vetor` (16 ms) e fazia 5 milhoes de copias do literal
+  (10 ms) para uma comparacao que custa 5. Agora o slab e lido no lugar e o
+  escalar entra por difusao no registrador SIMD. Ja existia o atalho para texto
+  dicionarizado desde o M4; faltava o numerico.
+- Coluna sem nenhum ausente usa variante densa: sem ausentes o resultado nunca e
+  DESCONHECIDO, entao some a leitura da mascara de validade.
+
+Coluna INTEIRO continua no caminho geral de proposito: ali a conversao para f64
+e do caminho geral, e reproduzi-la no atalho seria uma segunda regra de coercao.
+
+### Adicionado
+
+- **`test_filtro_escalar_bate_com_oraculo`** confere o atalho contra um oraculo
+  escrito a parte — nao contra `avaliar_tri`, que passou a usar o proprio atalho
+  e responderia a si mesmo. Seis operadores, duas ordens de operandos, com e sem
+  ausentes, mais o literal inteiro que cai no caminho geral.
+
+### Medido e recusado
+
+Paralelizar a compactacao do filtro foi **construido e medido antes** de entrar
+na biblioteca: tres colunas em tres threads, resultado conferido valor a valor.
+
+| | |
+|---|---|
+| compactar 3 colunas, sequencial | **13 ms** |
+| compactar 3 colunas, em 3 threads | 20-22 ms |
+
+Zero divergencias e mais lento. Compactacao le e escreve dezenas de MiB por
+coluna: e limitada por banda de memoria, e nesta maquina oito threads entregam
+so ~1,75x mais banda que uma. Nao entrou. O resultado negativo esta no ROADMAP
+como resultado.
+
 ## [0.22.0] — Leitura em varias threads
 
 O roadmap registrava paralelismo como **bloqueado pela linguagem** desde o M4. A
