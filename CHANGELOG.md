@@ -3,6 +3,37 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.31.0] — As tres tecnicas dos maduros, medidas
+
+Sem mudanca de codigo. O [0.30.0] nomeou o que faltava no decodificador Snappy:
+tag e deslocamento numa carga de 64 bits, despacho por tabela, laco sem cadeia de
+desvios. As tres foram implementadas. **As tres ficaram mais lentas.**
+
+| ler a coluna `id` (19 MiB Snappy -> 38 MiB) | |
+|---|---|
+| como esta | **28 ms** |
+| despacho por tabela + carga de 64 bits | 38 ms |
+| so a carga de 64 bits, sem tabela | 45 ms |
+
+No arquivo de cinco colunas: 50 ms como esta, 59-60 com tabela.
+
+Isolando as duas metades, a carga larga e a cara. Para a copia mais comum — tipo
+1, 87% dos elementos — o decodificador precisa de exatamente **um** byte alem do
+tag; trocar um `load` de um byte por um de oito, mais mascara, mais um desvio de
+fronteira, e estritamente mais trabalho. A tecnica existe para eliminar uma
+cadeia de desvios que aqui ja nao existe: os `load` por ponteiro nao tem checagem
+de limite, e o compilador ja emite para o caso simples um codigo que a versao
+"madura" nao melhora.
+
+### O que a medicao aponta em vez disso
+
+O erro e anterior ao Snappy. Uma coluna de inteiros sequenciais em PLAIN da ao
+Snappy 40 MiB nos quais so os bytes baixos mudam, e ele responde com seis milhoes
+de copias de sete bytes. O `DELTA_BINARY_PACKED` do Parquet existe para isso: a
+mesma coluna vira alguns bits por valor, sem elemento Snappy para decodificar.
+O caminho nao e um Snappy mais rapido, e um fluxo mais curto — e isso e o
+escritor, nao o leitor.
+
 ## [0.30.0] — O que "maturidade de decodificacao" escondia
 
 Sem mudanca de codigo. O [0.29.0] fechou dizendo que a distancia para o Polars era

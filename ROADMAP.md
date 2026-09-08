@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13 e M15 → M22 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13 e M15 → M23 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -194,6 +194,7 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. **Sa
 | Paralelismo na leitura (uma thread por coluna) | ✅ M13 |
 | Paralelismo nos operadores de execução | ❌ **medido e recusado** — banda de memória, não CPU (M15) |
 | Junção e ordenação mais baratas | ✅ M16 — 74 e 100 ns/linha |
+| Escritor com `DELTA_BINARY_PACKED` | ⏳ próximo — encurta o fluxo em vez de acelerar o Snappy |
 | Chave de grupo composta | ✅ M17 — 34 ns/linha |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
@@ -245,6 +246,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M20 | Leitura em faixas | crítica | ✅ feito | 75 → 50 ms; pipeline 88 → 69 |
 | M21 | Leitura de poucas colunas | crítica | ✅ feito | uma coluna 33 → 16 ms |
 | M22 | Medir a distância para o Polars | crítica | ✅ feito | Snappy é 23 dos 28 ms; duas tentativas recusadas |
+| M23 | As três técnicas dos maduros | crítica | ✅ feito | as três mais lentas; o alvo é o escritor |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -2094,6 +2096,57 @@ número ao lado, em vez de como adjetivo.
 - [x] a composição do fluxo Snappy medida, não suposta
 - [x] as duas otimizações construídas, medidas e recusadas
 - [x] nenhuma linha de código pior entrou; 237 testes verdes
+
+---
+
+## M23 — As três técnicas dos maduros, medidas ✅
+
+O M22 nomeou o que faltava: tag e deslocamento numa carga de 64 bits, despacho
+por tabela, laço sem cadeia de desvios. As três foram implementadas. **As três
+ficaram mais lentas.**
+
+| ler a coluna `id` (19 MiB Snappy → 38 MiB) | |
+|---|---|
+| como está | **28 ms** |
+| despacho por tabela + carga de 64 bits | 38 ms |
+| só a carga de 64 bits, sem tabela | 45 ms |
+| bloco do tamanho da distância, com folga (M22) | 29 ms |
+
+E no arquivo de cinco colunas: 50 ms como está, 59–60 com tabela.
+
+### Por que não transfere
+
+Isolando as duas metades, a **carga larga** é a cara. Para a cópia mais comum —
+tipo 1, que é 87% dos elementos — o decodificador precisa de exatamente **um**
+byte além do tag. Trocar um `load` de um byte por um de oito, mais máscara, mais
+um desvio para não passar do fim do buffer, é estritamente mais trabalho.
+
+A técnica existe para eliminar uma cadeia de desvios que aqui já não existe: os
+`load` por ponteiro do Tucano não têm checagem de limite, e o compilador já emite
+para o caso simples um código que a versão "madura" não melhora. O playbook
+pressupõe um gargalo que este decodificador não tem.
+
+Doze ciclos por elemento, para ler o tag, ler o deslocamento e mover sete bytes,
+é aproximadamente uma operação de memória por ciclo. Não há folga escondida ali.
+
+### O que a medição aponta em vez disso
+
+O erro é anterior ao Snappy. Uma coluna de inteiros sequenciais em **PLAIN** dá
+ao Snappy 40 MiB nos quais só os bytes baixos mudam — e ele responde com seis
+milhões de cópias de sete bytes. O decodificador está fazendo bem um trabalho que
+não deveria existir.
+
+O Parquet tem `DELTA_BINARY_PACKED` exatamente para isso: a mesma coluna vira
+alguns bits por valor, sem elemento Snappy nenhum para decodificar. **O caminho
+não é um Snappy mais rápido, é um fluxo mais curto** — e isso é o escritor, não o
+leitor.
+
+### Critério de saída
+
+- [x] as três técnicas implementadas e medidas, não descritas
+- [x] a metade cara isolada — é a carga larga, não a tabela
+- [x] nenhuma linha mais lenta entrou; 237 testes verdes
+- [x] o próximo passo nomeado com o motivo, e ele é no escritor
 
 ---
 
