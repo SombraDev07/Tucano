@@ -64,7 +64,13 @@ from tucano import (
     TipoEtapa,
     Consulta,
 )
-from tucano.codecs import decodificar_rle, descomprimir_snappy, largura_de_bits
+from tucano.codecs import (
+    decodificar_rle,
+    decodificar_rle_i32,
+    codificar_rle_i32,
+    descomprimir_snappy,
+    largura_de_bits,
+)
 from tucano.thrift import LeitorThrift
 from tucano.arquivo import LeitorArquivo
 from tucano.flatbuf import ConstrutorFlat, raiz_flat, campo_flat, ler_i32, texto_flat
@@ -1136,6 +1142,29 @@ def test_pq_rle_trecho_empacotado() raises:
         assert_equal(r[i], esperado[i])
 
 
+def test_pq_rle_i32_ida_e_volta() raises:
+    """Encoder hibrido (RLE + bit-packing) bate com o decoder de indices."""
+    var vals = List[Int32]()
+    for i in range(100):
+        vals.append(Int32(i % 24))
+    var largura = largura_de_bits(23)
+    var enc = codificar_rle_i32(vals, largura)
+    var dec = decodificar_rle_i32(enc, 0, len(enc), largura, 100)
+    assert_equal(len(dec), 100)
+    for i in range(100):
+        assert_equal(Int(dec[i]), Int(vals[i]))
+
+    # trecho repetido longo: tem de sair como RLE, nao 8-a-8
+    var iguais = List[Int32]()
+    for _ in range(40):
+        iguais.append(Int32(3))
+    var enc2 = codificar_rle_i32(iguais, 3)
+    var dec2 = decodificar_rle_i32(enc2, 0, len(enc2), 3, 40)
+    assert_equal(len(dec2), 40)
+    for v in dec2:
+        assert_equal(Int(v), 3)
+
+
 def test_pq_largura_de_bits() raises:
     assert_equal(largura_de_bits(0), 0)
     assert_equal(largura_de_bits(1), 1)
@@ -1354,6 +1383,31 @@ def test_pq_escrita_volume() raises:
     assert_equal(volta.pegar("id").texto_em(2999), "2999")
     assert_equal(volta.pegar("grupo").texto_em(1000), "b")
     assert_equal(volta.soma("id"), original.soma("id"))
+
+
+def test_pq_escrita_emite_dicionario() raises:
+    """Texto repetido sai em RLE_DICTIONARY, nao 3 mil copias PLAIN."""
+    var original = ler_parquet("tests/fixtures/grupos.parquet")
+    var saida = "tests/fixtures/_saida_dic.parquet"
+    para_parquet(original, saida)
+    var m = metadados_parquet(saida)
+    var achou_grupo = False
+    var achou_id = False
+    for c in range(m.num_colunas()):
+        var nome = m.coluna_do_esquema(c).nome
+        if nome == "grupo":
+            assert_true(m.grupos[0].colunas[c].tem_dicionario())
+            achou_grupo = True
+        if nome == "id":
+            assert_false(m.grupos[0].colunas[c].tem_dicionario())
+            achou_id = True
+    assert_true(achou_grupo)
+    assert_true(achou_id)
+    var volta = ler_parquet(saida)
+    assert_true(volta.pegar("grupo").eh_dicionarizada())
+    assert_equal(volta.pegar("grupo").texto_em(0), original.pegar("grupo").texto_em(0))
+    assert_equal(volta.pegar("grupo").texto_em(1000), original.pegar("grupo").texto_em(1000))
+    assert_equal(volta.pegar("id").texto_em(2999), "2999")
 
 
 # ------------------------------------------------------------------ M6

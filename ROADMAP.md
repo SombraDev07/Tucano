@@ -105,37 +105,32 @@ São três provas, em ordem de honestidade:
 
 ### Onde o Tucano está (medido)
 
-`pixi run bench-comparativo` e `pixi run -e comparativo referencia`. Mesmo arquivo Parquet, mesma pergunta (filtro + groupby + 3 agregações), menor de três execuções. Nenhum ajuste favorecendo ninguém.
+`pixi run bench-leitura` / `pixi run -e comparativo leitura` e `pixi run bench-comparativo` / `pixi run -e comparativo referencia-1t`. Mesmo arquivo Parquet, mesma pergunta, menor de três execuções. Uma thread contra uma thread.
 
-| 5M linhas | tempo | atraso do Tucano |
-|---|---|---|
-| Tucano | 972 ms | — |
-| Polars (16 threads) | 57 ms | **17×** |
-| DuckDB (16 threads) | 29 ms | **33×** |
-| Polars (1 thread) | 100 ms | **9,7×** |
-| DuckDB (1 thread) | 139 ms | **7,0×** |
+| 5M linhas, uma thread | Tucano | pandas 3.0.5 | Polars | DuckDB |
+|---|---|---|---|---|
+| ler 5 colunas (124 MiB) | **62 ms** | 108 ms | 30 ms | 5 ms |
+| pipeline (filtro + groupby + 3 agregações) | **97 ms** | 228 ms | 109 ms | 58 ms |
 
-**A leitura que importa está na segunda metade da tabela.** Contra um núcleo só, o atraso cai de 33× para 7×. Ou seja: **de metade a dois terços da distância é simplesmente não usar os outros quinze núcleos** — exatamente o item que está bloqueado pela ausência de primitiva de paralelismo no stdlib do Mojo 1.0.
+Tucano **1,7×** na leitura e **2,4×** no pipeline contra pandas; **1,1×** contra Polars no pipeline. DuckDB em 16 threads faz o mesmo pipeline em 15 ms — essa distância é paralelismo, bloqueado no Mojo 1.0.
 
-O que sobra — 7× a 10× contra um único núcleo — é maturidade de decodificação e execução, e é onde o trabalho tem retorno hoje. Um exemplo do que isso rende: nesta mesma sessão, três otimizações guiadas por medição (preservar o dicionário ao filtrar, dicionarizar direto dos bytes na leitura, e ler por ponteiro em vez de indexar `List`) cortaram o tempo pela metade, de 1957 ms para 972 ms.
-
-Publicar o número desfavorável é o ponto. Sem ele, "é rápido porque tem SIMD" seria uma afirmação sem contraprova.
+A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5) ficam nos marcos correspondentes: são o ponto de partida, não o estado.
 
 ---
 
 ## Estado atual do código (honestidade)
 
-**M0 → M10 fechados.** 184 testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos, e a suíte comparativa pública no ar.
+**M0 → M10.6 fechados.** 187 testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas (leitura 1,7×, pipeline 2,4×) e do Polars em uma thread no workload Parquet → filtro → groupby.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
 | O que falta | Por quê |
 |---|---|
-| **Paralelismo por thread** | Fechado por construção no Mojo 1.0 — a linguagem proíbe o apagamento de origem que um payload de thread exige. Vale de metade a dois terços da distância para os engines de referência. Detalhes no M4. |
+| **Paralelismo por thread** | Fechado por construção no Mojo 1.0 — a linguagem proíbe o apagamento de origem que um payload de thread exige. É o que ainda separa o Tucano do DuckDB em 16 núcleos. Detalhes no M4. |
 | **Publicação em canal conda** | `recipe.yaml` está pronto; falta um canal (prefix.dev ou equivalente). Decisão de projeto. |
 | **Slab de data em Int32** | Dívida rastreada com gatilho explícito — ver abaixo. |
 
-O próximo trabalho com retorno claro é **maturidade de decodificação e execução**: contra um único núcleo o atraso é de 7× a 10×, e nesta sessão três otimizações guiadas por medição já cortaram o tempo pela metade. GPU (M11) e Excel (M12) seguem fora do caminho crítico, como sempre estiveram.
+GPU (M11) e Excel (M12) seguem fora do caminho crítico, como sempre estiveram.
 
 | Peça | Status |
 |------|--------|
@@ -177,11 +172,13 @@ O próximo trabalho com retorno claro é **maturidade de decodificação e execu
 | SQL sobre o mesmo planner | ✅ M10 |
 | Arrow IPC: leitura e escrita, interop verificada | ✅ M10 |
 | Suíte comparativa pública | ✅ — números publicados, inclusive os desfavoráveis |
+| Escritor `RLE_DICTIONARY` em texto | ✅ M10.6 — 245 → 124 MiB |
+| `pread` sem zerar; RLE em `Int32`; gather numérico | ✅ M10.6 |
+| Filtro compacta o slab; agregação sem `extrair_coluna` | ✅ M10.6 |
+| Mais rápido que pandas (leitura 1,7×, pipeline 2,4×) | ✅ M10.6 |
 | Paralelismo por chunk | ❌ **bloqueado** — fechado por construção no Mojo 1.0 |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
-| Coluna derivada (`com_coluna`) | ❌ M3 |
-| `agrupar` / `unir` / `ordenar` | ❌ M6 |
 
 ### Dívidas concretas identificadas
 
@@ -209,10 +206,12 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M4 | SIMD (+ Parallel) | crítica | ✅ SIMD / ⛔ paralelo | kernels vetorizados |
 | M5 | I/O + Streaming | crítica | ✅ feito | scanner CSV, Parquet, fatias, datahora |
 | M6 | Aggregation + Join | crítica | ✅ feito | group/join como operadores |
-| **M7** | **Painel** | **alta** | **próximo** | dashboard nativo |
+| M7 | Painel | alta | ✅ feito | dashboard nativo |
 | M8 | Optimizer | crítica | ✅ feito | pushdown + folding + reorder |
 | M9 | Out-of-Core | alta | ✅ feito | datasets > RAM |
 | M10 | Interop | alta | ✅ feito | Arrow (sem Python) + SQL |
+| M10.5 | Desperdício do leitor | crítica | ✅ feito | 1112 → 230 ms |
+| M10.6 | Passar o pandas | crítica | ✅ feito | leitura 1,7×, pipeline 2,4× |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
 | M12 | Excel | baixa | não iniciado | compatibilidade tardia |
 
@@ -240,6 +239,10 @@ M8 Optimizer               ← torna o painel interativo em escala
 M9 Out-of-Core
  ↓
 M10 Interop (Arrow / SQL)
+ ↓
+M10.5 Desperdício do leitor
+ ↓
+M10.6 Passar o pandas
  ↓
 Tucano 1.0
    └── M11 GPU [experimental]   M12 Excel [depois]
@@ -633,7 +636,7 @@ O `resumo()` não inventa estatística: coluna não numérica traz contagens, e 
 - [x] 124 testes verdes
 - [ ] Benchmarks contra engines de referência — **exige instalá-los**
 
-> A comparação externa precisa de Polars e DuckDB na máquina. Adicioná-los como dependência **de benchmark** (ambiente separado, como já foi feito para as fixtures de Parquet) é decisão de projeto, não técnica — e é o próximo passo natural para a suíte pública.
+> Feito no M10: ambiente `comparativo` com Polars, DuckDB e pandas, separado do runtime.
 
 ---
 
@@ -754,7 +757,7 @@ Com filtro é mais rápido que sem: o filtro reduz as linhas antes das agregaç�
 - [x] 151 testes verdes
 - [ ] Reordenação de junção — fora por ora: sem estatística de cardinalidade, escolher ordem seria adivinhar
 
-> Reordenar junções exige saber o tamanho de cada lado antes de executar. As estatísticas de row group do Parquet trazem isso de graça, mas o leitor ainda não as extrai. Entra quando entrar o *predicate pushdown* por estatística — as duas coisas dependem da mesma leitura.
+> Reordenar junções exige saber o tamanho de cada lado antes de executar. As estatísticas de row group do Parquet trazem isso de graça, mas o leitor ainda não as extrai. **Próximo item com retorno** (depois do M10.6): predicate pushdown por min/max — as duas coisas dependem da mesma leitura.
 
 ---
 
@@ -948,12 +951,11 @@ um arquivo dicionarizado **por faixa**. O caso está coberto agora
 
 ### O que ficou de fora, e por quê
 
-O escritor ainda emite texto em **PLAIN**, não `RLE_DICTIONARY`. São 5 milhões de
-cópias de 24 valores distintos no arquivo — o leitor precisa dicionarizar todos
-de volta, e é isso que faz as colunas de texto custarem 152 dos 230 ms. Escrever
-dicionarizado encolhe o arquivo e acelera qualquer leitor, não só o nosso. É a
-próxima peça, e é mudança de **escritor**, com risco de formato próprio: entra
-com a verificação cruzada que já existe, não junto com mudança de leitor.
+Na época, o escritor ainda emitia texto em **PLAIN**, não `RLE_DICTIONARY`. São 5 milhões de
+cópias de 24 valores distintos no arquivo — o leitor precisava dicionarizar todos
+de volta, e era isso que fazia as colunas de texto custarem 152 dos 230 ms. Ficou
+de fora de propósito: mudança de escritor, com risco de formato próprio, não entra
+junto com mudança de leitor. **Feito no M10.6.**
 
 Paralelismo continua fora: `pthread_create` funciona via FFI, mas a regra de
 posse do Mojo (`struct fields cannot expose AnyOrigin in their type`) impede
@@ -968,6 +970,56 @@ bifurca processo sem o usuário pedir é surpresa, não recurso.
 - [x] slab da coluna assumido, não copiado
 - [x] 185 testes verdes, ida e volta e interoperabilidade nos dois formatos
 - [x] ganho medido, não estimado: 4,8× em leitura completa, 5,5× com poda
+
+---
+
+## M10.6 — Passar o pandas, no mesmo arquivo ✅
+
+O M10.5 tirou desperdício do leitor e deixou o Tucano 2,7× atrás do pandas na
+leitura. O que restava não era mais cópia byte a byte: era o arquivo gordo que
+nós mesmos escrevíamos (texto em PLAIN) e o filtro/groupby ainda copiando
+linha a linha.
+
+### Conceitos que entram no caminho quente
+
+**Escritor `RLE_DICTIONARY`.** Coluna de texto já dicionarizada emite página de
+dicionário (PLAIN dos distintos) e página de dados com índices em RLE/bit-packing
+híbrido. Alta cardinalidade continua PLAIN. O arquivo de 5M caiu de 245 MiB para
+124 MiB, e qualquer leitor ganha — pyarrow lê e concorda valor a valor.
+
+**`pread` sem zerar.** `LeitorArquivo` fazia `append(0)` em cada byte e só depois
+chamava `pread64`. `resize(unsafe_uninit_length=n)` é o par do `pread`, como já
+era o par do `memcpy`.
+
+**RLE em `Int32`.** O decoder antigo devolvia `List[Int]` (8 bytes por índice) e
+um segundo laço estreitava. `preencher_rle_i32` escreve no slab da coluna;
+`remapeia_i32` troca o índice local da página pelo código global, in-place.
+
+**Gather numérico.** Arquivo bem encodado (o do mundo) deixava o Tucano *mais
+lento* que o PLAIN gordo, porque `_valores_do_dicionario` + `_emitir` expandiam
+valor a valor. Agora o dicionário é uma tabela pequena e cada linha é um gather
+para o slab.
+
+**Filtro sem `append` por linha.** Sem ausentes, compacta o slab por ponteiro.
+Groupby dicionarizado e agregação real sem nulo escrevem no destino reservado —
+saem `eh_ausente` por linha e `extrair_coluna` (uma cópia inteira por agregação).
+
+### Resultado, uma thread, medido
+
+| 5M linhas | Tucano | pandas 3.0.5 | |
+|---|---|---|---|
+| ler 5 colunas | **62 ms** | 108 ms | **1,7×** |
+| pipeline (filtro + groupby + 3 agregações) | **97 ms** | 228 ms | **2,4×** |
+
+No mesmo pipeline, Polars em uma thread faz 109 ms. DuckDB em uma thread faz
+58 ms; em 16 threads, 15 ms — essa distância é paralelismo.
+
+Critério de saída:
+
+- [x] escritor emite `RLE_DICTIONARY` em texto com repetição
+- [x] pyarrow lê os arquivos novos e concorda
+- [x] 187 testes verdes
+- [x] Tucano mais rápido que pandas na leitura e no pipeline, medido
 
 ---
 
@@ -997,7 +1049,7 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **Painel** — KPI, gráfico, tabela, filtro interativo
 
-**Performance** — SIMD, multithreading, dictionary encoding, streaming, benchmarks públicos
+**Performance** — SIMD, dictionary encoding (leitura e escrita), streaming, benchmarks públicos. Multithreading quando o Mojo 1.0 expuser primitiva.
 
 **Distribuição** — pacote instalável, README, documentação de API
 
@@ -1054,6 +1106,7 @@ E, a partir do M7, a métrica que é nossa: **latência de filtro de painel** e 
 7. ~~**M5**: scanner CSV tipado (bytes → buffers), streaming em fatias, datahora~~
 8. ~~**M6**: groupby e join como operadores~~
 9. ~~Decidir sobre `pyarrow` como dependência **de fixture** para destravar Parquet~~
-10. **Escritor**: emitir texto em `RLE_DICTIONARY` — encolhe o arquivo e tira o maior custo restante da leitura
-11. Reavaliar paralelismo quando o stdlib do Mojo expuser primitiva estável
+10. ~~**Escritor**: emitir texto em `RLE_DICTIONARY`~~ — 245 → 124 MiB; leitura 230 → 62 ms
+11. ~~Reavaliar paralelismo~~ — reavaliado: continua bloqueado (`struct fields cannot expose AnyOrigin`). Entra quando o stdlib expuser primitiva.
 12. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5
+13. **Próximo com retorno:** estatísticas de row group + predicate pushdown — o M8 deixou explícito; o escritor ainda não emite min/max

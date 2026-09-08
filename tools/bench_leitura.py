@@ -66,8 +66,8 @@ def main():
             ),
             (
                 "pandas",
-                menor(lambda: pd.read_parquet(caminho)),
-                menor(lambda: pd.read_parquet(caminho, columns=COLUNAS)),
+                menor(lambda: pd.read_parquet(caminho, use_threads=False)),
+                menor(lambda: pd.read_parquet(caminho, columns=COLUNAS, use_threads=False)),
             ),
             (
                 "pyarrow",

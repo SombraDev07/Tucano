@@ -27,6 +27,7 @@ if UMA_THREAD:
     os.environ["POLARS_MAX_THREADS"] = "1"
 
 import duckdb  # noqa: E402
+import pandas as pd  # noqa: E402
 import polars as pl  # noqa: E402
 
 ENTRADA = Path("/tmp/tucano_bench_comparativo.txt")
@@ -67,6 +68,18 @@ CONSULTA = """
 """
 
 
+def com_pandas(caminho):
+    df = pd.read_parquet(
+        caminho, columns=["valor", "peso", "grupo"], use_threads=False
+    )
+    f = df[df["valor"] > 1000.0]
+    return f.groupby("grupo", observed=True).agg(
+        soma_valor=("valor", "sum"),
+        media_peso=("peso", "mean"),
+        contagem=("valor", "size"),
+    )
+
+
 def com_duckdb(conexao, caminho):
     return conexao.sql(CONSULTA.format(c=caminho)).fetchall()
 
@@ -92,30 +105,40 @@ def main():
     print(f"bench comparativo — Parquet -> filtro -> agrupar -> 3 agregacoes  [{modo}]")
     print(
         f"menor de {REPETICOES} execucoes | polars usa {threads_polars} thread(s), "
-        f"duckdb usa {threads_duck} | o Tucano e sempre single-thread"
+        f"duckdb usa {threads_duck} | pandas e Tucano em uma thread"
     )
     print()
-    cab = f"{'linhas':>11} {'tucano':>9} {'em fluxo':>9} {'polars':>9} {'duckdb':>9}"
+    cab = (
+        f"{'linhas':>11} {'tucano':>9} {'em fluxo':>9} {'pandas':>9} "
+        f"{'polars':>9} {'duckdb':>9}"
+    )
     print(cab)
     print("-" * len(cab))
 
     for n, caminho, ns_tucano, ns_fluxo in linhas:
         ms_t = int(ns_tucano) / 1e6
         ms_f = int(ns_fluxo) / 1e6
+        ms_pd = menor(lambda: com_pandas(caminho)) / 1e6
         ms_p = menor(lambda: com_polars(caminho)) / 1e6
         ms_d = menor(lambda: com_duckdb(conexao, caminho)) / 1e6
         rotulo = f"{int(n):,}".replace(",", ".")
         print(
-            f"{rotulo:>11} {ms_t:>8.0f}m {ms_f:>8.0f}m {ms_p:>8.0f}m {ms_d:>8.0f}m"
+            f"{rotulo:>11} {ms_t:>8.0f}m {ms_f:>8.0f}m {ms_pd:>8.0f}m "
+            f"{ms_p:>8.0f}m {ms_d:>8.0f}m"
         )
+        veredito = "mais rapido que pandas" if ms_t < ms_pd else "atraso para pandas"
         print(
             f"{'':>11} {'':>9} {'':>9} "
+            f"{'x' + format(ms_t / ms_pd, '.2f'):>9} "
             f"{'x' + format(ms_t / ms_p, '.1f'):>9} "
-            f"{'x' + format(ms_t / ms_d, '.1f'):>9}   (atraso do Tucano)"
+            f"{'x' + format(ms_t / ms_d, '.1f'):>9}   ({veredito})"
         )
 
     print()
-    print("polars", pl.__version__, "| duckdb", duckdb.__version__)
+    print(
+        "polars", pl.__version__, "| duckdb", duckdb.__version__,
+        "| pandas", pd.__version__,
+    )
     return 0
 
 

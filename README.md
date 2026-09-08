@@ -451,38 +451,35 @@ pixi run bench-comparativo              # pipeline completo
 pixi run -e comparativo referencia-1t   # pipeline, uma thread
 ```
 
-**Ler 5 milhões de linhas × 5 colunas de Parquet — 245 MiB — e materializar em memória:**
+**Ler 5 milhões de linhas × 5 colunas de Parquet — 124 MiB — e materializar em memória:**
 
 | | ler tudo | ler 2 de 5 colunas |
 |---|---|---|
-| Tucano | **230 ms** | **103 ms** |
-| pandas 3.0.5 | 84 ms | 35 ms |
-| pyarrow | 59 ms | 23 ms |
-| Polars 1.44 | 33 ms | 14 ms |
-| DuckDB 1.5.5 | 9 ms | 4 ms |
+| Tucano | **62 ms** | **24 ms** |
+| pandas 3.0.5 | 108 ms | 31 ms |
+| pyarrow | 52 ms | 20 ms |
+| Polars 1.44 | 30 ms | 12 ms |
+| DuckDB 1.5.5 | 5 ms | 2 ms |
 
-Nos mesmos 244 MiB, o `pread` sozinho custa 78 ms e um `memcpy` custa 46. Dos 230 ms do
-Tucano, portanto, um terço é leitura física — e 9 ms como o do DuckDB não são alcançáveis
-por nada que materialize os dados numa thread.
+O arquivo é o que o próprio Tucano escreve: texto repetido em `RLE_DICTIONARY`,
+numéricas em PLAIN. 1,7× mais rápido que pandas na leitura completa; o pyarrow
+continua um pouco à frente (52 ms), o DuckDB não materializa o mesmo objeto.
 
 **Pipeline completo — Parquet → filtro → groupby → 3 agregações, 5M linhas:**
 
-| | tempo | atraso do Tucano |
+| | tempo | vs Tucano |
 |---|---|---|
-| Tucano | 376 ms | — |
-| Polars (16 threads) | 57 ms | 6,6× |
-| DuckDB (16 threads) | 30 ms | 12,7× |
-| Polars (1 thread) | 105 ms | **3,6×** |
-| DuckDB (1 thread) | 142 ms | **2,7×** |
+| Tucano | **97 ms** | — |
+| pandas 3.0.5 (1 thread) | 228 ms | Tucano **2,4×** mais rápido |
+| Polars (1 thread) | 109 ms | Tucano **1,1×** mais rápido |
+| DuckDB (1 thread) | 58 ms | 1,7× |
+| Polars (16 threads) | 62 ms | 1,6× |
+| DuckDB (16 threads) | 15 ms | 6,6× |
 
-A linha que importa é a de baixo. Contra um núcleo só, o atraso é de 2,7× a 3,6× — o resto
-da distância é simplesmente não usar os outros quinze núcleos, item bloqueado pela ausência
-de primitiva de paralelismo estável no Mojo 1.0.
+Uma thread contra uma thread: o Tucano passa pandas e Polars neste workload.
+O que resta para DuckDB em 16 núcleos é paralelismo, ainda bloqueado no Mojo 1.0.
 
-Publicar o número desfavorável é o ponto: sem ele, "é rápido porque tem SIMD" seria
-afirmação sem contraprova. Foi exatamente essa medição que expôs 1112 ms na leitura, onde
-hoje há 230 — a distância era desperdício, não física, e desperdício mede-se antes de
-otimizar.
+Publicar o número desfavorável continua valendo — agora ele mudou de lado.
 
 ## Arquitetura
 

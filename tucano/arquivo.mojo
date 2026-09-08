@@ -42,7 +42,12 @@ struct LeitorArquivo(Movable):
         self.tamanho = Int(fim)
 
     def ler(self, deslocamento: Int, quantidade: Int) raises -> List[UInt8]:
-        """Le `quantidade` bytes a partir de `deslocamento`. Nada mais."""
+        """Le `quantidade` bytes a partir de `deslocamento`. Nada mais.
+
+        O buffer nao e zerado: `pread` escreve por cima de cada byte. Zerar
+        antes era o mesmo desperdicio do `resize(n, 0)` no slab — 40 MiB de
+        zeros por coluna numerica, so para serem sobrescritos.
+        """
         if quantidade <= 0:
             return List[UInt8]()
         if deslocamento < 0 or deslocamento + quantidade > self.tamanho:
@@ -52,36 +57,19 @@ struct LeitorArquivo(Movable):
                 + self.caminho + "' (" + String(self.tamanho) + " bytes)"
             )
         var buffer = List[UInt8](capacity=quantidade)
-        for _ in range(quantidade):
-            buffer.append(UInt8(0))
+        buffer.resize(unsafe_uninit_length=quantidade)
 
         var lidos = 0
         while lidos < quantidade:
             var n = external_call["pread64", Int64](
                 self.fd,
-                buffer.unsafe_ptr(),
+                buffer.unsafe_ptr().unsafe_offset(lidos),
                 Int64(quantidade - lidos),
                 Int64(deslocamento + lidos),
             )
             if n <= 0:
                 raise Error("arquivo: leitura curta em '" + self.caminho + "'")
-            if Int(n) == quantidade - lidos:
-                break
-            # leitura parcial: o resto entra num buffer proprio e e emendado
-            var resto = List[UInt8](capacity=quantidade - lidos - Int(n))
-            for _ in range(quantidade - lidos - Int(n)):
-                resto.append(UInt8(0))
-            var m = external_call["pread64", Int64](
-                self.fd,
-                resto.unsafe_ptr(),
-                Int64(quantidade - lidos - Int(n)),
-                Int64(deslocamento + lidos + Int(n)),
-            )
-            if m <= 0:
-                raise Error("arquivo: leitura curta em '" + self.caminho + "'")
-            for i in range(Int(m)):
-                buffer[lidos + Int(n) + i] = resto[i]
-            lidos += Int(n) + Int(m)
+            lidos += Int(n)
         return buffer^
 
     def fechar(self):

@@ -584,6 +584,9 @@ struct VarreduraParquet(Movable):
 from .codecs import (
     descomprimir_snappy,
     decodificar_rle,
+    decodificar_rle_i32,
+    preencher_rle_i32,
+    remapeia_i32,
     rle_valor_unico,
     largura_de_bits,
     bits_para_real64,
@@ -592,7 +595,6 @@ from .codecs import (
 from std.collections import Dict
 from .coluna import Coluna
 from .buffer import StringStore
-from .codecs import bits_para_real64
 from .executor import coletar_linhas
 from .dtype import DType
 from .schema import Campo, Schema
@@ -855,8 +857,13 @@ def _ler_plain_denso(
 
 
 def _marcar_presentes(mut acc: _Acumulador, quantidade: Int):
-    """Estende a mascara de ausentes com `quantidade` presencas."""
-    acc.ausentes.resize(len(acc.ausentes) + quantidade, False)
+    """Estende a mascara de ausentes com `quantidade` presencas.
+
+    Se ainda nao apareceu nenhum nulo, nao materializa a lista: so conta.
+    """
+    if len(acc.ausentes) > 0:
+        acc.ausentes.resize(len(acc.ausentes) + quantidade, False)
+    acc.n += quantidade
 
 
 def _ler_plain(
@@ -1085,6 +1092,7 @@ struct _Acumulador(Copyable, Movable):
     var textos: List[String]
     var ausentes: List[Bool]
     var codigos: List[Int32]
+    var n: Int
 
     def __init__(out self):
         self.inteiros = List[Int64]()
@@ -1093,9 +1101,10 @@ struct _Acumulador(Copyable, Movable):
         self.textos = List[String]()
         self.ausentes = List[Bool]()
         self.codigos = List[Int32]()
+        self.n = 0
 
     def linhas(self) -> Int:
-        return len(self.ausentes)
+        return self.n
 
     def tomar_inteiros(mut self) -> List[Int64]:
         """Entrega o vetor de inteiros, deixando o acumulador vazio no lugar.
@@ -1118,6 +1127,11 @@ struct _Acumulador(Copyable, Movable):
         swap(fora, self.ausentes)
         return fora^
 
+    def tomar_codigos(mut self) -> List[Int32]:
+        var fora = List[Int32]()
+        swap(fora, self.codigos)
+        return fora^
+
     def reservar(mut self, linhas: Int, tipo_tucano: Int):
         """Reserva de uma vez o espaco da coluna inteira.
 
@@ -1129,7 +1143,9 @@ struct _Acumulador(Copyable, Movable):
         Reserva so a lista do tipo em questao: reservar as seis custaria 21
         bytes por linha para usar 8.
         """
-        self.ausentes.reserve(linhas)
+        # a mascara de ausentes so e materializada se aparecer um nulo.
+        # reservar 5 milhoes de Bool para descobrir que nenhum veio e
+        # escrever 5 MiB a toa.
         if tipo_tucano == DType.REAL:
             self.reais.reserve(linhas)
         elif tipo_tucano == DType.TEXTO:
@@ -1138,6 +1154,15 @@ struct _Acumulador(Copyable, Movable):
             self.logicos.reserve(linhas)
         else:
             self.inteiros.reserve(linhas)
+
+
+def _abrir_ausentes(mut acc: _Acumulador):
+    """Materializa a mascara so na primeira ausencia.
+
+    Ate la `ausentes` fica vazio e `_montar_coluna` usa `todos_presentes`.
+    """
+    if len(acc.ausentes) == 0 and acc.n > 0:
+        acc.ausentes.resize(acc.n, False)
 
 
 def _emitir(
@@ -1149,7 +1174,12 @@ def _emitir(
     escala: Int,
 ):
     """Acrescenta uma linha, com placeholder quando ausente."""
-    acc.ausentes.append(not presente)
+    if not presente:
+        _abrir_ausentes(acc)
+        acc.ausentes.append(True)
+    elif len(acc.ausentes) > 0:
+        acc.ausentes.append(False)
+    acc.n += 1
     if tipo_tucano == DType.LOGICO:
         if presente:
             acc.logicos.append(vals.logicos[idx])
@@ -1191,6 +1221,114 @@ def _valores_do_dicionario(
         else:
             out.inteiros.append(dic.inteiros[i])
     return out^
+
+
+def _espalhar_codigos(
+    mut acc: _Acumulador,
+    codigos: List[Int32],
+    niveis: List[Int],
+    def_max: Int,
+    n: Int,
+) raises:
+    """Espalha indices presentes nas linhas, preenchendo ausentes com 0."""
+    var prox = 0
+    for i in range(n):
+        var presente = niveis[i] == def_max
+        if not presente:
+            _abrir_ausentes(acc)
+            acc.ausentes.append(True)
+        elif len(acc.ausentes) > 0:
+            acc.ausentes.append(False)
+        if presente:
+            acc.codigos.append(codigos[prox])
+            prox += 1
+        else:
+            acc.codigos.append(Int32(0))
+        acc.n += 1
+
+
+def _gather_dicionario(
+    mut acc: _Acumulador,
+    dic: ValoresPagina,
+    indices: List[Int32],
+    niveis: List[Int],
+    def_max: Int,
+    n: Int,
+    todos: Bool,
+    tipo_tucano: Int,
+    escala: Int,
+) raises:
+    """Materializa valores de um dicionario numerico no acumulador.
+
+    O caminho antigo expandia `ValoresPagina` com um valor por linha e depois
+    `_emitir` de novo. Sao duas alocacoes e dois lacos onde basta um gather
+    sobre a tabela pequena do dicionario.
+    """
+    var n_dic = len(dic.inteiros)
+    if tipo_tucano == DType.REAL:
+        n_dic = len(dic.reais)
+
+    if todos:
+        if tipo_tucano == DType.REAL:
+            var antes = len(acc.reais)
+            acc.reais.resize(unsafe_uninit_length=antes + n)
+            var dest = acc.reais.unsafe_ptr().unsafe_offset(antes)
+            var tab = dic.reais.unsafe_ptr()
+            var idx = indices.unsafe_ptr()
+            for i in range(n):
+                var k = Int(idx.unsafe_load(i))
+                if k < 0 or k >= n_dic:
+                    raise Error("parquet: indice de dicionario fora da pagina")
+                dest.unsafe_store(i, tab.unsafe_load(k))
+        else:
+            var antes = len(acc.inteiros)
+            acc.inteiros.resize(unsafe_uninit_length=antes + n)
+            var dest = acc.inteiros.unsafe_ptr().unsafe_offset(antes)
+            var tab = dic.inteiros.unsafe_ptr()
+            var idx = indices.unsafe_ptr()
+            for i in range(n):
+                var k = Int(idx.unsafe_load(i))
+                if k < 0 or k >= n_dic:
+                    raise Error("parquet: indice de dicionario fora da pagina")
+                var v = tab.unsafe_load(k)
+                if escala > 0:
+                    v *= 1000
+                elif escala < 0:
+                    v //= 1000
+                dest.unsafe_store(i, v)
+        _marcar_presentes(acc, n)
+        return
+
+    var prox = 0
+    for i in range(n):
+        var presente = niveis[i] == def_max
+        var k = 0
+        if presente:
+            k = Int(indices[prox])
+            prox += 1
+            if k < 0 or k >= n_dic:
+                raise Error("parquet: indice de dicionario fora da pagina")
+        if tipo_tucano == DType.REAL:
+            if presente:
+                acc.reais.append(dic.reais[k])
+            else:
+                acc.reais.append(0.0)
+        else:
+            if presente:
+                var v = dic.inteiros[k]
+                if escala > 0:
+                    v *= 1000
+                elif escala < 0:
+                    v //= 1000
+                acc.inteiros.append(v)
+            else:
+                acc.inteiros.append(Int64(0))
+        if not presente:
+            _abrir_ausentes(acc)
+            acc.ausentes.append(True)
+        elif len(acc.ausentes) > 0:
+            acc.ausentes.append(False)
+        acc.n += 1
 
 
 def _faixas_byte_array(
@@ -1333,7 +1471,6 @@ def _ler_pedaco_coluna(
         # texto sempre passa pelo dicionario de bytes: nenhuma `String` por linha
         if tipo_tucano == DType.TEXTO:
             usou_dicionario = True
-            var codigos_pagina = List[Int32]()
             if (
                 cab.codificacao == PCodificacao.RLE_DICTIONARY
                 or cab.codificacao == PCodificacao.PLAIN_DICTIONARY
@@ -1342,26 +1479,46 @@ def _ler_pedaco_coluna(
                     raise Error(
                         "parquet: pagina com dicionario, mas sem pagina de dicionario"
                     )
+                if presentes <= 0:
+                    _espalhar_codigos(acc, List[Int32](), niveis, def_max, n)
+                    lidas += n
+                    pos = corpo + cab.tamanho_comprimido
+                    continue
                 var largura = Int(dados[inicio_valores])
-                var indices = decodificar_rle(
+                if todos:
+                    # indices RLE direto no slab da coluna, depois um remap
+                    # in-place (o mapa cabe em cache: 24 a 500 entradas)
+                    var antes = len(acc.codigos)
+                    acc.codigos.resize(unsafe_uninit_length=antes + n)
+                    if n > 0:
+                        preencher_rle_i32(
+                            dados, inicio_valores + 1, len(dados), largura, n,
+                            acc.codigos, antes,
+                        )
+                        remapeia_i32(acc.codigos, antes, n, mapa_dicionario)
+                    _marcar_presentes(acc, n)
+                    lidas += n
+                    pos = corpo + cab.tamanho_comprimido
+                    continue
+                var indices = decodificar_rle_i32(
                     dados, inicio_valores + 1, len(dados), largura, presentes
                 )
-                for k in indices:
-                    codigos_pagina.append(mapa_dicionario[k])
-            elif cab.codificacao == PCodificacao.PLAIN:
-                codigos_pagina = _faixas_byte_array(
-                    dados, inicio_valores, len(dados), presentes, dic
-                )
-            else:
+                remapeia_i32(indices, 0, presentes, mapa_dicionario)
+                _espalhar_codigos(acc, indices, niveis, def_max, n)
+                lidas += n
+                pos = corpo + cab.tamanho_comprimido
+                continue
+            if cab.codificacao != PCodificacao.PLAIN:
                 raise Error(
                     "parquet: codificacao "
                     + PCodificacao.nome(cab.codificacao)
                     + " ainda nao suportada em coluna de texto"
                 )
+            var codigos_pagina = _faixas_byte_array(
+                dados, inicio_valores, len(dados), presentes, dic
+            )
 
             if todos:
-                # sem ausentes a pagina inteira e um bloco de codigos: copiar em
-                # bloco poupa 2n verificacoes de capacidade do `append`
                 var antes = len(acc.codigos)
                 acc.codigos.resize(unsafe_uninit_length=antes + n)
                 if n > 0:
@@ -1370,17 +1527,9 @@ def _ler_pedaco_coluna(
                         codigos_pagina.unsafe_ptr().unsafe_bitcast[UInt8](),
                         n * 4,
                     )
-                acc.ausentes.resize(len(acc.ausentes) + n, False)
+                _marcar_presentes(acc, n)
             else:
-                var prox_texto = 0
-                for i in range(n):
-                    var presente = niveis[i] == def_max
-                    acc.ausentes.append(not presente)
-                    if presente:
-                        acc.codigos.append(codigos_pagina[prox_texto])
-                        prox_texto += 1
-                    else:
-                        acc.codigos.append(Int32(0))
+                _espalhar_codigos(acc, codigos_pagina, niveis, def_max, n)
             lidas += n
             pos = corpo + cab.tamanho_comprimido
             continue
@@ -1397,6 +1546,28 @@ def _ler_pedaco_coluna(
             lidas += n
             pos = corpo + cab.tamanho_comprimido
             continue
+
+        # dicionario numerico: indices -> gather no slab, sem `_emitir`
+        if (
+            cab.codificacao == PCodificacao.RLE_DICTIONARY
+            or cab.codificacao == PCodificacao.PLAIN_DICTIONARY
+        ):
+            if not tem_dicionario:
+                raise Error("parquet: pagina com dicionario, mas sem pagina de dicionario")
+            if meta.tipo != PTipo.BOOLEAN:
+                var indices = List[Int32]()
+                if presentes > 0:
+                    var largura = Int(dados[inicio_valores])
+                    indices = decodificar_rle_i32(
+                        dados, inicio_valores + 1, len(dados), largura, presentes
+                    )
+                _gather_dicionario(
+                    acc, dicionario, indices, niveis, def_max, n, todos,
+                    tipo_tucano, escala,
+                )
+                lidas += n
+                pos = corpo + cab.tamanho_comprimido
+                continue
 
         var vals = ValoresPagina()
         if (
@@ -1444,10 +1615,8 @@ def _montar_coluna(
     usou_dicionario: Bool,
 ) raises -> Coluna:
     if usou_dicionario:
-        # copia em vez de mover: os outros ramos ainda precisam de `acc` vivo.
-        # Sao dois vetores rasos — nada perto das `String` que este caminho evita.
         return Coluna.de_dicionario(
-            nome, dic.para_store(), acc.codigos.copy(), acc.ausentes.copy()
+            nome, dic.para_store(), acc.tomar_codigos(), acc.tomar_ausentes()
         )
     if tipo_tucano == DType.LOGICO:
         return Coluna.de_logicos(nome, acc.logicos^, acc.ausentes^)
@@ -1612,7 +1781,7 @@ def ler_parquet_grupo(
 # ------------------------------------------------------------------ escrita
 
 from .thrift import EscritorThrift
-from .codecs import codificar_rle, real64_para_bits
+from .codecs import codificar_rle, codificar_rle_i32, real64_para_bits
 
 
 def _tipo_parquet(codigo: Int) raises -> Int:
@@ -1702,8 +1871,41 @@ def _fatiar(col: Coluna, ini: Int, fim: Int) raises -> Coluna:
     return coletar_linhas(col, indices)
 
 
-def _pagina_de_coluna(col: Coluna) raises -> List[UInt8]:
-    """Pagina de dados V1: [tamanho dos niveis][niveis RLE][valores PLAIN]."""
+def _acrescentar(mut dest: List[UInt8], src: List[UInt8]):
+    """Copia `src` no fim de `dest` em bloco, sem zerar nem `append` por byte."""
+    var n = len(src)
+    if n <= 0:
+        return
+    var antes = len(dest)
+    dest.resize(unsafe_uninit_length=antes + n)
+    _ = external_call["memcpy", Int](
+        dest.unsafe_ptr().unsafe_offset(antes), src.unsafe_ptr(), n
+    )
+
+
+def _valores_plain_dicionario(col: Coluna) raises -> List[UInt8]:
+    """PLAIN dos valores distintos — o corpo da pagina de dicionario."""
+    var out = List[UInt8]()
+    var n = col.textos.tamanho()
+    for i in range(n):
+        var b = col.textos.get(i).as_bytes()
+        _por_le(out, len(b), 4)
+        for x in b:
+            out.append(x)
+    return out^
+
+
+def _indices_presentes(col: Coluna) raises -> List[Int32]:
+    var n = col.tamanho()
+    var out = List[Int32](capacity=n)
+    for i in range(n):
+        if not col.eh_ausente(i):
+            out.append(col.codigos[i])
+    return out^
+
+
+def _pagina_de_dados(col: Coluna, dicionarizada: Bool) raises -> List[UInt8]:
+    """Pagina de dados V1: [tamanho dos niveis][niveis RLE][valores]."""
     var n = col.tamanho()
     var niveis = List[UInt8](capacity=n)
     for i in range(n):
@@ -1715,14 +1917,23 @@ def _pagina_de_coluna(col: Coluna) raises -> List[UInt8]:
 
     var pagina = List[UInt8]()
     _por_le(pagina, len(niveis_rle), 4)
-    for b in niveis_rle:
-        pagina.append(b)
-    for b in _valores_plain(col):
-        pagina.append(b)
+    _acrescentar(pagina, niveis_rle)
+    if dicionarizada:
+        var idxs = _indices_presentes(col)
+        var largura = 0
+        var card = col.cardinalidade()
+        if card > 1:
+            largura = largura_de_bits(card - 1)
+        pagina.append(UInt8(largura))
+        _acrescentar(pagina, codificar_rle_i32(idxs, largura))
+    else:
+        _acrescentar(pagina, _valores_plain(col))
     return pagina^
 
 
-def _cabecalho_de_dados(num_valores: Int, tamanho: Int) raises -> List[UInt8]:
+def _cabecalho_de_dados(
+    num_valores: Int, tamanho: Int, encoding: Int
+) raises -> List[UInt8]:
     var w = EscritorThrift()
     w.entrar()
     w.campo_i32(1, PTipoPagina.DADOS)
@@ -1730,9 +1941,23 @@ def _cabecalho_de_dados(num_valores: Int, tamanho: Int) raises -> List[UInt8]:
     w.campo_i32(3, tamanho)
     w.campo_struct(5)
     w.campo_i32(1, num_valores)
-    w.campo_i32(2, PCodificacao.PLAIN)
+    w.campo_i32(2, encoding)
     w.campo_i32(3, PCodificacao.RLE)
     w.campo_i32(4, PCodificacao.RLE)
+    w.sair()
+    w.sair()
+    return w.finalizar()
+
+
+def _cabecalho_de_dicionario(num_valores: Int, tamanho: Int) raises -> List[UInt8]:
+    var w = EscritorThrift()
+    w.entrar()
+    w.campo_i32(1, PTipoPagina.DICIONARIO)
+    w.campo_i32(2, tamanho)
+    w.campo_i32(3, tamanho)
+    w.campo_struct(7)
+    w.campo_i32(1, num_valores)
+    w.campo_i32(2, PCodificacao.PLAIN)
     w.sair()
     w.sair()
     return w.finalizar()
@@ -1746,10 +1971,10 @@ def para_parquet_lote(
 ) raises:
     """Grava um lote de colunas em Parquet.
 
-    Subconjunto deliberado: PLAIN, sem compressao, um row group, todas as
-    colunas opcionais. E o subconjunto que qualquer leitor de Parquet aceita —
-    a verificacao e ler o arquivo de volta com outra implementacao, nao com
-    esta.
+    Texto ja dicionarizado sai em `RLE_DICTIONARY` (pagina de dicionario +
+    indices). O restante continua PLAIN, sem compressao. Qualquer leitor de
+    Parquet aceita os dois; a verificacao e ler o arquivo de volta com outra
+    implementacao, nao com esta.
     """
     var n_linhas = 0
     if len(colunas) > 0:
@@ -1782,17 +2007,36 @@ def para_parquet_lote(
     # offsets[g * n_col + c]
     var offsets = List[Int]()
     var tamanhos = List[Int]()
+    var offset_dados = List[Int]()
+    var offset_dic = List[Int]()
     for g in range(len(inicios)):
         for c in range(len(colunas)):
             var fatia = _fatiar(colunas[c], inicios[g], fins[g])
-            var pagina = _pagina_de_coluna(fatia)
-            var cabecalho = _cabecalho_de_dados(fins[g] - inicios[g], len(pagina))
-            offsets.append(len(arquivo))
-            tamanhos.append(len(cabecalho) + len(pagina))
-            for b in cabecalho:
-                arquivo.append(b)
-            for b in pagina:
-                arquivo.append(b)
+            var usa_dic = fatia.tipo == DType.TEXTO and fatia.eh_dicionarizada()
+            var inicio_chunk = len(arquivo)
+            var dic_off = -1
+            if usa_dic:
+                var corpo_dic = _valores_plain_dicionario(fatia)
+                var cab_dic = _cabecalho_de_dicionario(
+                    fatia.cardinalidade(), len(corpo_dic)
+                )
+                dic_off = len(arquivo)
+                _acrescentar(arquivo, cab_dic)
+                _acrescentar(arquivo, corpo_dic)
+            var encoding = PCodificacao.PLAIN
+            if usa_dic:
+                encoding = PCodificacao.RLE_DICTIONARY
+            var pagina = _pagina_de_dados(fatia, usa_dic)
+            var cabecalho = _cabecalho_de_dados(
+                fins[g] - inicios[g], len(pagina), encoding
+            )
+            var dados_off = len(arquivo)
+            _acrescentar(arquivo, cabecalho)
+            _acrescentar(arquivo, pagina)
+            offsets.append(inicio_chunk)
+            tamanhos.append(len(arquivo) - inicio_chunk)
+            offset_dados.append(dados_off)
+            offset_dic.append(dic_off)
 
     # ---- FileMetaData
     var w = EscritorThrift()
@@ -1843,16 +2087,24 @@ def para_parquet_lote(
             w.campo_i64(2, offsets[k])
             w.campo_struct(3)  # ColumnMetaData
             w.campo_i32(1, _tipo_parquet(colunas[c].tipo))
-            w.campo_lista(2, TTipo.I32, 2)
-            w.zigzag(PCodificacao.PLAIN)
-            w.zigzag(PCodificacao.RLE)
+            if offset_dic[k] >= 0:
+                w.campo_lista(2, TTipo.I32, 3)
+                w.zigzag(PCodificacao.PLAIN)
+                w.zigzag(PCodificacao.RLE)
+                w.zigzag(PCodificacao.RLE_DICTIONARY)
+            else:
+                w.campo_lista(2, TTipo.I32, 2)
+                w.zigzag(PCodificacao.PLAIN)
+                w.zigzag(PCodificacao.RLE)
             w.campo_lista(3, TTipo.BINARIO, 1)
             w.binario(nomes[c])
             w.campo_i32(4, PCompressao.NENHUMA)
             w.campo_i64(5, linhas_g)
             w.campo_i64(6, tamanhos[k])
             w.campo_i64(7, tamanhos[k])
-            w.campo_i64(9, offsets[k])
+            w.campo_i64(9, offset_dados[k])
+            if offset_dic[k] >= 0:
+                w.campo_i64(11, offset_dic[k])
             w.sair()  # ColumnMetaData
             w.sair()  # ColumnChunk
         w.campo_i64(2, total)

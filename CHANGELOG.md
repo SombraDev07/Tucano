@@ -3,6 +3,44 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.14.0] — Mais rapido que pandas, medido
+
+O escritor passou a emitir texto repetido em `RLE_DICTIONARY`, o leitor
+parou de zerar o que ia sobrescrever, e o filtro/groupby deixou de copiar
+linha a linha quando nao ha ausente. Mesmo arquivo, mesma pergunta, uma thread.
+
+| 5M linhas, uma thread | Tucano | pandas 3.0.5 | |
+|---|---|---|---|
+| ler 5 colunas (124 MiB) | **62 ms** | 108 ms | **1,7× mais rapido** |
+| ler 2 de 5 colunas | **24 ms** | 31 ms | **1,3×** |
+| Parquet → filtro → groupby → 3 agregacoes | **97 ms** | 228 ms | **2,4×** |
+
+No pipeline, uma thread do Tucano tambem fica a frente do Polars em uma thread
+(109 ms).
+
+### Adicionado
+
+- **Escritor emite `RLE_DICTIONARY` em coluna de texto ja dicionarizada.** Pagina
+  de dicionario + indices em RLE/bit-packing. Coluna de alta cardinalidade
+  continua PLAIN. Interoperabilidade verificada com pyarrow: o arquivo encolhe
+  (245 MiB → 124 MiB no banco de 5M) e qualquer leitor ganha, nao so o nosso.
+
+### Alterado
+
+- **`LeitorArquivo` nao zera o buffer antes do `pread`.** O mesmo defeito do
+  `resize(n, 0)`: 40 MiB de zeros por coluna numerica, so para serem
+  sobrescritos.
+- **Mascara de ausentes so materializa se aparecer um nulo.** O caso comum
+  (ninguem ausente) vai direto a `Validity.todos_presentes`.
+- **Indices de dicionario decodificam em `Int32`**, no slab, com remap in-place.
+  O `List[Int]` de 8 bytes por linha saiu do caminho quente.
+- **Dicionario numerico faz gather**, nao `_emitir` por linha. Arquivo bem
+  encodado (o do mundo) deixava de ser o caminho rapido.
+- **Filtro compacta o slab por ponteiro** quando nao ha ausente, em vez de
+  `append` + `eh_ausente` por linha.
+- **Groupby dicionarizado e agregacao real sem ausentes** escrevem no destino
+  reservado, sem `extrair_coluna` intermediario.
+
 ## [0.13.2] — Leitura de Parquet 4,8x mais rapida
 
 Sem mudanca de API. So desperdicio removido do caminho de leitura, depois que a

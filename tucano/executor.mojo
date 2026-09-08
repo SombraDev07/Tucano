@@ -605,17 +605,80 @@ def vetor_para_coluna(nome: String, v: Vetor, tipo: Int) raises -> Coluna:
 # ------------------------------------------------------------ operadores fisicos
 
 
+def _compactar_f64(
+    origem: List[Float64], keep: List[UInt8], n: Int, n_out: Int
+) -> List[Float64]:
+    var out = List[Float64](capacity=n_out)
+    if n_out <= 0:
+        return out^
+    out.resize(unsafe_uninit_length=n_out)
+    var dest = out.unsafe_ptr()
+    var src = origem.unsafe_ptr()
+    var k = keep.unsafe_ptr()
+    var j = 0
+    for i in range(n):
+        if k.unsafe_load(i) != 0:
+            dest.unsafe_store(j, src.unsafe_load(i))
+            j += 1
+    return out^
+
+
+def _compactar_i64(
+    origem: List[Int64], keep: List[UInt8], n: Int, n_out: Int
+) -> List[Int64]:
+    var out = List[Int64](capacity=n_out)
+    if n_out <= 0:
+        return out^
+    out.resize(unsafe_uninit_length=n_out)
+    var dest = out.unsafe_ptr()
+    var src = origem.unsafe_ptr()
+    var k = keep.unsafe_ptr()
+    var j = 0
+    for i in range(n):
+        if k.unsafe_load(i) != 0:
+            dest.unsafe_store(j, src.unsafe_load(i))
+            j += 1
+    return out^
+
+
+def _compactar_i32(
+    origem: List[Int32], keep: List[UInt8], n: Int, n_out: Int
+) -> List[Int32]:
+    var out = List[Int32](capacity=n_out)
+    if n_out <= 0:
+        return out^
+    out.resize(unsafe_uninit_length=n_out)
+    var dest = out.unsafe_ptr()
+    var src = origem.unsafe_ptr()
+    var k = keep.unsafe_ptr()
+    var j = 0
+    for i in range(n):
+        if k.unsafe_load(i) != 0:
+            dest.unsafe_store(j, src.unsafe_load(i))
+            j += 1
+    return out^
+
+
 def filtrar_coluna(col: Coluna, keep: List[UInt8]) raises -> Coluna:
-    var n_out = contar_marcados(keep, col.tamanho())
+    var n = col.tamanho()
+    var n_out = contar_marcados(keep, n)
+    var sem_na = not col.validity_bits.tem_ausentes()
 
     if (
         col.tipo == DType.INTEIRO
         or col.tipo == DType.DATA
         or col.tipo == DType.DATAHORA
     ):
+        if sem_na:
+            var vals = _compactar_i64(col.ints, keep, n, n_out)
+            if col.tipo == DType.DATA:
+                return Coluna.de_datas(col.nome, vals^, List[Bool]())
+            if col.tipo == DType.DATAHORA:
+                return Coluna.de_datahoras(col.nome, vals^, List[Bool]())
+            return Coluna.de_inteiros(col.nome, vals^, List[Bool]())
         var vals = List[Int64](capacity=n_out)
         var aus = List[Bool](capacity=n_out)
-        for i in range(col.tamanho()):
+        for i in range(n):
             if keep[i] != 0:
                 vals.append(col.ints[i])
                 aus.append(col.eh_ausente(i))
@@ -626,9 +689,13 @@ def filtrar_coluna(col: Coluna, keep: List[UInt8]) raises -> Coluna:
         return Coluna.de_inteiros(col.nome, vals^, aus^)
 
     if col.tipo == DType.REAL:
+        if sem_na:
+            return Coluna.de_reais(
+                col.nome, _compactar_f64(col.reals, keep, n, n_out), List[Bool]()
+            )
         var vals = List[Float64](capacity=n_out)
         var aus = List[Bool](capacity=n_out)
-        for i in range(col.tamanho()):
+        for i in range(n):
             if keep[i] != 0:
                 vals.append(col.reals[i])
                 aus.append(col.eh_ausente(i))
@@ -637,7 +704,7 @@ def filtrar_coluna(col: Coluna, keep: List[UInt8]) raises -> Coluna:
     if col.tipo == DType.LOGICO:
         var vals = List[Bool](capacity=n_out)
         var aus = List[Bool](capacity=n_out)
-        for i in range(col.tamanho()):
+        for i in range(n):
             if keep[i] != 0:
                 vals.append(Int(col.logics[i]) != 0)
                 aus.append(col.eh_ausente(i))
@@ -645,9 +712,16 @@ def filtrar_coluna(col: Coluna, keep: List[UInt8]) raises -> Coluna:
 
     # coluna dicionarizada: filtra os codigos e mantem o dicionario
     if col.eh_dicionarizada():
+        if sem_na:
+            return Coluna.de_dicionario(
+                col.nome,
+                col.textos.copy(),
+                _compactar_i32(col.codigos, keep, n, n_out),
+                List[Bool](),
+            )
         var codigos = List[Int32](capacity=n_out)
         var aus = List[Bool](capacity=n_out)
-        for i in range(col.tamanho()):
+        for i in range(n):
             if keep[i] != 0:
                 codigos.append(col.codigos[i])
                 aus.append(col.eh_ausente(i))
@@ -901,18 +975,29 @@ def calcular_grupos(cols: List[Coluna], chaves: List[String]) raises -> Grupos:
             # cardinalidade + 1 posicoes: a ultima recebe os ausentes
             var cardinalidade = col.cardinalidade()
             var mapa = List[Int](capacity=cardinalidade + 1)
-            for _ in range(cardinalidade + 1):
-                mapa.append(-1)
+            mapa.resize(cardinalidade + 1, -1)
+            ids.resize(unsafe_uninit_length=linhas)
+            var dest = ids.unsafe_ptr()
+            var codes = col.codigos.unsafe_ptr()
             var n_grupos = 0
-            for i in range(linhas):
-                var slot = cardinalidade
-                if not col.eh_ausente(i):
-                    slot = Int(col.codigos[i])
-                if mapa[slot] < 0:
-                    mapa[slot] = n_grupos
-                    representantes.append(i)
-                    n_grupos += 1
-                ids.append(mapa[slot])
+            if not col.validity_bits.tem_ausentes():
+                for i in range(linhas):
+                    var slot = Int(codes.unsafe_load(i))
+                    if mapa[slot] < 0:
+                        mapa[slot] = n_grupos
+                        representantes.append(i)
+                        n_grupos += 1
+                    dest.unsafe_store(i, mapa[slot])
+            else:
+                for i in range(linhas):
+                    var slot = cardinalidade
+                    if not col.eh_ausente(i):
+                        slot = Int(codes.unsafe_load(i))
+                    if mapa[slot] < 0:
+                        mapa[slot] = n_grupos
+                        representantes.append(i)
+                        n_grupos += 1
+                    dest.unsafe_store(i, mapa[slot])
             return Grupos(ids^, n_grupos, representantes^, "indexacao direta")
 
         if (
@@ -1031,10 +1116,12 @@ def _agregar_uma(
     # contagem de linhas: nao olha valor nenhum
     if a.tipo == TipoAgregacao.CONTAGEM and a.coluna == "":
         var vals = List[Int64](capacity=g)
-        for _ in range(g):
-            vals.append(Int64(0))
+        vals.resize(g, Int64(0))
+        var vp = vals.unsafe_ptr()
+        var gids = grupos.ids.unsafe_ptr()
         for i in range(linhas):
-            vals[grupos.ids[i]] += 1
+            var gid = gids.unsafe_load(i)
+            vp.unsafe_store(gid, vp.unsafe_load(gid) + Int64(1))
         return Coluna.de_inteiros(nome, vals^, List[Bool]())
 
     var pos = posicao_no_lote(cols, a.coluna)
@@ -1097,6 +1184,52 @@ def _agregar_uma(
                 if v > textos[gid]:
                     textos[gid] = v
         return Coluna.de_textos(nome, textos^, vazio^)
+
+    # numericas e temporais: coluna real sem ausentes nao precisa virar Vetor
+    if col.tipo == DType.REAL and not col.validity_bits.tem_ausentes():
+        if (
+            a.tipo == TipoAgregacao.SOMA
+            or a.tipo == TipoAgregacao.MEDIA
+            or a.tipo == TipoAgregacao.MINIMO
+            or a.tipo == TipoAgregacao.MAXIMO
+        ):
+            var acumulado = List[Float64](capacity=g)
+            var contagem = List[Int](capacity=g)
+            acumulado.resize(g, 0.0)
+            contagem.resize(g, 0)
+            var src = col.reals.unsafe_ptr()
+            var gids = grupos.ids.unsafe_ptr()
+            var accp = acumulado.unsafe_ptr()
+            var cntp = contagem.unsafe_ptr()
+            if a.tipo == TipoAgregacao.SOMA or a.tipo == TipoAgregacao.MEDIA:
+                for i in range(linhas):
+                    var gid = gids.unsafe_load(i)
+                    accp.unsafe_store(gid, accp.unsafe_load(gid) + src.unsafe_load(i))
+                    cntp.unsafe_store(gid, cntp.unsafe_load(gid) + 1)
+            elif a.tipo == TipoAgregacao.MINIMO:
+                for i in range(linhas):
+                    var gid = gids.unsafe_load(i)
+                    var x = src.unsafe_load(i)
+                    if cntp.unsafe_load(gid) == 0 or x < accp.unsafe_load(gid):
+                        accp.unsafe_store(gid, x)
+                    cntp.unsafe_store(gid, cntp.unsafe_load(gid) + 1)
+            else:
+                for i in range(linhas):
+                    var gid = gids.unsafe_load(i)
+                    var x = src.unsafe_load(i)
+                    if cntp.unsafe_load(gid) == 0 or x > accp.unsafe_load(gid):
+                        accp.unsafe_store(gid, x)
+                    cntp.unsafe_store(gid, cntp.unsafe_load(gid) + 1)
+            var saida_densa = Vetor.numerico(g)
+            for gi in range(g):
+                if contagem[gi] == 0:
+                    saida_densa.na[gi] = UInt8(1)
+                    continue
+                if a.tipo == TipoAgregacao.MEDIA:
+                    saida_densa.reais[gi] = acumulado[gi] / Float64(contagem[gi])
+                else:
+                    saida_densa.reais[gi] = acumulado[gi]
+            return vetor_para_coluna(nome, saida_densa, tipo_saida)
 
     # numericas e temporais passam pelo Vetor
     var v = extrair_coluna(cols, a.coluna)

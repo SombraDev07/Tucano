@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.13.2 — M0 → M10.5 fechados (paralelismo por thread à parte).
+Versão 0.14.0 — M0 → M10.5 fechados; leitura e pipeline acima do pandas (paralelismo por thread à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -448,10 +448,11 @@ Leitura cobre: esquema plano, `PLAIN` e `RLE_DICTIONARY`, níveis de definição
 páginas V1 e V2, sem compressão e Snappy, múltiplos row groups, tipos lógicos por
 `ConvertedType` e `LogicalType`.
 
-Escrita usa um subconjunto deliberado — `PLAIN`, sem compressão, um row group, colunas
-opcionais — que qualquer leitor aceita. A interoperabilidade é verificada lendo os arquivos
-gerados com outra implementação (`pixi run -e fixtures interop`), não com o próprio leitor:
-um leitor e um escritor com o mesmo mal-entendido concordam entre si.
+Escrita: `PLAIN` para numéricas e texto de alta cardinalidade; `RLE_DICTIONARY` para
+texto já dicionarizado. Sem compressão, colunas opcionais, um ou mais row groups.
+A interoperabilidade é verificada lendo os arquivos gerados com outra implementação
+(`pixi run -e fixtures interop`), não com o próprio leitor: um leitor e um escritor
+com o mesmo mal-entendido concordam entre si.
 
 ---
 

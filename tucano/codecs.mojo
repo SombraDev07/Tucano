@@ -261,6 +261,202 @@ def rle_valor_unico(
     return valor
 
 
+def _varint_para(mut out: List[UInt8], valor: Int):
+    var v = valor
+    while True:
+        var b = v & 0x7F
+        v >>= 7
+        if v != 0:
+            out.append(UInt8(b | 0x80))
+        else:
+            out.append(UInt8(b))
+            break
+
+
+def desempacotar_bits_i32(
+    bytes: List[UInt8], mut cursor: Cursor, quantidade: Int, largura: Int,
+    mut saida: List[Int32], inicio: Int, guardar: Int, fim: Int
+) raises:
+    """Como `desempacotar_bits`, mas escreve `Int32` a partir de `inicio`.
+
+    Le `quantidade` valores (o grupo empacotado, com enchimento) e guarda so
+    os primeiros `guardar` — o restante e padding do ultimo grupo.
+    """
+    if largura == 0:
+        var dest = saida.unsafe_ptr().unsafe_offset(inicio)
+        for i in range(guardar):
+            dest.unsafe_store(i, Int32(0))
+        return
+    var necessarios = (quantidade * largura + 7) // 8
+    if cursor.pos + necessarios > fim:
+        raise Error("rle: fim inesperado no trecho empacotado")
+    var mascara = (1 << largura) - 1
+    var dest = saida.unsafe_ptr().unsafe_offset(inicio)
+    var origem = bytes.unsafe_ptr()
+    var pos = cursor.pos
+    var buffer = 0
+    var bits = 0
+    for i in range(quantidade):
+        while bits < largura:
+            buffer |= Int(origem.unsafe_load(pos)) << bits
+            pos += 1
+            bits += 8
+        if i < guardar:
+            dest.unsafe_store(i, Int32(buffer & mascara))
+        buffer >>= largura
+        bits -= largura
+    cursor.pos = pos
+
+
+def preencher_rle_i32(
+    bytes: List[UInt8], ini: Int, fim: Int, largura: Int, quantidade: Int,
+    mut saida: List[Int32], inicio: Int
+) raises:
+    """Decodifica RLE/bit-packing direto num `List[Int32]` ja dimensionado.
+
+    O caminho antigo devolvia `List[Int]` — 8 bytes por indice, o dobro do
+    codigo de dicionario, e ainda pedia um segundo laco para estreitar. Aqui o
+    indice ja nasce no tipo em que a coluna o guarda.
+    """
+    if quantidade <= 0:
+        return
+    if inicio < 0 or inicio + quantidade > len(saida):
+        raise Error("rle: destino nao comporta a quantidade pedida")
+    if largura == 0:
+        var dest = saida.unsafe_ptr().unsafe_offset(inicio)
+        for i in range(quantidade):
+            dest.unsafe_store(i, Int32(0))
+        return
+
+    var escrito = 0
+    var cursor = Cursor(ini)
+    var dest = saida.unsafe_ptr().unsafe_offset(inicio)
+
+    while escrito < quantidade:
+        if cursor.pos >= fim:
+            raise Error(
+                "rle: acabaram os bytes com " + String(escrito) + " de "
+                + String(quantidade) + " valores"
+            )
+        var cabecalho = _varint(bytes, cursor, fim)
+        if cabecalho & 1 == 1:
+            var grupos = cabecalho >> 1
+            var n = grupos * 8
+            var faltam = quantidade - escrito
+            var guardar = n
+            if guardar > faltam:
+                guardar = faltam
+            desempacotar_bits_i32(
+                bytes, cursor, n, largura, saida, inicio + escrito, guardar, fim
+            )
+            escrito += guardar
+        else:
+            var repeticoes = cabecalho >> 1
+            var bytes_valor = (largura + 7) // 8
+            var valor = 0
+            for i in range(bytes_valor):
+                if cursor.pos >= fim:
+                    raise Error("rle: fim inesperado no valor repetido")
+                valor |= Int(bytes[cursor.pos]) << (8 * i)
+                cursor.pos += 1
+            var faltam = quantidade - escrito
+            if repeticoes > faltam:
+                repeticoes = faltam
+            var v = Int32(valor)
+            for i in range(repeticoes):
+                dest.unsafe_store(escrito + i, v)
+            escrito += repeticoes
+
+
+def decodificar_rle_i32(
+    bytes: List[UInt8], ini: Int, fim: Int, largura: Int, quantidade: Int
+) raises -> List[Int32]:
+    var out = List[Int32](capacity=quantidade)
+    if quantidade > 0:
+        out.resize(unsafe_uninit_length=quantidade)
+        preencher_rle_i32(bytes, ini, fim, largura, quantidade, out, 0)
+    return out^
+
+
+def remapeia_i32(
+    mut v: List[Int32], inicio: Int, quantidade: Int, mapa: List[Int32]
+) raises:
+    """Troca indice local da pagina pelo codigo global, no proprio vetor."""
+    if quantidade <= 0:
+        return
+    var p = v.unsafe_ptr().unsafe_offset(inicio)
+    var m = mapa.unsafe_ptr()
+    var n_mapa = len(mapa)
+    for i in range(quantidade):
+        var k = Int(p.unsafe_load(i))
+        if k < 0 or k >= n_mapa:
+            raise Error("parquet: indice de dicionario fora do mapa")
+        p.unsafe_store(i, m.unsafe_load(k))
+
+
+def _empacota_8(
+    valores: List[Int32], ini: Int, n_vals: Int, largura: Int, mut out: List[UInt8]
+):
+    """Empacota exatamente 8 valores (faltantes viram 0), LSB primeiro."""
+    if largura <= 0:
+        return
+    var mascara = (1 << largura) - 1
+    var buffer = 0
+    var bits = 0
+    var n = len(valores)
+    for k in range(8):
+        var v = 0
+        if k < n_vals and ini + k < n:
+            v = Int(valores[ini + k]) & mascara
+        buffer |= v << bits
+        bits += largura
+        while bits >= 8:
+            out.append(UInt8(buffer & 0xFF))
+            buffer >>= 8
+            bits -= 8
+    if bits > 0:
+        out.append(UInt8(buffer & 0xFF))
+
+
+def codificar_rle_i32(valores: List[Int32], largura: Int) -> List[UInt8]:
+    """RLE/bit-packing hibrido de indices de dicionario.
+
+    Trecho repetido de 8 ou mais vira RLE; o resto vai em grupos de 8
+    empacotados. So RLE (o encoder antigo de niveis) em `i % 24` geraria um
+    trecho por linha — o bit-packing e o que deixa o arquivo pequeno.
+    """
+    var out = List[UInt8]()
+    var n = len(valores)
+    if n == 0:
+        return out^
+    if largura == 0:
+        _varint_para(out, n << 1)
+        return out^
+
+    var bytes_valor = (largura + 7) // 8
+    var i = 0
+    while i < n:
+        var valor = valores[i]
+        var fim = i + 1
+        while fim < n and valores[fim] == valor:
+            fim += 1
+        var repeticoes = fim - i
+        if repeticoes >= 8:
+            _varint_para(out, repeticoes << 1)
+            for k in range(bytes_valor):
+                out.append(UInt8((Int(valor) >> (8 * k)) & 0xFF))
+            i = fim
+        else:
+            var restam = n - i
+            var neste = 8
+            if restam < 8:
+                neste = restam
+            _varint_para(out, (1 << 1) | 1)
+            _empacota_8(valores, i, neste, largura, out)
+            i += 8
+    return out^
+
+
 def codificar_rle(valores: List[UInt8], largura: Int) -> List[UInt8]:
     """Codifica em trechos RLE, agrupando iguais consecutivos.
 
