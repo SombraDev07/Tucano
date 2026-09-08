@@ -24,11 +24,23 @@ from tucano import (
     eh_data_iso,
     data_para_texto,
     sugerir_nome,
+    ler_csv_tipado,
+    LeitorCSV,
+    lit_datahora,
+    hora,
+    minuto,
+    segundo,
+    parse_datahora_iso,
+    datahora_para_texto,
+    eh_datahora_iso,
+    civil_de_micros,
+    micros_desde_epoch,
     Vetor,
     Etapa,
     TipoEtapa,
     Consulta,
 )
+from tucano.scanner import escanear, parse_float, parse_int, para_texto, eh_datahora
 from tucano.kernels import (
     add_f64,
     mul_f64,
@@ -802,6 +814,242 @@ def test_m4_reducoes_batem_com_escalar() raises:
     var c = Coluna.de_reais("x", vals^, aus^)
     assert_equal(c.soma(), esperado)
     assert_equal(c.media(), esperado / Float64(c.contar_validos()))
+
+
+# ------------------------------------------------------------------ M5
+
+
+def _bytes(t: String) -> List[UInt8]:
+    var out = List[UInt8]()
+    for b in t.as_bytes():
+        out.append(b)
+    return out^
+
+
+def test_m5_scanner_marca_campos_sem_alocar() raises:
+    var b = _bytes("a,b,c\n1,2,3\n")
+    var c = escanear(b, UInt8(44))
+    assert_equal(c.n_linhas, 2)
+    assert_equal(c.n_cols, 3)
+    assert_equal(para_texto(b, c.inicio[c.indice(1, 2)], c.fim[c.indice(1, 2)], False), "3")
+
+
+def test_m5_scanner_aspas_rfc4180() raises:
+    var t = ler_csv("tests/fixtures/citado.csv")
+    assert_equal(t.linhas(), 3)
+    assert_equal(t.colunas(), 3)
+    # delimitador dentro do campo citado
+    assert_equal(t.pegar("nome").texto_em(0), "Silva, João")
+    # aspas escapadas
+    assert_equal(t.pegar("obs").texto_em(0), 'diz "oi"')
+    # quebra de linha dentro do campo
+    assert_equal(t.pegar("obs").texto_em(1), "linha um\nlinha dois")
+    # campo citado vazio conta como ausente
+    assert_true(t.pegar("nome").eh_ausente(2))
+    assert_equal(t.pegar("valor").texto_em(1), "20.25")
+
+
+def test_m5_scanner_aspas_nao_fechadas_erra() raises:
+    var b = _bytes('a\n"sem fim\n')
+    var pegou = False
+    try:
+        _ = escanear(b, UInt8(44))
+    except e:
+        pegou = True
+        assert_true("aspas" in String(e))
+    assert_true(pegou)
+
+
+def test_m5_parse_numerico_exato() raises:
+    var ok = False
+    var b = _bytes("1800.5")
+    assert_equal(parse_float(b, 0, 6, ok), 1800.5)
+    assert_true(ok)
+
+    var neg = _bytes("-42")
+    ok = False
+    assert_equal(Int(parse_int(neg, 0, 3, ok)), -42)
+    assert_true(ok)
+
+    # nao inteiro
+    var f = _bytes("3.5")
+    ok = False
+    _ = parse_int(f, 0, 3, ok)
+    assert_false(ok)
+
+    # notacao cientifica cai no fallback e ainda funciona
+    var e = _bytes("1.5e3")
+    ok = False
+    assert_equal(parse_float(e, 0, 5, ok), 1500.0)
+    assert_true(ok)
+
+
+def test_m5_csv_valores_batem_exatamente() raises:
+    """O parser rapido tem de dar o mesmo que o caminho de referencia."""
+    var t = ler_csv("tests/fixtures/pessoas.csv")
+    assert_equal(t.pegar("salario").texto_em(0), "2000.0")
+    assert_equal(t.pegar("salario").texto_em(3), "1800.5")
+    assert_equal(t.soma("salario"), 8800.5)
+
+
+def test_m5_schema_explicito() raises:
+    var campos = List[Campo]()
+    campos.append(Campo("idade", DType.real()))
+    campos.append(Campo("salario", DType.real()))
+    campos.append(Campo("cidade", DType.texto()))
+    campos.append(Campo("ativo", DType.logico()))
+    var t = ler_csv_tipado("tests/fixtures/pessoas.csv", Schema(campos^))
+    # idade seria inferida como inteiro; o schema manda
+    assert_equal(t.dtype_de("idade").codigo, DType.REAL)
+    assert_equal(t.pegar("idade").texto_em(0), "25.0")
+
+
+def test_m5_schema_com_tamanho_errado_erra() raises:
+    var campos = List[Campo]()
+    campos.append(Campo("idade", DType.inteiro()))
+    var pegou = False
+    try:
+        _ = ler_csv_tipado("tests/fixtures/pessoas.csv", Schema(campos^))
+    except e:
+        pegou = True
+        assert_true("schema tem" in String(e))
+    assert_true(pegou)
+
+
+def test_m5_leitor_em_fatias() raises:
+    var leitor = LeitorCSV("tests/fixtures/vendas.csv")
+    assert_equal(leitor.total_linhas(), 5)
+    assert_equal(leitor.schema().tamanho(), 3)
+    assert_false(leitor.fim())
+
+    var a = leitor.proximo(2)
+    assert_equal(a.linhas(), 2)
+    assert_equal(a.pegar("cidade").texto_em(0), "SP")
+    assert_equal(leitor.restantes(), 3)
+
+    var b = leitor.proximo(2)
+    assert_equal(b.linhas(), 2)
+    var c = leitor.proximo(10)  # pede mais do que sobra
+    assert_equal(c.linhas(), 1)
+    assert_true(leitor.fim())
+
+    var pegou = False
+    try:
+        _ = leitor.proximo(1)
+    except:
+        pegou = True
+    assert_true(pegou)
+
+
+def test_m5_nrows_e_pular() raises:
+    var duas = ler_csv("tests/fixtures/vendas.csv", nrows=2)
+    assert_equal(duas.linhas(), 2)
+    assert_equal(duas.pegar("cidade").texto_em(1), "RJ")
+
+    # pular descarta linhas fisicas antes do cabecalho contar
+    var sem_cabecalho = ler_csv(
+        "tests/fixtures/vendas.csv", tem_cabecalho=False, pular=1
+    )
+    assert_equal(sem_cabecalho.linhas(), 5)
+    assert_equal(sem_cabecalho.dtype_de("col0").codigo, DType.DATA)
+
+
+def test_m5_datahora_parse_e_render() raises:
+    var m = parse_datahora_iso("2024-01-15T10:30:00")
+    assert_equal(datahora_para_texto(m), "2024-01-15T10:30:00")
+    var c = civil_de_micros(m)
+    assert_equal(c.ano, 2024)
+    assert_equal(c.hora, 10)
+    assert_equal(c.minuto, 30)
+
+    # fracao de segundo e Z final
+    var f = parse_datahora_iso("2024-02-29T23:59:59.500000Z")
+    assert_equal(datahora_para_texto(f), "2024-02-29T23:59:59.500000")
+
+    # antes da epoch: divisao de piso tem de estar certa
+    var antes = parse_datahora_iso("1969-12-31T23:59:59")
+    assert_equal(antes, -1_000_000)
+    assert_equal(datahora_para_texto(antes), "1969-12-31T23:59:59")
+
+    assert_equal(micros_desde_epoch(1970, 1, 1, 0, 0, 0), 0)
+    assert_false(eh_datahora_iso("2024-01-15"))
+    assert_false(eh_datahora_iso("2024-01-15T25:00:00"))
+
+
+def test_m5_csv_infere_datahora() raises:
+    var t = ler_csv("tests/fixtures/eventos.csv")
+    assert_equal(t.dtype_de("quando").codigo, DType.DATAHORA)
+    assert_equal(t.dtype_de("quando").nome(), "datahora")
+    assert_true(t.dtype_de("quando").eh_temporal())
+    assert_false(t.dtype_de("quando").eh_numerico())
+    assert_equal(t.pegar("quando").texto_em(0), "2024-01-15T08:30:00")
+    assert_equal(t.pegar("quando").micros_em(0), parse_datahora_iso("2024-01-15T08:30:00"))
+
+
+def test_m5_extratores_de_hora() raises:
+    var t = ler_csv("tests/fixtures/eventos.csv")
+    var h = t.com_coluna("h", hora(coluna("quando"))).coletar()
+    assert_equal(h.pegar("h").texto_em(0), "8")
+    assert_equal(h.pegar("h").texto_em(1), "14")
+    var m = t.com_coluna("m", minuto(coluna("quando"))).coletar()
+    assert_equal(m.pegar("m").texto_em(1), "5")
+    var s = t.com_coluna("s", segundo(coluna("quando"))).coletar()
+    assert_equal(s.pegar("s").texto_em(1), "30")
+
+
+def test_m5_ano_mes_funcionam_em_datahora() raises:
+    """A unidade viaja no Vetor: `mes()` serve para data e para datahora."""
+    var t = ler_csv("tests/fixtures/eventos.csv")
+    var out = t.com_coluna("m", mes(coluna("quando"))).coletar()
+    assert_equal(out.pegar("m").texto_em(0), "1")
+    assert_equal(out.pegar("m").texto_em(2), "2")
+    assert_equal(out.dtype_de("m").codigo, DType.INTEIRO)
+
+
+def test_m5_hora_em_coluna_data_erra() raises:
+    var t = ler_csv("tests/fixtures/vendas.csv")
+    var pegou = False
+    try:
+        _ = t.com_coluna("h", hora(coluna("data"))).coletar()
+    except e:
+        pegou = True
+        assert_true("datahora" in String(e))
+    assert_true(pegou)
+
+
+def test_m5_filtro_por_datahora() raises:
+    var t = ler_csv("tests/fixtures/eventos.csv")
+    var out = t.onde(coluna("quando").ge(lit_datahora("2024-02-01T00:00:00"))).coletar()
+    assert_equal(out.linhas(), 2)
+    assert_equal(out.pegar("id").texto_em(0), "3")
+
+
+def test_m5_datahora_no_plano() raises:
+    var e = coluna("quando").ge(lit_datahora("2024-02-01T00:00:00"))
+    assert_equal(
+        e.descrever(), '(coluna(quando) >= lit_datahora("2024-02-01T00:00:00"))'
+    )
+
+
+def test_m5_para_csv_cita_quando_precisa() raises:
+    var original = ler_csv("tests/fixtures/citado.csv")
+    var saida = "tests/fixtures/_saida_citado.csv"
+    para_csv(original, saida)
+    var de_novo = ler_csv(saida)
+    assert_equal(de_novo.linhas(), original.linhas())
+    assert_equal(de_novo.pegar("nome").texto_em(0), "Silva, João")
+    assert_equal(de_novo.pegar("obs").texto_em(0), 'diz "oi"')
+    assert_equal(de_novo.pegar("obs").texto_em(1), "linha um\nlinha dois")
+
+
+def test_m5_datahora_redondo_no_csv() raises:
+    var original = ler_csv("tests/fixtures/eventos.csv")
+    var saida = "tests/fixtures/_saida_eventos.csv"
+    para_csv(original, saida)
+    var de_novo = ler_csv(saida)
+    assert_equal(de_novo.dtype_de("quando").codigo, DType.DATAHORA)
+    assert_equal(de_novo.pegar("quando").texto_em(2), "2024-02-20T23:59:59.500000")
+    assert_equal(de_novo.pegar("valor").contar_ausentes(), 1)
 
 
 def main() raises:

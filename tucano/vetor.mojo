@@ -12,11 +12,24 @@ AVX2.
 from .kernels import contar_marcados
 
 
+struct Unidade:
+    """O que os numeros do vetor significam.
+
+    Sem isso o executor precisaria do esquema para saber se `ano(x)` recebeu
+    dias ou microssegundos. O vetor carrega a informacao consigo.
+    """
+
+    comptime NUMERO = 0
+    comptime DIAS = 1
+    comptime MICROS = 2
+
+
 struct Vetor(Copyable, Movable):
     """Coluna intermediaria: numerica (`reais`) ou textual (`textos`)."""
 
     var n: Int
     var eh_texto: Bool
+    var unidade: Int
     var reais: List[Float64]
     var textos: List[String]
     var na: List[UInt8]
@@ -28,9 +41,11 @@ struct Vetor(Copyable, Movable):
         var reais: List[Float64],
         var textos: List[String],
         var na: List[UInt8],
+        unidade: Int = Unidade.NUMERO,
     ):
         self.n = n
         self.eh_texto = eh_texto
+        self.unidade = unidade
         self.reais = reais^
         self.textos = textos^
         self.na = na^

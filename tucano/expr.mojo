@@ -3,7 +3,12 @@
 M2.5 acrescenta literais e extratores de data (`lit_data`, `ano`, `mes`, `dia`).
 """
 
-from .datas import parse_data_iso, data_para_texto
+from .datas import (
+    parse_data_iso,
+    data_para_texto,
+    parse_datahora_iso,
+    datahora_para_texto,
+)
 
 
 struct Kind:
@@ -13,6 +18,7 @@ struct Kind:
     comptime LIT_STR = 4
     comptime LIT_BOOL = 5
     comptime LIT_DATA = 6
+    comptime LIT_DATAHORA = 7
     comptime GT = 10
     comptime GE = 11
     comptime LT = 12
@@ -29,6 +35,9 @@ struct Kind:
     comptime ANO = 40
     comptime MES = 41
     comptime DIA = 42
+    comptime HORA = 43
+    comptime MINUTO = 44
+    comptime SEGUNDO = 45
 
 
 struct ExprNode(Copyable, Movable):
@@ -196,6 +205,30 @@ def lit_data(texto: String) raises -> Expr:
     return e^
 
 
+def lit_datahora(texto: String) raises -> Expr:
+    """Literal de datahora a partir de ISO-8601."""
+    var e = Expr()
+    var n = ExprNode(Kind.LIT_DATAHORA)
+    n.i64 = Int64(parse_datahora_iso(texto))
+    e.root = e.add(n^)
+    return e^
+
+
+def hora(var alvo: Expr) -> Expr:
+    """Extrai a hora (0..23) de uma expressao de datahora."""
+    return _unario(Kind.HORA, alvo^)
+
+
+def minuto(var alvo: Expr) -> Expr:
+    """Extrai o minuto (0..59) de uma expressao de datahora."""
+    return _unario(Kind.MINUTO, alvo^)
+
+
+def segundo(var alvo: Expr) -> Expr:
+    """Extrai o segundo (0..59) de uma expressao de datahora."""
+    return _unario(Kind.SEGUNDO, alvo^)
+
+
 def ano(var alvo: Expr) -> Expr:
     """Extrai o ano de uma expressao de data."""
     return _unario(Kind.ANO, alvo^)
@@ -228,6 +261,8 @@ def _descrever_no(expr: Expr, i: Int) raises -> String:
         return "lit(False)"
     if k == Kind.LIT_DATA:
         return 'lit_data("' + data_para_texto(Int(n.i64)) + '")'
+    if k == Kind.LIT_DATAHORA:
+        return 'lit_datahora("' + datahora_para_texto(Int(n.i64)) + '")'
     if k == Kind.NOT:
         return "nao(" + _descrever_no(expr, n.left) + ")"
     if k == Kind.ANO:
@@ -236,6 +271,12 @@ def _descrever_no(expr: Expr, i: Int) raises -> String:
         return "mes(" + _descrever_no(expr, n.left) + ")"
     if k == Kind.DIA:
         return "dia(" + _descrever_no(expr, n.left) + ")"
+    if k == Kind.HORA:
+        return "hora(" + _descrever_no(expr, n.left) + ")"
+    if k == Kind.MINUTO:
+        return "minuto(" + _descrever_no(expr, n.left) + ")"
+    if k == Kind.SEGUNDO:
+        return "segundo(" + _descrever_no(expr, n.left) + ")"
     var op = String("?")
     if k == Kind.GT:
         op = ">"

@@ -16,6 +16,7 @@ struct DType(Copyable, Movable, Equatable, ImplicitlyCopyable):
     comptime LOGICO = 2
     comptime TEXTO = 3
     comptime DATA = 4
+    comptime DATAHORA = 5
 
     @staticmethod
     def inteiro() -> Self:
@@ -37,6 +38,10 @@ struct DType(Copyable, Movable, Equatable, ImplicitlyCopyable):
     def data() -> Self:
         return Self(Self.DATA)
 
+    @staticmethod
+    def datahora() -> Self:
+        return Self(Self.DATAHORA)
+
     def nome(self) raises -> String:
         if self.codigo == Self.INTEIRO:
             return "inteiro"
@@ -48,6 +53,8 @@ struct DType(Copyable, Movable, Equatable, ImplicitlyCopyable):
             return "texto"
         if self.codigo == Self.DATA:
             return "data"
+        if self.codigo == Self.DATAHORA:
+            return "datahora"
         raise Error("dtype desconhecido: " + String(self.codigo))
 
     def eh_numerico(self) -> Bool:
@@ -55,4 +62,4 @@ struct DType(Copyable, Movable, Equatable, ImplicitlyCopyable):
         return self.codigo == Self.INTEIRO or self.codigo == Self.REAL
 
     def eh_temporal(self) -> Bool:
-        return self.codigo == Self.DATA
+        return self.codigo == Self.DATA or self.codigo == Self.DATAHORA

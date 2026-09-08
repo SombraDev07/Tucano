@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia de pandas e semântica de banco de dados.
 
-Versão 0.5.0 — M0, M1, M2, M2.5, M3 e M4 fechados (paralelismo à parte).
+Versão 0.6.0 — M0 → M5 fechados (paralelismo e Parquet à parte).
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -81,7 +81,7 @@ Sem `std.python`, sem pandas, sem pyarrow como runtime.
 
 | Tipo | Papel |
 |------|--------|
-| `DType` | Tipo lógico: `inteiro`, `real`, `logico`, `texto`, `data` |
+| `DType` | Tipo lógico: `inteiro`, `real`, `logico`, `texto`, `data`, `datahora` |
 | `Campo` / `Schema` / `Shape` | Metadados |
 | `Validity` | Bitmap de ausentes (1 bit/linha, 1 = ausente) |
 | `StringStore` | `offsets[n+1]` + bytes UTF-8 |
@@ -94,11 +94,14 @@ Sem `std.python`, sem pandas, sem pyarrow como runtime.
 | `Tri` | Verdadeiro / Falso / Desconhecido |
 | `DataCivil` | Ano/mês/dia do calendário |
 
-`data` guarda **dias desde 1970-01-01** no slab de inteiros: fisicamente um inteiro, com o
-tipo lógico decidindo a semântica (mesma separação do Arrow com Date32). `eh_numerico()` é
-falso para data, então `soma()` de datas é erro; `eh_temporal()` é verdadeiro.
+`data` guarda **dias desde 1970-01-01** e `datahora` guarda **microssegundos desde
+1970-01-01T00:00:00**, ambos no slab de inteiros: fisicamente inteiros, com o tipo lógico
+decidindo a semântica (mesma separação que o Arrow faz com Date32 e Timestamp[us]).
+`eh_numerico()` é falso para os dois — `soma()` de datas é erro; `eh_temporal()` é
+verdadeiro.
 
-Planejado: `DType.datahora` em M5.
+**Fuso horário não é suportado.** Um `Z` final é aceito e ignorado; deslocamentos
+(`+03:00`) são recusados.
 
 ---
 
@@ -223,8 +226,15 @@ Materializam sozinhos: `mostrar`, `primeiras`, `linhas`, `colunas`, `shape`, `sc
 
 - Construtores: `coluna(nome)`, `lit(f64)`, `lit_int`, `lit_texto`, `lit_bool`, `lit_data`
 - Fluente: `.gt .ge .lt .le .eq .ne .e .ou .nao`, aritmética `.mais .menos .vezes .sobre`
-- Datas: `ano(expr)`, `mes(expr)`, `dia(expr)`; uma coluna de data compara como dias, então
+- Datas: `ano(expr)`, `mes(expr)`, `dia(expr)` — servem para `data` e `datahora`
+- Horas: `hora(expr)`, `minuto(expr)`, `segundo(expr)` — exigem `datahora`
+- Literais temporais: `lit_data("2024-02-01")`, `lit_datahora("2024-02-01T10:30:00")`
+- Uma coluna temporal compara como número, então
   `coluna("data").ge(lit_data("2024-02-01"))` funciona direto
+
+O `Vetor` carrega a **unidade** dos seus números (número puro / dias / microssegundos), o
+que permite `ano()` servir aos dois tipos e faz `coluna("data").mais(lit_int(7))` continuar
+sendo uma data.
 - Operadores nativos (`>`, `&`) ainda não disponíveis — a arena evita o ciclo de tipo que
   `List[Expr]` criaria
 - `descrever()` imprime o plano; `coletar()` materializa
@@ -261,14 +271,27 @@ pública.
 
 ## I/O
 
-- `ler_csv(caminho, delimitador, tem_cabecalho, nrows)` — infere tipo por coluna, incluindo
-  datas AAAA-MM-DD (o formato ISO nunca colide com inteiro, real ou lógico)
-- `para_csv(tabela, caminho, delimitador)`
+| Entrada | Papel |
+|---|---|
+| `ler_csv(caminho, delimitador, tem_cabecalho, nrows, pular)` | infere o tipo de cada coluna |
+| `ler_csv_tipado(caminho, schema, …)` | schema explícito, sem inferência |
+| `LeitorCSV(caminho, …)` | leitura em fatias: `.proximo(n)`, `.fim()`, `.restantes()` |
+| `para_csv(tabela, caminho, delimitador)` | escrita |
 
-Limitação atual: campos com o delimitador dentro de aspas não são suportados.
+O caminho é `bytes → scanner → parser tipado → buffers`: nenhuma `String` por célula. Só
+coluna de texto materializa `String`, e no fim.
 
-Ambos são **ponte** sobre o Memory Engine. Em M5 viram scanner tipado
-`bytes → parser → buffers`, sem `String.split`, com schema explícito opcional.
+**Aspas RFC 4180** na leitura e na escrita: delimitador e quebra de linha dentro do campo,
+`""` como aspa escapada. `para_csv` cita automaticamente o que precisar.
+
+**Inferência**: `datahora` → `data` → `logico` → `inteiro` → `real` → `texto`. Formatos ISO
+nunca colidem com número ou booleano.
+
+**Ponto flutuante**: decimal simples é convertido direto dos bytes como `mantissa / 10^k`,
+correto por construção enquanto mantissa ≤ 2⁵³ e casas ≤ 22; fora disso cai no `atof`.
+
+`LeitorCSV` limita a **tabela materializada**, não a memória total: o buffer de bytes e as
+fronteiras dos campos ficam inteiros em memória. E/S com memória limitada é M9.
 
 ---
 
@@ -284,5 +307,7 @@ Ambos são **ponte** sobre o Memory Engine. Em M5 viram scanner tipado
 | `lazy()` | mantido por compatibilidade — prefira `tabela.onde(...)` |
 | `tucano.executor` / `tucano.vetor` / `tucano.plano` | **interno**, muda no M6 |
 | `tucano.kernels` | **interno**, contrato de ponteiros pode mudar |
+| `tucano.scanner` | **interno** |
+| `ler_csv_tipado` / `LeitorCSV` | estável |
 | `ler_csv` / `para_csv` | assinatura estável, implementação refeita em M5 |
 | Layout interno de `Coluna` / `buffer.mojo` | **não é API pública** |

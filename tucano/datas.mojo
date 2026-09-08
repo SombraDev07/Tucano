@@ -147,3 +147,157 @@ def data_para_texto(dias: Int) -> String:
     """Dias desde a epoch -> AAAA-MM-DD."""
     var c = civil_de_dias(dias)
     return _pad(c.ano, 4) + "-" + _pad(c.mes, 2) + "-" + _pad(c.dia, 2)
+
+
+# --------------------------------------------------------------- datahora
+#
+# `DType.DATAHORA` guarda **microssegundos desde 1970-01-01T00:00:00**, em Int64
+# — mesma unidade que o Arrow usa por padrao em timestamp. A faixa cobre cerca
+# de +/- 292 mil anos.
+#
+# Fuso horario nao e suportado: um `Z` final e aceito e ignorado, e deslocamentos
+# (`+03:00`) sao recusados. Meia implementacao de fuso e pior que nenhuma —
+# entra quando houver tipo com fuso de verdade.
+
+comptime MICROS_POR_SEGUNDO = 1_000_000
+comptime SEGUNDOS_POR_DIA = 86400
+comptime MICROS_POR_DIA = MICROS_POR_SEGUNDO * SEGUNDOS_POR_DIA
+
+
+@fieldwise_init
+struct DataHoraCivil(Copyable, Movable, ImplicitlyCopyable):
+    """Ano/mes/dia/hora/minuto/segundo/microssegundo."""
+
+    var ano: Int
+    var mes: Int
+    var dia: Int
+    var hora: Int
+    var minuto: Int
+    var segundo: Int
+    var micro: Int
+
+
+def micros_desde_epoch(
+    ano: Int, mes: Int, dia: Int, hora: Int, minuto: Int, segundo: Int, micro: Int = 0
+) -> Int:
+    var dias = dias_desde_epoch(ano, mes, dia)
+    var seg = dias * SEGUNDOS_POR_DIA + hora * 3600 + minuto * 60 + segundo
+    return seg * MICROS_POR_SEGUNDO + micro
+
+
+def dias_de_micros(micros: Int) -> Int:
+    """Dia do calendario, com divisao de piso (correta antes da epoch)."""
+    return micros // MICROS_POR_DIA
+
+
+def civil_de_micros(micros: Int) -> DataHoraCivil:
+    var dias = dias_de_micros(micros)
+    var resto = micros - dias * MICROS_POR_DIA
+    var c = civil_de_dias(dias)
+    var seg = resto // MICROS_POR_SEGUNDO
+    return DataHoraCivil(
+        c.ano,
+        c.mes,
+        c.dia,
+        seg // 3600,
+        (seg // 60) % 60,
+        seg % 60,
+        resto - seg * MICROS_POR_SEGUNDO,
+    )
+
+
+def _forma_datahora(t: String) -> Bool:
+    """AAAA-MM-DDTHH:MM:SS, com `.f+` opcional e `Z` opcional. `T` ou espaco."""
+    var n = t.byte_length()
+    if n < 19:
+        return False
+    var b = t.as_bytes()
+    for i in range(10):
+        if i == 4 or i == 7:
+            if b[i] != UInt8(45):
+                return False
+        elif b[i] < UInt8(48) or b[i] > UInt8(57):
+            return False
+    if b[10] != UInt8(84) and b[10] != UInt8(116) and b[10] != UInt8(32):
+        return False
+    for i in range(11, 19):
+        if i == 13 or i == 16:
+            if b[i] != UInt8(58):
+                return False
+        elif b[i] < UInt8(48) or b[i] > UInt8(57):
+            return False
+
+    var i = 19
+    if i < n and b[i] == UInt8(46):
+        i += 1
+        var digitos = 0
+        while i < n and b[i] >= UInt8(48) and b[i] <= UInt8(57):
+            i += 1
+            digitos += 1
+        if digitos == 0:
+            return False
+    if i < n and (b[i] == UInt8(90) or b[i] == UInt8(122)):
+        i += 1
+    return i == n
+
+
+def eh_datahora_iso(texto: String) -> Bool:
+    var t = String(texto.strip())
+    if not _forma_datahora(t):
+        return False
+    var mes = _digitos(t, 5, 7)
+    if mes < 1 or mes > 12:
+        return False
+    var ano = _digitos(t, 0, 4)
+    var dia = _digitos(t, 8, 10)
+    if dia < 1 or dia > dias_no_mes(ano, mes):
+        return False
+    if _digitos(t, 11, 13) > 23:
+        return False
+    if _digitos(t, 14, 16) > 59:
+        return False
+    return _digitos(t, 17, 19) <= 60
+
+
+def parse_datahora_iso(texto: String) raises -> Int:
+    """AAAA-MM-DDTHH:MM:SS[.f+][Z] -> microssegundos desde a epoch."""
+    var t = String(texto.strip())
+    if not eh_datahora_iso(t):
+        raise Error(
+            "datahora invalida (esperado AAAA-MM-DDTHH:MM:SS[.f][Z]): '" + texto + "'"
+        )
+    var micro = 0
+    if t.byte_length() > 19:
+        var b = t.as_bytes()
+        if b[19] == UInt8(46):
+            var i = 20
+            var casas = 0
+            while i < t.byte_length() and b[i] >= UInt8(48) and b[i] <= UInt8(57):
+                if casas < 6:
+                    micro = micro * 10 + (Int(b[i]) - 48)
+                    casas += 1
+                i += 1
+            while casas < 6:
+                micro *= 10
+                casas += 1
+    return micros_desde_epoch(
+        _digitos(t, 0, 4),
+        _digitos(t, 5, 7),
+        _digitos(t, 8, 10),
+        _digitos(t, 11, 13),
+        _digitos(t, 14, 16),
+        _digitos(t, 17, 19),
+        micro,
+    )
+
+
+def datahora_para_texto(micros: Int) -> String:
+    """Microssegundos -> AAAA-MM-DDTHH:MM:SS, com fracao so quando existir."""
+    var c = civil_de_micros(micros)
+    var s = (
+        _pad(c.ano, 4) + "-" + _pad(c.mes, 2) + "-" + _pad(c.dia, 2)
+        + "T" + _pad(c.hora, 2) + ":" + _pad(c.minuto, 2) + ":" + _pad(c.segundo, 2)
+    )
+    if c.micro != 0:
+        s += "." + _pad(c.micro, 6)
+    return s

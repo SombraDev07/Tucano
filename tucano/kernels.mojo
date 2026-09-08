@@ -568,3 +568,45 @@ def calendario_f64(comp: Int, dias: List[Float64], mut out: List[Float64], n: In
         var d = SIMD[DType.int32, 1](Int32(Int(pd.unsafe_load(i))))
         po.unsafe_store(i, Float64(Int(_civil_simd[1](d, comp))))
         i += 1
+
+
+comptime _MICROS_POR_DIA = Int64(86_400_000_000)
+
+
+def micros_para_dias(micros: List[Float64], mut out: List[Float64], n: Int):
+    """Microssegundos -> dias desde a epoca, com divisao de piso.
+
+    Escalar: divisao em Int64 nao vetoriza no AVX2 (falta a multiplicacao
+    64x64->128 que substitui a divisao por constante).
+    """
+    var pm = micros.unsafe_ptr()
+    var po = out.unsafe_ptr()
+    for i in range(n):
+        var v = Int64(Int(pm.unsafe_load(i)))
+        var d = v // _MICROS_POR_DIA
+        if v < 0 and d * _MICROS_POR_DIA != v:
+            d -= 1
+        po.unsafe_store(i, Float64(Int(d)))
+
+
+comptime _COMP_HORA = 0
+comptime _COMP_MINUTO = 1
+comptime _COMP_SEGUNDO = 2
+
+
+def relogio_f64(comp: Int, micros: List[Float64], mut out: List[Float64], n: Int):
+    """Extrai hora/minuto/segundo de microssegundos desde a epoca."""
+    var pm = micros.unsafe_ptr()
+    var po = out.unsafe_ptr()
+    for i in range(n):
+        var v = Int64(Int(pm.unsafe_load(i)))
+        var d = v // _MICROS_POR_DIA
+        if v < 0 and d * _MICROS_POR_DIA != v:
+            d -= 1
+        var seg = Int((v - d * _MICROS_POR_DIA) // 1_000_000)
+        if comp == _COMP_HORA:
+            po.unsafe_store(i, Float64(seg // 3600))
+        elif comp == _COMP_MINUTO:
+            po.unsafe_store(i, Float64((seg // 60) % 60))
+        else:
+            po.unsafe_store(i, Float64(seg % 60))

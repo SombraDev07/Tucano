@@ -15,7 +15,7 @@ from .erros import erro_coluna
 from .schema import Campo
 from .expr import Expr, ExprNode, Kind
 from .dtype import DType
-from .vetor import Vetor
+from .vetor import Vetor, Unidade
 from .plano import Etapa, TipoEtapa
 from .kernels import (
     contar_marcados,
@@ -31,6 +31,8 @@ from .kernels import (
     tri_nao,
     tri_para_keep,
     calendario_f64,
+    micros_para_dias,
+    relogio_f64,
 )
 
 
@@ -199,10 +201,18 @@ def extrair_coluna(cols: List[Coluna], nome: String) raises -> Vetor:
 
     var v = Vetor.numerico(n)
     v.na = na^
+    if col.tipo == DType.DATA:
+        v.unidade = Unidade.DIAS
+    elif col.tipo == DType.DATAHORA:
+        v.unidade = Unidade.MICROS
     if col.tipo == DType.REAL:
         for i in range(n):
             v.reais[i] = col.reals[i]
-    elif col.tipo == DType.INTEIRO or col.tipo == DType.DATA:
+    elif (
+        col.tipo == DType.INTEIRO
+        or col.tipo == DType.DATA
+        or col.tipo == DType.DATAHORA
+    ):
         for i in range(n):
             v.reais[i] = Float64(col.ints[i])
     elif col.tipo == DType.LOGICO:
@@ -232,8 +242,16 @@ def _avaliar_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> Vetor:
         return extrair_coluna(cols, n.nome)
     if k == Kind.LIT_F64:
         return Vetor.constante_numerica(linhas, n.f64)
-    if k == Kind.LIT_I64 or k == Kind.LIT_DATA:
+    if k == Kind.LIT_I64:
         return Vetor.constante_numerica(linhas, Float64(n.i64))
+    if k == Kind.LIT_DATA:
+        var vd = Vetor.constante_numerica(linhas, Float64(n.i64))
+        vd.unidade = Unidade.DIAS
+        return vd^
+    if k == Kind.LIT_DATAHORA:
+        var vh = Vetor.constante_numerica(linhas, Float64(n.i64))
+        vh.unidade = Unidade.MICROS
+        return vh^
     if k == Kind.LIT_BOOL:
         if n.logico:
             return Vetor.constante_numerica(linhas, 1.0)
@@ -252,7 +270,30 @@ def _avaliar_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> Vetor:
             comp = 1
         elif k == Kind.DIA:
             comp = 2
-        calendario_f64(comp, filho.reais, v.reais, linhas)
+        if filho.unidade == Unidade.MICROS:
+            # datahora: converte para dias antes do kernel de calendario
+            var dias = Vetor.numerico(linhas)
+            micros_para_dias(filho.reais, dias.reais, linhas)
+            calendario_f64(comp, dias.reais, v.reais, linhas)
+        else:
+            calendario_f64(comp, filho.reais, v.reais, linhas)
+        return v^
+
+    if k == Kind.HORA or k == Kind.MINUTO or k == Kind.SEGUNDO:
+        var filho = _avaliar_no(expr, n.left, cols)
+        if filho.eh_texto or filho.unidade != Unidade.MICROS:
+            raise Error(
+                "hora/minuto/segundo exigem expressao de datahora"
+                + " (uma coluna `data` nao guarda hora)"
+            )
+        var v = Vetor.numerico(linhas)
+        v.na = filho.na.copy()
+        var comp = 0  # hora
+        if k == Kind.MINUTO:
+            comp = 1
+        elif k == Kind.SEGUNDO:
+            comp = 2
+        relogio_f64(comp, filho.reais, v.reais, linhas)
         return v^
 
     if k == Kind.ADD or k == Kind.SUB or k == Kind.MUL or k == Kind.DIV:
@@ -261,6 +302,11 @@ def _avaliar_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> Vetor:
         if a.eh_texto or b.eh_texto:
             raise Error("aritmetica sobre coluna de texto")
         var v = Vetor.numerico(linhas)
+        # `data + 7` continua sendo data: a unidade acompanha o operando que a tem
+        if a.unidade != Unidade.NUMERO:
+            v.unidade = a.unidade
+        else:
+            v.unidade = b.unidade
         # kernel SIMD, com o tipo da operacao decidido FORA do laco
         ou_na(a.na, b.na, v.na, linhas)
         if k == Kind.ADD:
@@ -469,8 +515,8 @@ def _cmp_texto(k: Int, a: String, b: String) -> Bool:
 
 
 def _num_kind(codigo: Int) -> Int:
-    """Data conta como inteiro para efeito de aritmetica (dias)."""
-    if codigo == DType.DATA:
+    """Data e datahora contam como inteiro na aritmetica (dias / microssegundos)."""
+    if codigo == DType.DATA or codigo == DType.DATAHORA:
         return DType.INTEIRO
     return codigo
 
@@ -491,11 +537,20 @@ def tipo_resultado(expr: Expr, idx: Int, esq: List[Campo]) raises -> Int:
         return DType.INTEIRO
     if k == Kind.LIT_DATA:
         return DType.DATA
+    if k == Kind.LIT_DATAHORA:
+        return DType.DATAHORA
     if k == Kind.LIT_STR:
         return DType.TEXTO
     if k == Kind.LIT_BOOL:
         return DType.LOGICO
-    if k == Kind.ANO or k == Kind.MES or k == Kind.DIA:
+    if (
+        k == Kind.ANO
+        or k == Kind.MES
+        or k == Kind.DIA
+        or k == Kind.HORA
+        or k == Kind.MINUTO
+        or k == Kind.SEGUNDO
+    ):
         return DType.INTEIRO
     if k == Kind.DIV:
         return DType.REAL
@@ -520,12 +575,14 @@ def vetor_para_coluna(nome: String, v: Vetor, tipo: Int) raises -> Coluna:
             textos.append(v.textos[i])
         return Coluna.de_textos(nome, textos^, aus^)
 
-    if tipo == DType.INTEIRO or tipo == DType.DATA:
+    if tipo == DType.INTEIRO or tipo == DType.DATA or tipo == DType.DATAHORA:
         var vals = List[Int64](capacity=n)
         for i in range(n):
             vals.append(Int64(Int(v.reais[i])))
         if tipo == DType.DATA:
             return Coluna.de_datas(nome, vals^, aus^)
+        if tipo == DType.DATAHORA:
+            return Coluna.de_datahoras(nome, vals^, aus^)
         return Coluna.de_inteiros(nome, vals^, aus^)
 
     if tipo == DType.LOGICO:
@@ -546,7 +603,11 @@ def vetor_para_coluna(nome: String, v: Vetor, tipo: Int) raises -> Coluna:
 def filtrar_coluna(col: Coluna, keep: List[UInt8]) raises -> Coluna:
     var n_out = contar_marcados(keep, col.tamanho())
 
-    if col.tipo == DType.INTEIRO or col.tipo == DType.DATA:
+    if (
+        col.tipo == DType.INTEIRO
+        or col.tipo == DType.DATA
+        or col.tipo == DType.DATAHORA
+    ):
         var vals = List[Int64](capacity=n_out)
         var aus = List[Bool](capacity=n_out)
         for i in range(col.tamanho()):
@@ -555,6 +616,8 @@ def filtrar_coluna(col: Coluna, keep: List[UInt8]) raises -> Coluna:
                 aus.append(col.eh_ausente(i))
         if col.tipo == DType.DATA:
             return Coluna.de_datas(col.nome, vals^, aus^)
+        if col.tipo == DType.DATAHORA:
+            return Coluna.de_datahoras(col.nome, vals^, aus^)
         return Coluna.de_inteiros(col.nome, vals^, aus^)
 
     if col.tipo == DType.REAL:
@@ -705,6 +768,11 @@ def avisos_expr(
                 + "cardinalidade alta demais ou coluna derivada)"
             )
         return
+    if k == Kind.HORA or k == Kind.MINUTO or k == Kind.SEGUNDO:
+        saida.append(
+            "extrator de hora: caminho escalar (divisao em Int64 nao vetoriza no AVX2)"
+        )
+
     avisos_expr(expr, n.left, esq, cols, saida)
     avisos_expr(expr, n.right, esq, cols, saida)
 

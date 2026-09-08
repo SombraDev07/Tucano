@@ -1,5 +1,10 @@
 from .dtype import DType
-from .datas import parse_data_iso, data_para_texto
+from .datas import (
+    parse_data_iso,
+    data_para_texto,
+    parse_datahora_iso,
+    datahora_para_texto,
+)
 from std.collections import Dict
 from .kernels import (
     soma_f64,
@@ -185,6 +190,43 @@ struct Coluna(Copyable, Movable):
         )
 
     @staticmethod
+    def de_datahoras(
+        nome: String, micros: List[Int64], ausentes: List[Bool] = List[Bool]()
+    ) raises -> Self:
+        """Coluna de datahora a partir de microssegundos desde a epoch."""
+        var n = len(micros)
+        _validar_ausentes(n, ausentes)
+        var val = Validity.todos_presentes(n)
+        if len(ausentes) != 0:
+            val = Validity.de_lista(ausentes)
+        return Self(
+            nome,
+            DType.DATAHORA,
+            n,
+            val^,
+            slab_int64(micros),
+            List[Float64](),
+            List[UInt8](),
+            StringStore.vazio(),
+            List[Int32](),
+        )
+
+    @staticmethod
+    def de_datahoras_texto(
+        nome: String, valores: List[String], ausentes: List[Bool] = List[Bool]()
+    ) raises -> Self:
+        """Coluna de datahora a partir de textos ISO-8601."""
+        var n = len(valores)
+        _validar_ausentes(n, ausentes)
+        var micros = List[Int64](capacity=n)
+        for i in range(n):
+            if len(ausentes) != 0 and ausentes[i]:
+                micros.append(Int64(0))
+            else:
+                micros.append(Int64(parse_datahora_iso(valores[i])))
+        return Self.de_datahoras(nome, micros^, ausentes)
+
+    @staticmethod
     def de_datas_texto(
         nome: String, valores: List[String], ausentes: List[Bool] = List[Bool]()
     ) raises -> Self:
@@ -249,11 +291,23 @@ struct Coluna(Copyable, Movable):
             raise Error("operacao numerica exige coluna inteira ou real: " + self.nome)
 
     def _como_real(self, i: Int) raises -> Float64:
-        if self.tipo == DType.INTEIRO or self.tipo == DType.DATA:
+        if (
+            self.tipo == DType.INTEIRO
+            or self.tipo == DType.DATA
+            or self.tipo == DType.DATAHORA
+        ):
             return Float64(self.ints[i])
         if self.tipo == DType.REAL:
             return self.reals[i]
         raise Error("coluna nao numerica: " + self.nome)
+
+    def micros_em(self, i: Int) raises -> Int:
+        """Microssegundos desde a epoch de uma coluna de datahora."""
+        if self.tipo != DType.DATAHORA:
+            raise Error("coluna nao e de datahora: " + self.nome)
+        if i < 0 or i >= self.n:
+            raise Error("indice fora da coluna: " + self.nome)
+        return Int(self.ints[i])
 
     def dias_em(self, i: Int) raises -> Int:
         """Dias desde a epoch de uma coluna de data."""
@@ -355,6 +409,8 @@ struct Coluna(Copyable, Movable):
             return String(self.ints[i])
         if self.tipo == DType.DATA:
             return data_para_texto(Int(self.ints[i]))
+        if self.tipo == DType.DATAHORA:
+            return datahora_para_texto(Int(self.ints[i]))
         if self.tipo == DType.REAL:
             return String(self.reals[i])
         if self.tipo == DType.LOGICO:

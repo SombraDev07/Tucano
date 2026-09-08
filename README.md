@@ -49,6 +49,8 @@ o que for mais conveniente na hora.
   código de erro seco.
 - **Sem índice implícito** — nenhum alinhamento automático pelas costas. Tabelas se combinam
   por junção explícita.
+- **Leitura de CSV rápida e correta** — `bytes → scanner → parser tipado → buffers`, sem
+  alocar por célula. 715 ns/linha, com aspas RFC 4180 na leitura e na escrita.
 - **Zero Python** — sem interpretador, sem pontes, sem dependência de runtime.
 
 ## Instalação
@@ -94,7 +96,7 @@ def main() raises:
 
 ## Tipos
 
-`inteiro` · `real` · `logico` · `texto` · `data`
+`inteiro` · `real` · `logico` · `texto` · `data` · `datahora`
 
 ```mojo
 var idade = Coluna.de_inteiros("idade", [Int64(25), Int64(30)])
@@ -102,10 +104,14 @@ var valor = Coluna.de_reais("valor", [1200.0, 800.0])
 var ativo = Coluna.de_logicos("ativo", [True, False])
 var cidade = Coluna.de_textos("cidade", ["SP", "RJ"])
 var quando = Coluna.de_datas_texto("quando", ["2024-01-15", "2024-02-20"])
+var visto = Coluna.de_datahoras_texto("visto", ["2024-01-15T08:30:00"])
 ```
 
-Datas são dias desde 1970-01-01 sobre o slab de inteiros: fisicamente um inteiro, com o tipo
-lógico decidindo a semântica. Somar datas continua sendo erro.
+`data` são dias desde 1970-01-01; `datahora` são microssegundos desde a epoch. Ambos vivem
+no slab de inteiros — fisicamente inteiros, com o tipo lógico decidindo a semântica. Somar
+datas continua sendo erro.
+
+Fuso horário não é suportado: um `Z` final é aceito e ignorado, deslocamentos são recusados.
 
 ## API
 
@@ -138,8 +144,9 @@ coluna("data").ge(lit_data("2024-02-01"))
 | comparação | `.gt .ge .lt .le .eq .ne` |
 | booleanos | `.e .ou .nao` |
 | aritmética | `.mais .menos .vezes .sobre` |
-| datas | `ano() mes() dia()` |
-| literais | `lit lit_int lit_texto lit_bool lit_data` |
+| datas | `ano() mes() dia()` — servem para `data` e `datahora` |
+| horas | `hora() minuto() segundo()` — exigem `datahora` |
+| literais | `lit lit_int lit_texto lit_bool lit_data lit_datahora` |
 
 Operadores nativos (`>`, `&`) ainda não estão disponíveis: a árvore de expressão vive numa
 arena, o que evita o ciclo de tipo que uma lista recursiva criaria.
@@ -198,6 +205,26 @@ Antes de qualquer método novo, a pergunta é se já existe um jeito de fazer aq
 o novo é recusado. Bibliotecas de análise costumam crescer para centenas de métodos porque
 cada conveniência parecia inofensiva sozinha.
 
+## Leitura de arquivos
+
+```mojo
+ler_csv("vendas.csv")                       # infere o tipo de cada coluna
+ler_csv_tipado("vendas.csv", meu_schema)    # schema explícito, sem adivinhação
+ler_csv("vendas.csv", nrows=1000, pular=2)  # recorte
+para_csv(tabela, "saida.csv")               # cita o que precisar ser citado
+```
+
+Aspas RFC 4180 valem na leitura e na escrita: delimitador e quebra de linha dentro do campo,
+`""` como aspa escapada.
+
+Para não materializar a tabela inteira de uma vez:
+
+```mojo
+var leitor = LeitorCSV("grande.csv")
+while not leitor.fim():
+    processar(leitor.proximo(50_000))
+```
+
 ## Desempenho
 
 `pixi run bench-m4` compara cada kernel com o **laço escalar equivalente**, escrito no
@@ -214,8 +241,16 @@ próprio benchmark, sobre os mesmos dados. São medições, não afirmações (n
 O `a + b` fica em 1,29× por ser limitado por banda de memória: lê dois vetores e escreve um
 terceiro. A ALU não é o gargalo ali.
 
-`pixi run bench-m3` mostra que o executor escala linear — ns/linha praticamente constante de
-25 mil a 200 mil linhas.
+`pixi run bench-m5`, sobre leitura de CSV (200 mil linhas × 5 colunas):
+
+| | ns/linha | |
+|---|---|---|
+| `ler_csv` com inferência | **715** | 42 MiB/s |
+| `ler_csv_tipado` | **304** | 2,35× mais rápido que inferir |
+| `para_csv` | 365 | |
+
+E `pixi run bench-m3` mostra que o executor escala linear — ns/linha praticamente constante
+de 25 mil a 200 mil linhas.
 
 ## Arquitetura
 
@@ -244,18 +279,21 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Biblioteca instalável, tipo data | ✅ |
 | Execution engine coluna-a-coluna | ✅ |
 | Kernels SIMD e dictionary encoding | ✅ |
-| I/O tipado (CSV scanner, Parquet) | em andamento |
-| Agregação e junção | planejado |
+| I/O tipado: scanner CSV, datahora, leitura em fatias | ✅ |
+| Parquet | bloqueado — sem fixture para verificar |
+| Agregação e junção | próximo |
 | Painel de visualização | planejado |
 | Otimizador de consultas | planejado |
 | Execução out-of-core | planejado |
 | Interoperabilidade Arrow | planejado |
 
-60 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+78 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
-Paralelismo por thread está bloqueado: o stdlib do Mojo 1.0 não expõe uma primitiva de
-paralelismo de dados, e o runtime assíncrono cru não é utilizável para isso hoje.
+Dois itens estão bloqueados por causa externa, e o roadmap explica cada um: **paralelismo
+por thread** (o stdlib do Mojo 1.0 não expõe primitiva de paralelismo de dados) e
+**Parquet** (não há, nesta máquina, como gerar um arquivo real para verificar o leitor
+contra — e um parser de formato binário sem fixture não é código pronto).
 
 ## Desenvolvimento
 
@@ -265,6 +303,7 @@ pixi run exemplo   # exemplo executável
 pixi run bench     # benchmarks de fundação
 pixi run bench-m3  # escala do executor
 pixi run bench-m4  # SIMD contra o laço escalar
+pixi run bench-m5  # leitura de CSV
 pixi run build     # precompilar o pacote
 ```
 

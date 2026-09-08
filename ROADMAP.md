@@ -107,9 +107,9 @@ São três provas, em ordem de honestidade:
 
 ## Estado atual do código (honestidade)
 
-**M0, M1, M2, M2.5, M3 e M4 (parcial) fechados.** Próximo: **M5 — I/O + Streaming**. 60 testes verdes.
+**M0 → M5 fechados**, com duas exceções registradas. Próximo: **M6 — Aggregation + Join**. 78 testes verdes.
 
-O M4 entregou SIMD e dictionary encoding com ganhos medidos. **Paralelismo ficou bloqueado** por ausência de primitiva no stdlib do Mojo 1.0 — detalhes na seção do M4.
+Duas coisas ficaram de fora, ambas por bloqueio externo e não por escopo: **paralelismo por thread** (sem primitiva no stdlib do Mojo 1.0) e **Parquet** (sem como verificar contra arquivo real). Cada uma tem sua seção.
 
 | Peça | Status |
 |------|--------|
@@ -130,9 +130,14 @@ O M4 entregou SIMD e dictionary encoding com ganhos medidos. **Paralelismo ficou
 | Kernels SIMD (aritmética, comparação, reduções) | ✅ M4 |
 | Dictionary encoding automático em texto | ✅ M4 |
 | Kernel de calendário em Int32 | ✅ M4 |
+| Scanner CSV tipado (`bytes → buffers`) | ✅ M5 — 10,1× |
+| Aspas RFC 4180 na leitura e na escrita | ✅ M5 |
+| `ler_csv_tipado` (schema explícito) | ✅ M5 |
+| `LeitorCSV` (leitura em fatias) | ✅ M5 |
+| `DType.DATAHORA` + `hora`/`minuto`/`segundo` | ✅ M5 |
 | Paralelismo por chunk | ❌ **bloqueado** — sem primitiva no Mojo 1.0 |
-| Slab de data em Int32 | ❌ adiado para M5 |
-| `ler_csv` / `para_csv` | ponte — refazer em M5 |
+| Parquet | ❌ **bloqueado** — sem fixture para verificar |
+| Slab de data em Int32 | ❌ adiado para M6 |
 | Publicação em canal conda | ❌ exige canal próprio |
 | `DType.DATAHORA` | ❌ adiado para M5 |
 | Coluna derivada (`com_coluna`) | ❌ M3 |
@@ -159,8 +164,8 @@ O M4 entregou SIMD e dictionary encoding com ganhos medidos. **Paralelismo ficou
 | M2.5 | Biblioteca + Correções | crítica | ✅ feito | instalável, sem dívidas de fundação |
 | M3 | Execution Engine | crítica | ✅ feito | executor coluna-a-coluna |
 | M4 | SIMD (+ Parallel) | crítica | ✅ SIMD / ⛔ paralelo | kernels vetorizados |
-| **M5** | **I/O + Streaming** | **crítica** | **próximo** | scanner tipado + Parquet |
-| M6 | Aggregation + Join | crítica | não iniciado | group/join como operadores |
+| M5 | I/O + Streaming | crítica | ✅ CSV / ⛔ Parquet | scanner tipado, fatias, datahora |
+| **M6** | **Aggregation + Join** | **crítica** | **próximo** | group/join como operadores |
 | M7 | Painel | alta | não iniciado | dashboard nativo |
 | M8 | Optimizer | crítica | não iniciado | pushdown + folding + reorder |
 | M9 | Out-of-Core | alta | não iniciado | datasets > RAM |
@@ -420,16 +425,47 @@ retomar quando o stdlib expuser uma primitiva estável.
 
 ---
 
-## M5 — I/O + Streaming
+## M5 — I/O ✅ (Parquet ⛔ bloqueado)
 
-### CSV (refazer)
+### CSV: scanner tipado
 
-Não: arquivo → String → split → objetos.
-Sim: `bytes → scanner → typed parser → column buffers`.
+Não mais `arquivo → String → split → objetos`, que alocava uma `String` por célula **antes de saber o tipo dela**. Agora `bytes → scanner → parser tipado → buffers`: o arquivo é lido uma vez, o scanner marca as fronteiras dos campos (dois inteiros por célula, nenhuma alocação) e o parser escreve direto no slab da coluna. Texto só vira `String` no fim, e só em coluna de texto.
 
-Parser próprio em Mojo, paralelo quando fizer sentido. Inferência de tipo **com override explícito de schema** — o `read_csv` do pandas tem ~50 parâmetros porque a inferência nunca foi controlável.
+| Medição | Antes | Depois | |
+|---|---|---|---|
+| `ler_csv` (infere) | 7226 ns/linha | **715 ns/linha** | **10,1×** |
+| `ler_csv_tipado` | — | **304 ns/linha** | 2,35× vs. inferir |
+| `para_csv` | — | 365 ns/linha | |
 
-### Parquet (prioridade alta)
+Throughput de leitura: 42 MiB/s **com** inferência de tipo.
+
+**Aspas RFC 4180** entraram junto — delimitador e quebra de linha dentro do campo, `""` como aspa escapada — na leitura *e* na escrita. O leitor anterior não suportava; era uma limitação documentada que virava corrupção silenciosa em CSV real.
+
+**Parser de ponto flutuante:** decimal simples é convertido direto dos bytes como `mantissa / 10^k`. Com mantissa ≤ 2⁵³ e até 22 casas decimais, esse resultado é corretamente arredondado — idêntico ao de um parser completo. Fora dessa faixa (expoente, precisão extrema), cai no `atof`. O caminho rápido cobre praticamente todo CSV real sem abrir mão da exatidão.
+
+**Schema explícito** (`ler_csv_tipado`) além da inferência: é 2,35× mais rápido, e é a única forma de garantir que o tipo de hoje continua sendo o de amanhã quando o arquivo mudar.
+
+### Datahora
+
+`DType.DATAHORA` guarda **microssegundos desde a epoch** em Int64 — mesma unidade que o Arrow usa por padrão em timestamp. Parsing ISO-8601 com fração de segundo e `Z` opcional, extratores `hora()`, `minuto()`, `segundo()`, e `ano()`/`mes()`/`dia()` funcionando igualmente sobre `data` e `datahora`.
+
+O último item saiu de graça de uma decisão pequena: o `Vetor` passou a carregar a **unidade** dos seus números (número puro / dias / microssegundos). Sem ela, o executor precisaria consultar o esquema para saber se `ano(x)` recebeu dias ou microssegundos. Como efeito colateral, `coluna("data").mais(lit_int(7))` continua sendo uma data.
+
+**Fuso horário não é suportado:** um `Z` final é aceito e ignorado, deslocamentos (`+03:00`) são recusados. Meia implementação de fuso é pior que nenhuma — entra quando houver um tipo com fuso de verdade.
+
+### Streaming em fatias
+
+`LeitorCSV` entrega a tabela em fatias de N linhas, para não materializar tudo de uma vez. O buffer de bytes e as fronteiras dos campos ainda ficam todos em memória: **E/S com memória limitada de verdade é trabalho do out-of-core (M9)**, e o roadmap não deve fingir o contrário.
+
+### Parquet — bloqueado por verificação
+
+Não entrou, e a razão não é escopo: **não há como verificar**. A máquina não tem `pyarrow`, `pandas`, `fastparquet`, `parquet-tools` nem `duckdb` — nenhuma forma de produzir um único arquivo Parquet real para testar contra.
+
+Um leitor de Parquet são 1500+ linhas de parsing de formato binário: Thrift compact protocol, níveis de definição em RLE/bit-packed, páginas de dicionário, descompressão Snappy. Escrever isso sem fixture seria produzir código que *parece* pronto e não é — exatamente o que este roadmap se recusa a marcar como feito.
+
+**Destrave:** `pyarrow` está disponível no conda-forge e a rede funciona. Adicioná-lo como dependência **só de geração de fixture** — ambiente separado, nunca no runtime — não fere o princípio de Zero Python, que é sobre o que a biblioteca carrega em produção. É decisão de projeto, não limitação técnica.
+
+Quando destravar, o desenho continua o mesmo:
 
 ```
 Parquet → metadata → column pruning → predicate pushdown → Tucano
@@ -439,12 +475,16 @@ Pushdown nasce no design, não como afterthought.
 
 ### Critério de saída
 
-- [ ] `ler_csv` / `para_csv` sobre o Memory Engine, sem `String.split`
-- [ ] Schema explícito opcional na leitura
-- [ ] `DType.DATAHORA` (Int64) com parsing ISO-8601 completo — herdado do M2.5
-- [ ] Slab de data em Int32 — herdado do M4
-- [ ] `ler_parquet` / `para_parquet` com pruning básico
-- [ ] Caminho de streaming por chunks
+- [x] `ler_csv` / `para_csv` sobre o Memory Engine, sem `String.split` — 10,1×
+- [x] Aspas RFC 4180 na leitura e na escrita
+- [x] Schema explícito opcional na leitura
+- [x] `DType.DATAHORA` com parsing ISO-8601 — herdado do M2.5
+- [x] Caminho de streaming por fatias
+- [x] 78 testes verdes
+- [ ] `ler_parquet` / `para_parquet` com pruning — **bloqueado**, ver acima
+- [ ] Slab de data em Int32 — adiado para o M6
+
+> O slab de data continua Int64. Adicionar agora um sexto `List` paralelo em `Coluna` iria na direção contrária da reescrita de storage que o M6 precisa fazer para join e groupby. Entra lá, junto.
 
 ---
 
@@ -470,6 +510,8 @@ Uma única forma de agregar. Nada de `agg`/`transform`/`apply` como sinônimos, 
 ### Também neste marco
 
 `ordenar`, `concatenar`, `resumo()`, `contar_valores()`, `unicos()`, `preencher_na()`, `remover_na()`.
+
+Herdado do M5: **slab de data em Int32**, junto da reescrita de storage para lotes.
 
 ### Critério de saída
 
@@ -665,6 +707,8 @@ E, a partir do M7, a métrica que é nossa: **latência de filtro de painel** e 
 4. ~~**M2.5**: empacotar a biblioteca, remover `Tabela.indice`, NA de três valores, `DType.DATA`~~
 5. ~~**M3**: executor coluna-a-coluna, `com_coluna()`, lazy por padrão~~
 6. ~~**M4**: kernels SIMD sobre os slabs, dictionary encoding~~
-7. **M5**: scanner CSV tipado (bytes → buffers), Parquet com pruning, slab de data em Int32
-8. Reavaliar paralelismo quando o stdlib do Mojo expuser primitiva estável
-9. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5
+7. ~~**M5**: scanner CSV tipado (bytes → buffers), streaming em fatias, datahora~~
+8. **M6**: groupby e join como operadores; storage em lotes; slab de data em Int32
+9. Decidir sobre `pyarrow` como dependência **de fixture** para destravar Parquet
+10. Reavaliar paralelismo quando o stdlib do Mojo expuser primitiva estável
+11. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5

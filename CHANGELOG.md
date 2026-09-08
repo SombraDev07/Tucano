@@ -3,6 +3,64 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.6.0] — M5: scanner CSV tipado, datahora, leitura em fatias
+
+Leitura de CSV passou de **7226 ns/linha para 715** (10,1x). Com schema explicito,
+304 ns/linha. `pixi run bench-m5`.
+
+### Adicionado
+
+- **`tucano/scanner.mojo`** — varredura de bytes que marca as fronteiras dos campos
+  (dois inteiros por celula, nenhuma alocacao) e parsers que leem direto do buffer.
+  Texto so vira `String` no fim, e so em coluna de texto.
+- **Aspas RFC 4180** na leitura e na escrita: delimitador e quebra de linha dentro do
+  campo, `""` como aspa escapada. O leitor anterior nao suportava — era limitacao
+  documentada que virava corrupcao silenciosa em CSV real.
+- **`ler_csv_tipado(caminho, schema, ...)`** — schema explicito, sem inferencia. Alem de
+  2,35x mais rapido, e a unica forma de garantir que o tipo de hoje continua o de amanha.
+- **`LeitorCSV`** — leitura em fatias: `.proximo(n)`, `.fim()`, `.restantes()`,
+  `.total_linhas()`, `.schema()`. Limita a tabela materializada, nao a memoria total.
+- **`ler_csv(..., pular=n)`** — descarta linhas fisicas antes de tudo.
+- **`DType.DATAHORA`** — microssegundos desde a epoca em Int64, mesma unidade que o Arrow
+  usa em timestamp. `Coluna.de_datahoras` / `de_datahoras_texto` / `micros_em`.
+- Modulo `tucano.datas` ganhou `DataHoraCivil`, `micros_desde_epoch`, `civil_de_micros`,
+  `eh_datahora_iso`, `parse_datahora_iso`, `datahora_para_texto`.
+- **`lit_datahora()`, `hora()`, `minuto()`, `segundo()`** nas expressoes.
+- **`Vetor.unidade`** (numero / dias / microssegundos): o vetor carrega o que seus numeros
+  significam. Com isso `ano()`/`mes()`/`dia()` servem para `data` e `datahora` sem que o
+  executor precise consultar o esquema — e `coluna("data").mais(lit_int(7))` continua
+  sendo uma data.
+- `bench/bench_m5.mojo` + tarefa `pixi run bench-m5`.
+
+### Corrigido
+
+- **`para_csv` nao citava nada.** Campo com delimitador, aspas ou quebra de linha saia
+  corrompido e nao voltava na releitura. Agora cita quando precisa, duplicando aspas.
+- **`para_csv` copiava a coluna inteira por celula** (`tabela.pegar()` dentro do laco de
+  linhas). As colunas sao buscadas uma vez.
+
+### Notas
+
+- Parser de ponto flutuante: decimal simples e convertido direto dos bytes como
+  `mantissa / 10^k`, corretamente arredondado enquanto mantissa <= 2^53 e casas <= 22;
+  fora disso cai no `atof`. O caminho rapido cobre praticamente todo CSV real sem abrir
+  mao da exatidao.
+- Inferencia de tipo: `datahora` -> `data` -> `logico` -> `inteiro` -> `real` -> `texto`.
+  Formatos ISO nunca colidem com numero ou booleano.
+- **Fuso horario nao e suportado**: `Z` final e aceito e ignorado, deslocamentos
+  (`+03:00`) sao recusados. Meia implementacao de fuso e pior que nenhuma.
+
+### Bloqueado
+
+- **Parquet.** Nao ha nesta maquina `pyarrow`, `pandas`, `fastparquet`, `parquet-tools`
+  nem `duckdb` — nenhuma forma de gerar um arquivo Parquet real para testar contra. Um
+  leitor sao 1500+ linhas de parsing binario (Thrift compact, RLE/bit-packed, paginas de
+  dicionario, Snappy); escrever isso sem fixture produziria codigo que parece pronto e
+  nao e. `pyarrow` esta disponivel no conda-forge: adota-lo como dependencia **de
+  fixture** destrava, e nao fere o Zero Python, que e sobre runtime.
+- **Slab de data em Int32** adiado para o M6: um sexto `List` paralelo em `Coluna` iria na
+  direcao contraria da reescrita de storage que join e groupby vao exigir.
+
 ## [0.5.0] — M4: SIMD + dictionary encoding
 
 Ganhos medidos contra o laco escalar equivalente (n = 5M, AVX2, `pixi run bench-m4`):
