@@ -528,6 +528,16 @@ arquivo muitas vezes ganha regravando em Snappy.
 | Zstd, Brotli, LZO, LZ4 | não há decodificador; e não se entra dependência externa por isso |
 | `DECIMAL` | não há tipo decimal, e o valor no arquivo é o inteiro **sem escala** |
 | `FIXED_LEN_BYTE_ARRAY` | valor sem prefixo de tamanho; o leitor de `BYTE_ARRAY` não serve |
+| coluna aninhada (lista, mapa, struct) | o esquema lido é plano |
+| `UINT64` acima de 2⁶³ | não cabe no inteiro com sinal |
+
+`TIME` (micros ou millis desde a meia-noite) é lido como `INTEIRO` com o valor exato — não há
+tipo de hora-do-dia, e o número continua correto e comparável. Arrow IPC recusa coluna
+dicionarizada no arquivo e o tipo `Null`.
+
+**Nenhum arquivo estranho aborta o processo.** Tipo desconhecido, buffer que falta, página
+truncada: tudo sai por `raise`, porque em Mojo indexar fora do limite mata o processo e o
+`try` do chamador não pega.
 
 Recusar é a regra sobre a qual não se negocia: um `DECIMAL(9,2)` lido como inteiro devolveria
 `12345` onde o arquivo diz `123,45` — **número errado sem aviso**, que é o único defeito pior

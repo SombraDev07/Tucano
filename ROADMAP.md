@@ -3072,6 +3072,24 @@ No caminho, dois defeitos menores de leitura de metadados: o `LogicalType`
 Thrift compact, um byte cru, não um varint zigzag. Lido com o leitor errado, a
 coluna de 64 bits passava por uma de 32.
 
+### E uma terceira rodada: o que **aborta**
+
+A mesma pergunta uma vez mais, agora sobre tipos em vez de codecs: `float32`,
+`TIME`, lista, struct, coluna toda nula, booleano com nulo, dicionário do Arrow.
+
+`float32` e booleano estavam certos; lista e struct já eram recusados (com
+mensagem ruim, agora corrigida); `TIME` vira `INTEIRO` com o valor exato em
+microssegundos, o que é honesto e ficou escrito no contrato.
+
+Mas a coluna do tipo `Null` do Arrow **matava o processo**. Ela não traz buffer
+nenhum, e o leitor pegava `faixas[0]` direto — em Mojo isso não levanta, aborta
+com falha de limite, e o `try` do chamador não pega. Todo acesso a buffer no
+leitor de Arrow passou a ser guardado, e coluna dicionarizada no arquivo ganhou
+recusa com nome próprio.
+
+Num leitor de arquivo alheio essa é a regra que vale mais que qualquer tipo
+novo: **arquivo estranho vira erro, nunca um processo morto**.
+
 ### Critério de saída
 
 - [x] os oito arquivos do levantamento testados um a um, antes e depois
@@ -3079,7 +3097,8 @@ coluna de 64 bits passava por uma de 32.
       no erro quando é recusa
 - [x] fixtures commitadas para GZIP, INT96, DECIMAL e sem sinal (Parquet e Arrow)
 - [x] GZIP conferido contra o mesmo dado sem compressão, coluna a coluna
-- [x] 250 testes verdes, oito passos de verificação verdes
+- [x] nenhum arquivo de fora aborta o processo — tudo sai por `raise`
+- [x] 251 testes verdes, oito passos de verificação verdes
 
 ---
 

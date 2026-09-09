@@ -1359,6 +1359,13 @@ def _tipo_tucano(e: ElementoEsquema) raises -> Int:
         ):
             return DType.DATAHORA
         return DType.INTEIRO
+    if e.tipo < 0 or e.num_filhos > 0:
+        # no de grupo: lista, mapa ou struct. Sem tipo fisico proprio, e o que
+        # o esquema aninhado tem em comum — e o Tucano le esquema plano.
+        raise Error(
+            "parquet: coluna '" + e.nome + "' e aninhada (lista, mapa ou"
+            + " struct), e o Tucano le esquema plano"
+        )
     raise Error(
         "parquet: coluna '" + e.nome + "' usa tipo fisico " + String(e.tipo)
         + ", ainda nao suportado"

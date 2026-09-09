@@ -459,6 +459,24 @@ def test_inteiro_sem_sinal_parquet_e_arrow() raises:
     assert_true(pegou)
 
 
+def test_leitor_levanta_em_vez_de_abortar() raises:
+    """Arquivo de fora com tipo desconhecido tem de sair por `raise`.
+
+    O tipo `Null` do Arrow nao traz buffer nenhum, e o leitor pegava
+    `faixas[0]` direto: em Mojo isso nao levanta, **aborta o processo** com falha
+    de limite, e `try` nao pega. Num leitor de arquivo alheio, todo caminho
+    estranho tem de ser um erro que o chamador consegue tratar.
+    """
+    var pegou = False
+    try:
+        _ = ler_arrow("tests/fixtures/arrow_estranho.arrow")
+    except e:
+        pegou = True
+        var m = String(e)
+        assert_true("Null" in m or "dicionarizada" in m)
+    assert_true(pegou)
+
+
 def test_parquet_recusa_decimal() raises:
     """DECIMAL guardado como inteiro sem escala: 123,45 chega como 12345.
 

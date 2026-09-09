@@ -237,6 +237,22 @@ def main():
             f"{lido.num_columns} colunas  {caminho.stat().st_size:>6} bytes"
         )
 
+    # Arrow com tipos que o Tucano nao le: a fixture existe para o leitor
+    # **levantar** em vez de abortar. Indexar buffer que nao existe nao da erro
+    # em Mojo — mata o processo, e `try` nao pega.
+    estranhos = pa.table(
+        {
+            "so_nulos": pa.array([None, None], type=pa.null()),
+            "categoria": pa.array(["a", "b"]).dictionary_encode(),
+        }
+    )
+    caminho = DESTINO / "arrow_estranho.arrow"
+    feather.write_feather(estranhos, caminho, compression="uncompressed")
+    print(
+        f"  {'arrow_estranho.arrow':<28} {estranhos.num_rows:>6} linhas  "
+        f"{estranhos.num_columns} colunas  {caminho.stat().st_size:>6} bytes"
+    )
+
     print("pronto — as fixtures sao commitadas; rode de novo so se mudarem")
 
 

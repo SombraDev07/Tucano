@@ -37,6 +37,13 @@ pyarrow, um por codec, mais `DECIMAL` e `INT96`.
 - Dois defeitos de leitura de metadados no caminho: o `LogicalType` `IntType` nao
   era lido (entao `isSigned` nunca chegava) e `bitWidth` e `i8` — no Thrift
   compact, um byte cru, nao um varint zigzag.
+- **Coluna do tipo `Null` no Arrow matava o processo.** Ela nao traz buffer
+  nenhum, e o leitor pegava `faixas[0]` direto — em Mojo isso nao levanta,
+  aborta, e o `try` do chamador nao pega. Todo acesso a buffer passou a ser
+  guardado. Arquivo estranho vira erro, nunca processo morto.
+- Mensagens de recusa que nao diziam a causa: coluna aninhada no Parquet falava
+  em "tipo fisico -1", e coluna dicionarizada no Arrow falava em quantidade de
+  buffers.
 
 ### Alterado
 

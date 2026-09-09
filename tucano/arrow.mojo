@@ -354,6 +354,9 @@ struct CampoArrow(Copyable, Movable):
     """`is_signed` do `Int` do Arrow. Sem isto, um `uint32` volta como `int32` e
     4294967295 vira -1 — numero errado, sem aviso."""
 
+    var dicionarizada: Bool
+    """Coluna com `DictionaryEncoding` no esquema: os buffers sao indices."""
+
 
 def _ler_campo_arrow(b: List[UInt8], pos_campo: Int) raises -> CampoArrow:
     var nome = String("")
@@ -365,6 +368,12 @@ def _ler_campo_arrow(b: List[UInt8], pos_campo: Int) raises -> CampoArrow:
     p = campo_flat(b, pos_campo, 2)
     if p >= 0:
         tipo = ler_u8(b, p)
+
+    # campo 4 do `Field` e `dictionary`: presente quer dizer coluna
+    # dicionarizada, cujos buffers sao indices e nao valores. O Tucano
+    # dicionariza texto por conta propria, mas nao le o dicionario do arquivo —
+    # e sem esta deteccao a mensagem sairia falando de buffer, nao de tipo.
+    var dicionarizada = campo_flat(b, pos_campo, 4) >= 0
 
     var largura = 0
     var unidade = -1
@@ -390,7 +399,7 @@ def _ler_campo_arrow(b: List[UInt8], pos_campo: Int) raises -> CampoArrow:
             var pu = campo_flat(b, t, 0)
             unidade = ler_i16(b, pu) if pu >= 0 else 0
 
-    return CampoArrow(nome, tipo, largura, unidade, com_sinal)
+    return CampoArrow(nome, tipo, largura, unidade, com_sinal, dicionarizada)
 
 
 def _ler_esquema_arrow(b: List[UInt8], pos_esquema: Int) raises -> List[CampoArrow]:
@@ -428,6 +437,23 @@ def _bit(b: List[UInt8], base: Int, i: Int) -> Bool:
     return ((Int(b[base + i // 8]) >> (i % 8)) & 1) == 1
 
 
+def _faixa(faixas: List[FaixaBuffer], i: Int, nome: String) raises -> FaixaBuffer:
+    """Pega o i-esimo buffer da coluna, ou **levanta**.
+
+    Um tipo do Arrow que o Tucano nao conhece pode trazer menos buffers do que o
+    leitor espera — o tipo `Null` traz zero. Indexar direto nao da erro: aborta o
+    processo com falha de limite, que nem `try` pega. Num leitor de arquivo de
+    fora, todo caminho de arquivo estranho tem de sair por `raise`.
+    """
+    if i < 0 or i >= len(faixas):
+        raise Error(
+            "arrow: coluna '" + nome + "' tem " + String(len(faixas))
+            + " buffer(s), e o leitor esperava mais — tipo nao suportado no"
+            + " arquivo?"
+        )
+    return faixas[i]
+
+
 def _coluna_do_lote(
     corpo: List[UInt8],
     campo: CampoArrow,
@@ -436,7 +462,20 @@ def _coluna_do_lote(
     faixas: List[FaixaBuffer],
     mut prox: Int,
 ) raises -> Coluna:
-    var validade = faixas[prox]
+    if campo.dicionarizada:
+        raise Error(
+            "arrow: coluna '" + campo.nome + "' vem dicionarizada no arquivo, e"
+            + " o leitor ainda nao desfaz o dicionario do Arrow"
+        )
+    if campo.tipo == TipoArrow.NULO:
+        # o tipo `Null` do Arrow nao tem buffer nenhum, e o Tucano nao tem
+        # coluna cujo tipo seja "so ausentes" — recusar diz a verdade; ler como
+        # texto vazio inventaria um tipo que o arquivo nao tem
+        raise Error(
+            "arrow: coluna '" + campo.nome + "' e do tipo Null, que nao tem"
+            + " equivalente no Tucano"
+        )
+    var validade = _faixa(faixas, prox, campo.nome)
     prox += 1
 
     var ausentes = List[Bool](capacity=n)
@@ -449,9 +488,9 @@ def _coluna_do_lote(
     var tipo = _tipo_tucano_de(campo)
 
     if tipo == DType.TEXTO:
-        var offs = faixas[prox]
+        var offs = _faixa(faixas, prox, campo.nome)
         prox += 1
-        var dados = faixas[prox]
+        var dados = _faixa(faixas, prox, campo.nome)
         prox += 1
         var vals = List[String](capacity=n)
         for i in range(n):
@@ -469,7 +508,7 @@ def _coluna_do_lote(
                 )
         return Coluna.de_textos(campo.nome, vals^, ausentes^)
 
-    var valores = faixas[prox]
+    var valores = _faixa(faixas, prox, campo.nome)
     prox += 1
 
     if tipo == DType.LOGICO:
