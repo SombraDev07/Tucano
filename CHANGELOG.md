@@ -3,6 +3,45 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.40.0] — A pergunta que se fazia por linha
+
+A 0.36.0 tentou tirar o `eh_ausente` por linha do escritor e **mediu pior**:
+1285 -> 1471 ms. Diagnosticou certo — `para_bytes()` da mascara aloca a cada
+chamada — e arquivou a ideia junto com a implementacao. A causa era incidental:
+a mesma pergunta tem uma forma que nao aloca nada, `contar_ausentes()`, que e
+O(1) e se faz uma vez por coluna.
+
+| 5M x 5 | padrao (500k) | tudo num grupo |
+|---|---|---|
+| 0.39.0 | 430 ms | 1012 ms |
+| niveis de definicao sem lista | 400 | 895 |
+| dicionario, estatisticas e "presentes" | 360 | 776 |
+| recorte sem lista de ausentes | **244** | **559** |
+
+Contra as outras implementacoes, no padrao:
+
+| | ms | MiB |
+|---|---|---|
+| Tucano | **241** | **10,1** |
+| pyarrow | 436 | 31,9 |
+| Polars | 96 | 43,6 |
+
+**1,8x mais rapido que o pyarrow, com arquivo 3,2x menor.** Na 0.36.0 era 2,7x
+mais lento. O arquivo sai byte a byte igual ao de antes.
+
+### Adicionado
+
+- `codificar_rle_constante()` em `codecs`: escreve o trecho RLE de n copias de um
+  valor sem materializar a lista. E o espelho de escrita do `rle_valor_unico()`
+  que o leitor ja usava para a mesma pergunta.
+
+### Alterado
+
+- `_fatiar` nao monta mais `List[Bool]` de n posicoes para dizer que nao falta
+  nada: lista de ausentes vazia ja quer dizer "todos presentes".
+- `_dicionario_numerico`, `_stats_de_coluna`, `_inteiros_presentes`,
+  `_indices_presentes` e `_valores_plain` perguntam uma vez e guardam a resposta.
+
 ## [0.39.0] — A escrita, em ondas
 
 A 0.38.0 pos uma thread por coluna e parou ai: com cinco colunas, cinco nucleos

@@ -645,6 +645,32 @@ def codificar_rle_i32(valores: List[Int32], largura: Int) -> List[UInt8]:
     return out^
 
 
+def codificar_rle_constante(
+    valor: UInt8, repeticoes: Int, largura: Int
+) -> List[UInt8]:
+    """Um unico trecho RLE de `repeticoes` copias de `valor`.
+
+    E o que `codificar_rle` produziria para uma lista toda igual — sem a lista.
+    Coluna sem ausentes e o caso comum, e ali os niveis de definicao sao meio
+    milhao de uns que existem so para virar tres bytes.
+    """
+    var out = List[UInt8]()
+    if repeticoes <= 0:
+        return out^
+    var cabecalho = repeticoes << 1
+    while True:
+        var b = cabecalho & 0x7F
+        cabecalho >>= 7
+        if cabecalho != 0:
+            out.append(UInt8(b | 0x80))
+        else:
+            out.append(UInt8(b))
+            break
+    for k in range((largura + 7) // 8):
+        out.append(UInt8((Int(valor) >> (8 * k)) & 0xFF))
+    return out^
+
+
 def codificar_rle(valores: List[UInt8], largura: Int) -> List[UInt8]:
     """Codifica em trechos RLE, agrupando iguais consecutivos.
 

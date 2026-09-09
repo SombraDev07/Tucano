@@ -2231,7 +2231,12 @@ def ler_parquet_grupo(
 # ------------------------------------------------------------------ escrita
 
 from .thrift import EscritorThrift
-from .codecs import codificar_rle, codificar_rle_i32, real64_para_bits
+from .codecs import (
+    codificar_rle,
+    codificar_rle_constante,
+    codificar_rle_i32,
+    real64_para_bits,
+)
 
 
 def _tipo_parquet(codigo: Int) raises -> Int:
@@ -2265,12 +2270,13 @@ def _valores_plain(col: Coluna) raises -> List[UInt8]:
     """PLAIN dos valores PRESENTES — ausentes nao ocupam espaco no Parquet."""
     var out = List[UInt8]()
     var n = col.tamanho()
+    var com_ausentes = col.contar_ausentes() > 0
 
     if col.tipo == DType.LOGICO:
         var bit = 0
         var atual = 0
         for i in range(n):
-            if col.eh_ausente(i):
+            if com_ausentes and col.eh_ausente(i):
                 continue
             if Int(col.logics[i]) != 0:
                 atual |= 1 << bit
@@ -2285,7 +2291,7 @@ def _valores_plain(col: Coluna) raises -> List[UInt8]:
 
     if col.tipo == DType.TEXTO:
         for i in range(n):
-            if col.eh_ausente(i):
+            if com_ausentes and col.eh_ausente(i):
                 continue
             var b = col.texto_bruto(i).as_bytes()
             _por_le(out, len(b), 4)
@@ -2295,20 +2301,20 @@ def _valores_plain(col: Coluna) raises -> List[UInt8]:
 
     if col.tipo == DType.REAL:
         for i in range(n):
-            if col.eh_ausente(i):
+            if com_ausentes and col.eh_ausente(i):
                 continue
             _por_le(out, real64_para_bits(col.reals[i]), 8)
         return out^
 
     if col.tipo == DType.DATA:
         for i in range(n):
-            if col.eh_ausente(i):
+            if com_ausentes and col.eh_ausente(i):
                 continue
             _por_le(out, Int(col.ints[i]), 4)
         return out^
 
     for i in range(n):
-        if col.eh_ausente(i):
+        if com_ausentes and col.eh_ausente(i):
             continue
         _por_le(out, Int(col.ints[i]), 8)
     return out^
@@ -2324,9 +2330,13 @@ def _fatiar(col: Coluna, ini: Int, fim: Int) raises -> Coluna:
     var n = fim - ini
     if n < 0:
         n = 0
-    var aus = List[Bool](capacity=n)
-    for i in range(ini, fim):
-        aus.append(col.eh_ausente(i))
+    # lista de ausentes vazia quer dizer "todos presentes" para as factories da
+    # `Coluna` — numa coluna sem ausentes nao ha o que montar aqui
+    var aus = List[Bool]()
+    if col.contar_ausentes() > 0:
+        aus.reserve(n)
+        for i in range(ini, fim):
+            aus.append(col.eh_ausente(i))
 
     if col.tipo == DType.TEXTO:
         if col.eh_dicionarizada():
@@ -2450,8 +2460,11 @@ def _dicionario_numerico(col: Coluna) raises -> _DicNumerico:
     var distintos = List[Int64]()
     var codigos = List[Int32]()
     var presentes = 0
+    # `contar_ausentes` e O(1); `eh_ausente` e uma chamada que pode levantar,
+    # por linha. Perguntar uma vez fora do laco e a mesma resposta mais barata.
+    var com_ausentes = col.contar_ausentes() > 0
     for i in range(n):
-        if col.eh_ausente(i):
+        if com_ausentes and col.eh_ausente(i):
             continue
         presentes += 1
         var bruto: Int
@@ -2510,6 +2523,10 @@ def _valores_plain_dicionario(col: Coluna) raises -> List[UInt8]:
 def _indices_presentes(col: Coluna) raises -> List[Int32]:
     var n = col.tamanho()
     var out = List[Int32](capacity=n)
+    if col.contar_ausentes() == 0:
+        for i in range(n):
+            out.append(col.codigos[i])
+        return out^
     for i in range(n):
         if not col.eh_ausente(i):
             out.append(col.codigos[i])
@@ -2552,8 +2569,13 @@ def _delta_se_valer(col: Coluna) raises -> List[UInt8]:
 
 
 def _inteiros_presentes(col: Coluna) raises -> List[Int64]:
-    var out = List[Int64](capacity=col.tamanho())
-    for i in range(col.tamanho()):
+    var n = col.tamanho()
+    var out = List[Int64](capacity=n)
+    if col.contar_ausentes() == 0:
+        for i in range(n):
+            out.append(col.ints[i])
+        return out^
+    for i in range(n):
         if not col.eh_ausente(i):
             out.append(col.ints[i])
     return out^
@@ -2565,13 +2587,20 @@ def _pagina_de_dados(
 ) raises -> List[UInt8]:
     """Pagina de dados V1: [tamanho dos niveis][niveis RLE][valores]."""
     var n = col.tamanho()
-    var niveis = List[UInt8](capacity=n)
-    for i in range(n):
-        if col.eh_ausente(i):
-            niveis.append(UInt8(0))
-        else:
-            niveis.append(UInt8(1))
-    var niveis_rle = codificar_rle(niveis, 1)
+    var niveis_rle: List[UInt8]
+    if col.contar_ausentes() == 0:
+        # coluna sem ausentes: os niveis sao n uns, e n uns cabem num trecho
+        # RLE de tres bytes. Materializar a lista para descobrir isso e meio
+        # milhao de `append` por coluna de row group.
+        niveis_rle = codificar_rle_constante(UInt8(1), n, 1)
+    else:
+        var niveis = List[UInt8](capacity=n)
+        for i in range(n):
+            if col.eh_ausente(i):
+                niveis.append(UInt8(0))
+            else:
+                niveis.append(UInt8(1))
+        niveis_rle = codificar_rle(niveis, 1)
 
     var pagina = List[UInt8]()
     _por_le(pagina, len(niveis_rle), 4)
@@ -2663,8 +2692,9 @@ def _n_distintos_de(col: Coluna) raises -> Int:
     visto.resize(card, False)
     var nd = 0
     var n = col.tamanho()
+    var com_ausentes = col.contar_ausentes() > 0
     for i in range(n):
-        if col.eh_ausente(i):
+        if com_ausentes and col.eh_ausente(i):
             continue
         var c = Int(col.codigos[i])
         if c < 0 or c >= card:
@@ -2683,8 +2713,9 @@ def _stats_de_coluna(col: Coluna) raises -> StatsFaixa:
         var tem = False
         var mn = 0.0
         var mx = 0.0
+        var com_ausentes = col.contar_ausentes() > 0
         for i in range(n):
-            if col.eh_ausente(i):
+            if com_ausentes and col.eh_ausente(i):
                 continue
             var v = col.reals[i]
             if not tem:
@@ -2707,8 +2738,9 @@ def _stats_de_coluna(col: Coluna) raises -> StatsFaixa:
         var tem = False
         var mn = Int64(0)
         var mx = Int64(0)
+        var com_ausentes = col.contar_ausentes() > 0
         for i in range(n):
-            if col.eh_ausente(i):
+            if com_ausentes and col.eh_ausente(i):
                 continue
             var v = col.ints[i]
             if not tem:

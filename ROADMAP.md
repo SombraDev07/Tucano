@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M30 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M31 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -280,6 +280,7 @@ de datas, com a leitura no mesmo tempo. A dívida sai da lista.
 | M28 | Slab de data em Int32 | crítica | ✅ feito | 38 → 19 MiB por 5M datas; leitura igual |
 | M29 | Escrita paralela por coluna | crítica | ✅ feito | 1227 → 594 ms; encosta no pyarrow |
 | M30 | A escrita, em ondas | crítica | ✅ feito | 594 → 430 ms; empata com o pyarrow |
+| M31 | A pergunta feita por linha | crítica | ✅ feito | 430 → 241 ms; 1,8× o pyarrow |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | ✅ feito | `para_xlsx` — ZIP com método 0, sem compressor |
@@ -2421,6 +2422,10 @@ máscara. As duas primeiras ajudaram pouco; a terceira **piorou** — `para_byte
 aloca por chamada, e chamá-la em cinco lugares custou mais que os testes que ela
 economizava. Saiu.
 
+> **Corrigido no M31.** A terceira tentativa foi arquivada com a hipótese junto:
+> a alocação por chamada era incidental, e a mesma pergunta feita por
+> `contar_ausentes()` — que é O(1) — vale 430 → 241 ms.
+
 Só então instrumentei, em vez de continuar adivinhando:
 
 | fase | ms |
@@ -2734,6 +2739,71 @@ essa troca merece ser feita de propósito, não de passagem. Fica medida.
 - [x] o padrão de row group é medido, não herdado
 - [x] o arquivo sai byte a byte igual ao da versão serial
 - [x] o que sobrou está perfilado, com as saídas descritas e o custo delas
+- [x] 246 testes verdes, oito passos de verificação verdes
+
+---
+
+## M31 — A pergunta que se fazia por linha ✅
+
+O M27 tentou tirar o `eh_ausente` por linha do escritor e **mediu pior**: 1285 →
+1471 ms. Diagnosticou certo — `para_bytes()` da máscara aloca a cada chamada, e
+a versão a chamava em cinco lugares — e parou ali. O diagnóstico apontava para
+uma causa **incidental**, não para a ideia, e mesmo assim a ideia foi arquivada
+junto com a implementação.
+
+A mesma pergunta tem uma forma que não aloca nada: `contar_ausentes()`, que é
+O(1). Perguntada **uma vez por coluna**, fora do laço.
+
+### Três lugares, medidos um a um
+
+| | padrão (500k) | tudo num grupo |
+|---|---|---|
+| depois do M30 | 430 ms | 1012 ms |
+| níveis de definição sem lista | 400 | 895 |
+| dicionário, estatísticas e "presentes" | 360 | 776 |
+| recorte sem lista de ausentes | **244** | **559** |
+
+**Os níveis.** Uma coluna sem ausentes tem meio milhão de níveis iguais a 1, que
+existem só para virar um trecho RLE de três bytes. `codificar_rle_constante()`
+escreve esse trecho sem a lista — é o espelho de escrita do `rle_valor_unico()`
+que o leitor já usava para a mesma pergunta.
+
+**O recorte.** `_fatiar` montava um `List[Bool]` de n posições para dizer que
+nenhuma linha falta. Lista de ausentes vazia já quer dizer "todos presentes" nas
+factories da `Coluna`; numa coluna sem ausentes não há o que montar.
+
+**O resto.** `_dicionario_numerico`, `_stats_de_coluna`, `_inteiros_presentes`,
+`_indices_presentes` e `_valores_plain` passaram a perguntar uma vez e guardar a
+resposta num `Bool` local.
+
+### Onde a escrita ficou
+
+| 5M × 5, row groups de 500k | ms | MiB |
+|---|---|---|
+| Tucano | **241** | **10,1** |
+| pyarrow | 436 | 31,9 |
+| Polars | 96 | 43,6 |
+
+**1,8× mais rápido que o pyarrow, com arquivo 3,2× menor.** No M27 era 2,7×
+_mais lento_. O arquivo continua saindo byte a byte igual, conferido com `cmp`.
+
+### A lição, que é sobre resultado negativo
+
+O M27 fez a parte difícil — mediu, viu piorar, e achou a razão. Faltou o passo
+seguinte: quando a razão de uma medida ruim é **incidental** (uma alocação, um
+`copy()`, um buffer temporário), o que morreu foi aquela implementação, não a
+hipótese. Arquivar as duas juntas custou aqui 189 ms por escrita durante quatro
+marcos.
+
+É primo do erro que o M13 corrigiu no paralelismo, e a regra é a mesma:
+o registro de um resultado negativo tem de separar **o que falhou** de **por que
+falhou**, e dizer explicitamente se a hipótese continua de pé.
+
+### Critério de saída
+
+- [x] cada um dos três passos medido em separado
+- [x] o arquivo sai byte a byte igual ao de antes
+- [x] o resultado negativo do M27 corrigido no lugar onde está escrito
 - [x] 246 testes verdes, oito passos de verificação verdes
 
 ---
