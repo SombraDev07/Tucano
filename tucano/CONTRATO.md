@@ -242,6 +242,10 @@ Materializam sozinhos: `mostrar`, `primeiras`, `linhas`, `colunas`, `shape`, `sc
 
 - Construtores: `coluna(nome)`, `lit(f64)`, `lit_int`, `lit_texto`, `lit_bool`, `lit_data`
 - Fluente: `.gt .ge .lt .le .eq .ne .e .ou .nao`, aritmética `.mais .menos .vezes .sobre`
+- Texto: `.contem(lit_texto(trecho))` — busca **literal**, sobre bytes, então `"São"` não
+  acha `"Sao"`. Numa coluna dicionarizada roda uma vez por valor distinto
+- Conjunto: `.em([lit_texto("SP"), lit_texto("RJ")])` é o `IN` do SQL — açúcar sobre `==` e
+  `ou`, sem nó novo na árvore. Lista vazia é Falso para toda linha
 - Datas: `ano(expr)`, `mes(expr)`, `dia(expr)` — servem para `data` e `datahora`
 - Horas: `hora(expr)`, `minuto(expr)`, `segundo(expr)` — exigem `datahora`
 - Literais temporais: `lit_data("2024-02-01")`, `lit_datahora("2024-02-01T10:30:00")`
