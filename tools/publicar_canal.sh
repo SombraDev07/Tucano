@@ -9,8 +9,13 @@
 #
 #   ./tools/publicar_canal.sh
 #
-# Uma vez, antes da primeira publicacao: no GitHub, Settings -> Pages ->
-# Source = "Deploy from a branch", branch `gh-pages`, pasta `/ (root)`.
+# Na primeira vez a ordem importa: **primeiro** o push da branch, **depois** o
+# Settings -> Pages. O GitHub so oferece `gh-pages` na lista de origens depois
+# que a branch existe no remoto.
+#
+#   1. ./tools/publicar_canal.sh
+#   2. git -C .publicacao push origin gh-pages
+#   3. Settings -> Pages -> Source "Deploy from a branch", gh-pages, / (root)
 #
 # Depois, o usuario instala assim:
 #

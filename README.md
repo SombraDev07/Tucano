@@ -174,9 +174,10 @@ Para publicar (dono do projeto):
 git -C .publicacao push origin gh-pages
 ```
 
-Uma vez só, antes da primeira publicação: **Settings → Pages → Source = "Deploy from a
-branch", branch `gh-pages`, pasta `/ (root)`**. O script acumula versões — quem fixou uma
-versão antiga continua resolvendo.
+Na primeira vez a ordem importa: **primeiro o `push`, depois o Pages** — o GitHub só oferece
+`gh-pages` na lista de origens depois que a branch existe no remoto. Então: **Settings → Pages
+→ Source = "Deploy from a branch", branch `gh-pages`, pasta `/ (root)`**. O script acumula
+versões: quem fixou uma versão antiga continua resolvendo.
 
 ## Começando
 
