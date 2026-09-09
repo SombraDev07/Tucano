@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M27 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M28 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -196,7 +196,7 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Do q
 | Junção e ordenação mais baratas | ✅ M16 — 74 e 100 ns/linha |
 | Escritor com `DELTA_BINARY_PACKED` | ✅ M24 — arquivo 42% menor |
 | Chave de grupo composta | ✅ M17 — 34 ns/linha |
-| Slab de data em Int32 | ⏸ medida; decisão pendente — ver abaixo |
+| Slab de data em Int32 | ✅ M28 — o slab passou a carregar a própria largura |
 | Publicação em canal conda | ❌ exige canal próprio |
 
 ### Dívidas concretas identificadas
@@ -232,9 +232,10 @@ recusa; sobrecarregar o slab de `codigos` piora os dois significados; e tornar o
 ciente da largura toca ~40 pontos nos caminhos mais quentes — ordenação, junção, agrupamento,
 compactação — além de exigir variante de largura em quatro kernels.
 
-**Decisão pendente do dono do projeto**, agora com número dos dois lados: ~5% de memória em
-tabela típica contra ~40 pontos de refatoração no código mais quente. A dívida deixa de estar
-adiada por inércia e passa a estar adiada por medida.
+~~**Decisão pendente do dono do projeto**~~ — **decidida em 2026-09-09**: fazer o slab ciente
+da largura, que era a terceira opção. Feito no M28. O número da refatoração estava certo em
+ordem de grandeza (11 arquivos, ~40 pontos), e o do prêmio também: 38 → 19 MiB por 5 milhões
+de datas, com a leitura no mesmo tempo. A dívida sai da lista.
 
 ---
 
@@ -276,9 +277,10 @@ adiada por inércia e passa a estar adiada por medida.
 | M25 | Dicionário em coluna numérica | crítica | ✅ feito | arquivo 25 → 12 MiB; leitura passa o pyarrow |
 | M26 | Remover a divisão em faixas | crítica | ✅ feito | 285 linhas a menos, e mais rápido |
 | M27 | A escrita, medida | crítica | ✅ feito | perfil por fase; as codificações pagam a si mesmas |
+| M28 | Slab de data em Int32 | crítica | ✅ feito | 38 → 19 MiB por 5M datas; leitura igual |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
-| M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
+| M14 | Excel (escrita) | crítica | ✅ feito | `para_xlsx` — ZIP com método 0, sem compressor |
 | M11 | GPU | experimental | não iniciado | aceleradores selecionados |
 
 ```
@@ -2457,6 +2459,90 @@ leitura se paga sempre.
 - [x] o que melhorou entrou; o que piorou saiu
 - [x] a comparação com o pyarrow publicada com os dois lados: tempo e tamanho
 - [x] 243 testes verdes, oito passos de verificação verdes
+
+---
+
+## M28 — Slab de data em Int32 ✅
+
+A dívida nº 4 estava adiada por medida desde o M27, com três implementações
+possíveis e nenhuma escolhida. O dono do projeto escolheu a terceira: **o slab
+carrega a própria largura**.
+
+### A forma
+
+`SlabInteiro` é `bytes` + `largura` + `n`. Data usa largura 4; inteiro e datahora,
+8. A `Coluna` não ganhou campo nenhum — trocou `List[Int64]` por `SlabInteiro` no
+campo que já existia, que é exatamente o que o sexto `List` paralelo evitava.
+
+Quem lê no caminho quente decide pela largura **uma vez, fora do laço**:
+
+```mojo
+if col.ints.largura == 4:
+    var p32 = col.ints.bytes.unsafe_ptr().unsafe_bitcast[Int32]()
+    ...
+```
+
+Os quatro kernels de inteiro (`soma_i64_densa`, `soma_i64`, `minimo_i64`,
+`maximo_i64`) ganharam essa bifurcação, e a compactação do executor também.
+
+### O prêmio, conferido
+
+| | Int64 | Int32 |
+|---|---|---|
+| 5M datas em memória | 38 MiB | **19 MiB** |
+| ler 5M datas do Parquet | 10 ms | **9 ms** |
+
+Metade da memória, mesmo tempo — a bifurcação por largura fora do laço não custa,
+como o M27 já tinha medido em separado. Os benchmarks do projeto não têm coluna de
+data e não se moveram: leitura 42 ms, pipeline 65 ms, fluxo 88 ms.
+
+### O que ficou mais estrito
+
+`SlabInteiro.de_dias` **recusa** o que não cabe em 32 bits em vez de truncar.
+Estreitar em silêncio devolveria uma data errada, e data errada não denuncia —
+parece uma data. A faixa cobre uns cinco milhões de anos para cada lado da epoch,
+então a guarda nunca dispara em uso real; ela existe para o dia em que alguém
+alimentar a coluna com microssegundos por engano.
+
+### O teste novo achou um defeito do M25
+
+Escrever uma coluna de data com poucos valores distintos produzia um arquivo que o
+**pyarrow lia errado**: metade das linhas voltava como 1970-01-01. O escritor
+emitia a página de dicionário com **oito bytes por valor** numa coluna cujo tipo
+físico é INT32 — o leitor de fora via o dobro de entradas, metade delas zero.
+
+O defeito é do M25, não do M28: `_valores_plain_dicionario_numerico` sempre
+escreveu oito bytes, e `_tipo_parquet(DATA)` sempre devolveu INT32. Ficou invisível
+porque a fixture `temporal` tem **três linhas** — poucas para dicionarizar e poucas
+para o delta. Interoperabilidade só prova o que o arquivo exercita.
+
+Três coisas entraram junto:
+
+- o dicionário numérico carrega a própria largura, pela mesma razão que o slab;
+- a conta que decide entre dicionário e PLAIN passou a usar 4 bytes por valor em
+  data, e não 8 — antes o dicionário parecia barato em casos onde não era;
+- o delta em coluna de data é recusado acima de **32 bits** por minibloco, que é o
+  teto do tipo físico; a recusa vira PLAIN, que sempre cabe.
+
+E uma fixture nova, `datas.parquet`, com 400 linhas em quatro colunas: repetida
+(dicionário), crescente (delta), espalhada com buracos (delta + níveis) e um
+carimbo de tempo. Verificada pelo pyarrow no `verificar_tudo.sh`.
+
+### O custo, dito
+
+As factories de inteiro deixaram de **assumir** a `List` recebida: agora copiam uma
+vez para dentro do slab de bytes. É o preço da largura variável — um `List[Int64]`
+não vira `List[UInt8]` sem copiar. Não apareceu em nenhum benchmark, mas está aqui
+porque o CONTRATO prometia o contrário e foi corrigido.
+
+### Critério de saída
+
+- [x] data ocupa 4 bytes por linha; inteiro e datahora, 8
+- [x] a largura é decidida fora do laço em todos os kernels
+- [x] estreitar fora da faixa levanta erro, não trunca
+- [x] data sobrevive a ordenação, agrupamento, filtro e às duas idas e voltas
+- [x] o arquivo escrito com data dicionarizada é lido pelo pyarrow
+- [x] 246 testes verdes, oito passos de verificação verdes
 
 ---
 

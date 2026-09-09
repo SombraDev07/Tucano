@@ -504,8 +504,26 @@ def soma_f64_densa(dados: List[Float64], n: Int) -> Float64:
     return total
 
 
-def soma_i64_densa(dados: List[Int64], n: Int) -> Float64:
-    var p = dados.unsafe_ptr()
+def soma_i64_densa(dados: List[UInt8], largura: Int, n: Int) -> Float64:
+    """Soma de slab inteiro sem ausentes. `largura` e 4 ou 8 bytes por valor.
+
+    A largura e decidida **fora do laco**, uma vez: o slab de data cabe em 32
+    bits e o de inteiro precisa de 64, e escrever dois kernels em vez de um
+    ramo seria duplicar o mesmo laco por causa de uma constante.
+    """
+    if largura == 4:
+        var p32 = dados.unsafe_ptr().unsafe_bitcast[Int32]()
+        var acc32 = SIMD[DType.int32, W_I64](0)
+        var k = 0
+        while k + W_I64 <= n:
+            acc32 += p32.unsafe_load[width=W_I64](k)
+            k += W_I64
+        var soma32 = Int(acc32.reduce_add())
+        while k < n:
+            soma32 += Int(p32.unsafe_load(k))
+            k += 1
+        return Float64(soma32)
+    var p = dados.unsafe_ptr().unsafe_bitcast[Int64]()
     var acc = SIMD[DType.int64, W_I64](0)
     var i = 0
     while i + W_I64 <= n:
@@ -554,9 +572,19 @@ def maximo_f64_densa(dados: List[Float64], n: Int) raises -> Float64:
     return maior
 
 
-def soma_i64(dados: List[Int64], na: List[UInt8], n: Int) -> Float64:
+def soma_i64(
+    dados: List[UInt8], largura: Int, na: List[UInt8], n: Int
+) -> Float64:
     """Soma de slab inteiro, acumulando em Int64 antes de converter."""
-    var pd = dados.unsafe_ptr()
+    if largura == 4:
+        var p32 = dados.unsafe_ptr().unsafe_bitcast[Int32]()
+        var pn32 = na.unsafe_ptr()
+        var total32 = 0
+        for k in range(n):
+            if pn32.unsafe_load(k) == 0:
+                total32 += Int(p32.unsafe_load(k))
+        return Float64(total32)
+    var pd = dados.unsafe_ptr().unsafe_bitcast[Int64]()
     var pn = na.unsafe_ptr()
     var acc = SIMD[DType.int64, W_I64](0)
     var i = 0
@@ -627,8 +655,25 @@ def maximo_f64(dados: List[Float64], na: List[UInt8], n: Int) raises -> Float64:
     return maior
 
 
-def minimo_i64(dados: List[Int64], na: List[UInt8], n: Int) raises -> Float64:
-    var pd = dados.unsafe_ptr()
+def minimo_i64(
+    dados: List[UInt8], largura: Int, na: List[UInt8], n: Int
+) raises -> Float64:
+    if largura == 4:
+        var p32 = dados.unsafe_ptr().unsafe_bitcast[Int32]()
+        var pn32 = na.unsafe_ptr()
+        var achou32 = False
+        var alvo32 = Int32(0)
+        for k in range(n):
+            if pn32.unsafe_load(k) != 0:
+                continue
+            var v32 = p32.unsafe_load(k)
+            if not achou32 or v32 < alvo32:
+                alvo32 = v32
+                achou32 = True
+        if not achou32:
+            raise Error("sem valores validos")
+        return Float64(alvo32)
+    var pd = dados.unsafe_ptr().unsafe_bitcast[Int64]()
     var pn = na.unsafe_ptr()
     var achou = False
     var menor = Int64(0)
@@ -644,8 +689,25 @@ def minimo_i64(dados: List[Int64], na: List[UInt8], n: Int) raises -> Float64:
     return Float64(menor)
 
 
-def maximo_i64(dados: List[Int64], na: List[UInt8], n: Int) raises -> Float64:
-    var pd = dados.unsafe_ptr()
+def maximo_i64(
+    dados: List[UInt8], largura: Int, na: List[UInt8], n: Int
+) raises -> Float64:
+    if largura == 4:
+        var p32 = dados.unsafe_ptr().unsafe_bitcast[Int32]()
+        var pn32 = na.unsafe_ptr()
+        var achou32 = False
+        var alvo32 = Int32(0)
+        for k in range(n):
+            if pn32.unsafe_load(k) != 0:
+                continue
+            var v32 = p32.unsafe_load(k)
+            if not achou32 or v32 > alvo32:
+                alvo32 = v32
+                achou32 = True
+        if not achou32:
+            raise Error("sem valores validos")
+        return Float64(alvo32)
+    var pd = dados.unsafe_ptr().unsafe_bitcast[Int64]()
     var pn = na.unsafe_ptr()
     var achou = False
     var maior = Int64(0)

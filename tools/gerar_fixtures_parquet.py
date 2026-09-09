@@ -12,7 +12,7 @@ Os .parquet gerados sao commitados, entao rodar isto e necessario apenas quando
 as fixtures mudarem.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -89,6 +89,41 @@ def main():
         }
     )
     _escrever("temporal.parquet", temporal, compression="none", use_dictionary=False)
+
+    # 4b. datas em quantidade: e aqui que o escritor escolhe codificacao.
+    # A fixture `temporal` tem tres linhas, o que e pouco para dicionarizar e
+    # pouco para o delta — e por isso ela nao pegou o dicionario de datas
+    # escrito com oito bytes por valor num tipo fisico de quatro. Interop so
+    # prova o que o arquivo exercita.
+    dias = 400
+    datas = pa.table(
+        {
+            # poucos valores distintos: o escritor dicionariza
+            "repetida": pa.array(
+                [date(2024, 1, 1 + i % 7) for i in range(dias)], type=pa.date32()
+            ),
+            # crescente: o escritor manda em DELTA_BINARY_PACKED
+            "crescente": pa.array(
+                [date(2000, 1, 1) + timedelta(days=i * 3) for i in range(dias)],
+                type=pa.date32(),
+            ),
+            # espalhada e com buracos, para o delta conviver com nivel de definicao
+            "espalhada": pa.array(
+                [
+                    None
+                    if i % 5 == 0
+                    else date(1970, 1, 1) + timedelta(days=(i * 7919) % 20000)
+                    for i in range(dias)
+                ],
+                type=pa.date32(),
+            ),
+            "carimbo": pa.array(
+                [datetime(2024, 1, 1) + timedelta(seconds=i * 37) for i in range(dias)],
+                type=pa.timestamp("us"),
+            ),
+        }
+    )
+    _escrever("datas.parquet", datas, compression="none", use_dictionary=False)
 
     # 5. snappy, a compressao padrao na pratica
     _escrever("snappy.parquet", simples, compression="snappy", use_dictionary=False)

@@ -229,7 +229,10 @@ struct EstadoAgregacao(Movable):
         var pid = ids.unsafe_ptr()
         var eh_real = col.tipo == DType.REAL
         var preal = col.reals.unsafe_ptr()
-        var pint = col.ints.unsafe_ptr()
+        # o slab inteiro carrega a largura; alargar aqui seria copiar a coluna
+        var estreito = col.ints.largura == 4
+        var pint = col.ints.bytes.unsafe_ptr().unsafe_bitcast[Int64]()
+        var pint32 = col.ints.bytes.unsafe_ptr().unsafe_bitcast[Int32]()
         var pacc = self.acc[j].unsafe_ptr()
         var pvis = self.vistos[j].unsafe_ptr()
         var soma_ou_media = (
@@ -244,6 +247,8 @@ struct EstadoAgregacao(Movable):
             var x: Float64
             if eh_real:
                 x = preal.unsafe_load(i)
+            elif estreito:
+                x = Float64(pint32.unsafe_load(i))
             else:
                 x = Float64(pint.unsafe_load(i))
             if pvis.unsafe_load(g) == 0:

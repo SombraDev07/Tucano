@@ -194,6 +194,105 @@ struct StringStore(Copyable, Movable):
         return len(self.bytes)
 
 
+struct SlabInteiro(Copyable, Movable, Sized):
+    """Slab de inteiros que carrega a **propria largura** em bytes.
+
+    Data cabe em 32 bits com folga — dias desde 1970 nao chegam a alguns milhoes
+    — e inteiro e datahora precisam dos 64. Guardar a largura no slab, em vez de
+    um `List` por largura, e o que evita um campo novo por tipo na `Coluna`:
+    quem le decide pela largura **uma vez, fora do laco**.
+
+    Ler por bitcast nao custa nada a mais que ler de um `List` tipado: somar
+    vinte milhoes de inteiros mede 7 ms dos dois jeitos, com a largura decidida
+    fora do laco. Foi essa medida que autorizou a forma.
+
+    `bytes` fica publico de proposito: no caminho quente quem le faz
+    `bytes.unsafe_ptr().unsafe_bitcast[Int64]()` e trabalha direto no slab.
+    Devolver ponteiro de um metodo esbarraria na inferencia de origin, e
+    esconder o buffer so para reexpo-lo por acessor nao esconde nada.
+    """
+
+    var bytes: List[UInt8]
+    var largura: Int
+    var n: Int
+
+    def __init__(out self):
+        self.bytes = List[UInt8]()
+        self.largura = 8
+        self.n = 0
+
+    def __init__(out self, var bytes: List[UInt8], largura: Int, n: Int):
+        self.bytes = bytes^
+        self.largura = largura
+        self.n = n
+
+    @staticmethod
+    def de_i64(var valores: List[Int64]) -> Self:
+        """Assume a lista como slab de 64 bits, sem copiar os valores."""
+        var n = len(valores)
+        var b = List[UInt8](capacity=n * 8)
+        b.resize(unsafe_uninit_length=n * 8)
+        if n > 0:
+            _ = external_call["memcpy", Int](
+                b.unsafe_ptr(),
+                valores.unsafe_ptr().unsafe_bitcast[UInt8](),
+                n * 8,
+            )
+        return Self(b^, 8, n)
+
+    @staticmethod
+    def de_dias(valores: List[Int64]) raises -> Self:
+        """Estreita para 32 bits. So para dias — o unico tipo que cabe.
+
+        32 bits cobrem cerca de cinco milhoes de anos para cada lado da epoch,
+        muito alem do que o calendario do Tucano representa. Ainda assim o valor
+        e conferido: estreitar em silencio devolveria uma data errada, e data
+        errada nao denuncia — parece uma data.
+        """
+        var n = len(valores)
+        var b = List[UInt8](capacity=n * 4)
+        b.resize(unsafe_uninit_length=n * 4)
+        var destino = b.unsafe_ptr().unsafe_bitcast[Int32]()
+        var origem = valores.unsafe_ptr()
+        for i in range(n):
+            var v = origem.unsafe_load(i)
+            if v > Int64(2147483647) or v < Int64(-2147483648):
+                raise Error(
+                    "data fora da faixa de 32 bits: " + String(v) + " dias"
+                )
+            destino.unsafe_store(i, Int32(v))
+        return Self(b^, 4, n)
+
+    def __len__(self) -> Int:
+        return self.n
+
+    def __getitem__(self, i: Int) -> Int64:
+        if self.largura == 4:
+            return Int64(
+                self.bytes.unsafe_ptr().unsafe_bitcast[Int32]().unsafe_load(i)
+            )
+        return self.bytes.unsafe_ptr().unsafe_bitcast[Int64]().unsafe_load(i)
+
+    def para_lista(self) -> List[Int64]:
+        """Copia para `List[Int64]`. So onde a copia ja existiria."""
+        var out = List[Int64](capacity=self.n)
+        out.resize(unsafe_uninit_length=self.n)
+        if self.n == 0:
+            return out^
+        if self.largura == 8:
+            _ = external_call["memcpy", Int](
+                out.unsafe_ptr().unsafe_bitcast[UInt8](),
+                self.bytes.unsafe_ptr(),
+                self.n * 8,
+            )
+            return out^
+        var origem = self.bytes.unsafe_ptr().unsafe_bitcast[Int32]()
+        var destino = out.unsafe_ptr()
+        for i in range(self.n):
+            destino.unsafe_store(i, Int64(origem.unsafe_load(i)))
+        return out^
+
+
 def slab_int64(var valores: List[Int64]) -> List[Int64]:
     """Assume a lista como slab da coluna.
 

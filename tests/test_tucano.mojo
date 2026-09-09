@@ -246,10 +246,93 @@ def test_string_store_utf8_columnar() raises:
     assert_equal(c.texto_em(2), "")
     assert_true(c.textos.bytes_dados() > 0)
     assert_equal(c.textos.tamanho(), 3)
-    # slab numerico com capacity == len
+    # o slab de inteiros carrega a propria largura: 8 bytes para inteiro
     var n = Coluna.de_inteiros("i", [Int64(1), Int64(2), Int64(3)])
-    assert_equal(n.ints.capacity(), 3)
     assert_equal(len(n.ints), 3)
+    assert_equal(n.ints.largura, 8)
+    assert_equal(len(n.ints.bytes), 24)
+    assert_equal(Int(n.ints[2]), 3)
+
+
+def test_slab_de_data_tem_32_bits() raises:
+    """Data ocupa 4 bytes por linha; inteiro e datahora, 8.
+
+    O slab carrega a propria largura, entao nao ha um `List` por tipo na
+    `Coluna` — o que resolve a divida sem o sexto campo paralelo que o roadmap
+    recusava.
+    """
+    var dias = List[Int64]()
+    dias.append(Int64(dias_desde_epoch(2024, 1, 15)))
+    dias.append(Int64(dias_desde_epoch(1969, 12, 31)))
+    var d = Coluna.de_datas("quando", dias^)
+    assert_equal(d.ints.largura, 4)
+    assert_equal(len(d.ints.bytes), 8)  # duas linhas de 4 bytes
+    assert_equal(d.texto_em(0), "2024-01-15")
+    assert_equal(d.texto_em(1), "1969-12-31")
+    assert_equal(d.dias_em(1), -1)
+
+    var micros = List[Int64]()
+    micros.append(Int64(-86400000000))
+    var h = Coluna.de_datahoras("carimbo", micros^)
+    assert_equal(h.ints.largura, 8)
+    assert_equal(h.texto_em(0), "1969-12-31T00:00:00")
+
+    var i = Coluna.de_inteiros("k", [Int64(9223372036854775807)])
+    assert_equal(i.ints.largura, 8)
+    assert_equal(i.texto_em(0), "9223372036854775807")
+
+
+def test_slab_de_data_recusa_fora_da_faixa() raises:
+    """Estreitar em silencio devolveria uma data errada — e data errada nao
+    denuncia, parece uma data."""
+    var pegou = False
+    try:
+        var d = List[Int64]()
+        d.append(Int64(3000000000))  # alem de 2^31 dias
+        _ = Coluna.de_datas("quando", d^)
+    except e:
+        pegou = True
+        assert_true("32 bits" in String(e))
+    assert_true(pegou)
+
+
+def test_data_atravessa_os_operadores() raises:
+    """A coluna estreita tem de sobreviver a ordenacao, ao agrupamento e ao
+    filtro — sao os caminhos que leem o slab por ponteiro."""
+    var n = 40
+    var dias = List[Int64](capacity=n)
+    var marca = List[Int64](capacity=n)
+    for i in range(n):
+        dias.append(Int64(dias_desde_epoch(2024, 1, 1) + (i % 7)))
+        marca.append(Int64(i))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_datas("quando", dias^))
+    cols.append(Coluna.de_inteiros("marca", marca^))
+    var t = Tabela(cols^)
+
+    var por_data = List[String]()
+    por_data.append("quando")
+    var ordenada = t.ordenar(por_data, False)
+    assert_equal(ordenada.pegar("quando").texto_em(0), "2024-01-01")
+    assert_equal(
+        ordenada.pegar("quando").texto_em(ordenada.linhas() - 1), "2024-01-07"
+    )
+
+    var chaves = List[String]()
+    chaves.append("quando")
+    var g = calcular_grupos(t.lote(), chaves)
+    assert_equal(g.n_grupos, 7)
+
+    # e a ida e volta pelo Parquet, onde o slab e reconstruido
+    var caminho = String("tests/fixtures/_saida_data32.parquet")
+    para_parquet(t, caminho, 16)
+    var volta = ler_parquet(caminho)
+    assert_equal(volta.linhas(), n)
+    assert_equal(volta.pegar("quando").ints.largura, 4)
+    for i in range(n):
+        assert_equal(
+            volta.pegar("quando").texto_em(i), t.pegar("quando").texto_em(i)
+        )
 
 
 def test_ler_csv_infere_tipos_e_na() raises:

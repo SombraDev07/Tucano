@@ -701,16 +701,24 @@ def _compactar_f64(
 
 
 def _compactar_i64(
-    origem: List[Int64], keep: List[UInt8], n: Int, n_out: Int
+    origem: List[UInt8], largura: Int, keep: List[UInt8], n: Int, n_out: Int
 ) -> List[Int64]:
+    """Compacta o slab inteiro respeitando a largura, alargando para 64 na saida."""
     var out = List[Int64](capacity=n_out)
     if n_out <= 0:
         return out^
     out.resize(unsafe_uninit_length=n_out)
     var dest = out.unsafe_ptr()
-    var src = origem.unsafe_ptr()
     var k = keep.unsafe_ptr()
     var j = 0
+    if largura == 4:
+        var src32 = origem.unsafe_ptr().unsafe_bitcast[Int32]()
+        for i in range(n):
+            if k.unsafe_load(i) != 0:
+                dest.unsafe_store(j, Int64(src32.unsafe_load(i)))
+                j += 1
+        return out^
+    var src = origem.unsafe_ptr().unsafe_bitcast[Int64]()
     for i in range(n):
         if k.unsafe_load(i) != 0:
             dest.unsafe_store(j, src.unsafe_load(i))
@@ -747,7 +755,9 @@ def filtrar_coluna(col: Coluna, keep: List[UInt8]) raises -> Coluna:
         or col.tipo == DType.DATAHORA
     ):
         if sem_na:
-            var vals = _compactar_i64(col.ints, keep, n, n_out)
+            var vals = _compactar_i64(
+                col.ints.bytes, col.ints.largura, keep, n, n_out
+            )
             if col.tipo == DType.DATA:
                 return Coluna.de_datas(col.nome, vals^, List[Bool]())
             if col.tipo == DType.DATAHORA:
@@ -1171,8 +1181,12 @@ def calcular_grupos(cols: List[Coluna], chaves: List[String]) raises -> Grupos:
             if col.tipo == DType.LOGICO:
                 for i in range(linhas):
                     valores.append(Int(col.logics[i]))
+            elif col.ints.largura == 4:
+                var pv32 = col.ints.bytes.unsafe_ptr().unsafe_bitcast[Int32]()
+                for i in range(linhas):
+                    valores.append(Int(pv32.unsafe_load(i)))
             else:
-                var pv = col.ints.unsafe_ptr()
+                var pv = col.ints.bytes.unsafe_ptr().unsafe_bitcast[Int64]()
                 for i in range(linhas):
                     valores.append(Int(pv.unsafe_load(i)))
             var na = col.validity_bits.para_bytes()
@@ -2201,7 +2215,7 @@ def _extrair_chaves(
         else:
             ch.eh_real.append(False)
             ch.reais.append(List[Float64]())
-            ch.inteiros.append(col.ints.copy())
+            ch.inteiros.append(col.ints.para_lista())
     return ch^
 
 

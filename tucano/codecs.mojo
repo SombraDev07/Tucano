@@ -738,7 +738,9 @@ def _empacotar(mut out: List[UInt8], valores: List[Int], ini: Int, quantos: Int,
         out.append(UInt8(buffer & 0xFF))
 
 
-def codificar_delta_i64(valores: List[Int64]) raises -> List[UInt8]:
+def codificar_delta_i64(
+    valores: List[Int64], largura_maxima: Int = DELTA_LARGURA_MAXIMA
+) raises -> List[UInt8]:
     """DELTA_BINARY_PACKED: guarda a diferenca, nao o valor.
 
     Uma coluna de inteiros que cresce de um em um ocupa oito bytes por valor em
@@ -751,6 +753,10 @@ def codificar_delta_i64(valores: List[Int64]) raises -> List[UInt8]:
     quantos valores ao todo e o primeiro valor. Depois, por bloco, a **menor**
     diferenca do bloco e a largura de cada minibloco — subtraindo a menor, o que
     sobra e nao negativo e costuma caber em pouquissimos bits.
+
+    `largura_maxima` existe por causa do tipo fisico de quem chama: numa coluna
+    INT32 — data — um leitor de fora recusa minibloco com mais de 32 bits, e a
+    recusa aqui vira PLAIN la em cima, que sempre cabe.
     """
     var out = List[UInt8]()
     var n = len(valores)
@@ -798,7 +804,7 @@ def codificar_delta_i64(valores: List[Int64]) raises -> List[UInt8]:
                 if v > maior:
                     maior = v
             var w = _largura_de(maior)
-            if w > DELTA_LARGURA_MAXIMA:
+            if w > largura_maxima:
                 raise Error(
                     "delta: diferenca precisa de " + String(w)
                     + " bits; use PLAIN"

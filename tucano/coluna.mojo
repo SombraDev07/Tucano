@@ -22,6 +22,7 @@ from .buffer import (
     Validity,
     StringStore,
     slab_int64,
+    SlabInteiro,
     slab_float64,
     slab_bool_u8,
 )
@@ -51,7 +52,7 @@ struct Coluna(Copyable, Movable):
     var tipo: Int
     var n: Int
     var validity_bits: Validity
-    var ints: List[Int64]
+    var ints: SlabInteiro
     var reals: List[Float64]
     var logics: List[UInt8]
     var textos: StringStore
@@ -71,7 +72,7 @@ struct Coluna(Copyable, Movable):
             DType.INTEIRO,
             n,
             val^,
-            slab_int64(valores^),
+            SlabInteiro.de_i64(valores^),
             List[Float64](),
             List[UInt8](),
             StringStore.vazio(),
@@ -92,7 +93,7 @@ struct Coluna(Copyable, Movable):
             DType.REAL,
             n,
             val^,
-            List[Int64](),
+            SlabInteiro(),
             slab_float64(valores^),
             List[UInt8](),
             StringStore.vazio(),
@@ -113,7 +114,7 @@ struct Coluna(Copyable, Movable):
             DType.LOGICO,
             n,
             val^,
-            List[Int64](),
+            SlabInteiro(),
             List[Float64](),
             slab_bool_u8(valores),
             StringStore.vazio(),
@@ -149,7 +150,7 @@ struct Coluna(Copyable, Movable):
                 DType.TEXTO,
                 n,
                 val^,
-                List[Int64](),
+                SlabInteiro(),
                 List[Float64](),
                 List[UInt8](),
                 StringStore.de_valores(distintos),
@@ -160,7 +161,7 @@ struct Coluna(Copyable, Movable):
             DType.TEXTO,
             n,
             val^,
-            List[Int64](),
+            SlabInteiro(),
             List[Float64](),
             List[UInt8](),
             StringStore.de_valores(valores),
@@ -171,7 +172,13 @@ struct Coluna(Copyable, Movable):
     def de_datas(
         nome: String, var dias: List[Int64], ausentes: List[Bool] = List[Bool]()
     ) raises -> Self:
-        """Coluna de datas a partir de dias desde 1970-01-01."""
+        """Coluna de datas a partir de dias desde 1970-01-01.
+
+        O slab de data e de **32 bits**: dias desde 1970 nao passam de alguns
+        milhoes, e 32 bits cobrem mais ou menos cinco milhoes de anos para cada
+        lado. Metade da memoria de uma coluna de data, e o formato em disco ja
+        era de 4 bytes nos dois lados — Parquet `DATE` e Arrow `date32`.
+        """
         var n = len(dias)
         _validar_ausentes(n, ausentes)
         var val = Validity.todos_presentes(n)
@@ -182,7 +189,7 @@ struct Coluna(Copyable, Movable):
             DType.DATA,
             n,
             val^,
-            slab_int64(dias^),
+            SlabInteiro.de_dias(dias),
             List[Float64](),
             List[UInt8](),
             StringStore.vazio(),
@@ -204,7 +211,7 @@ struct Coluna(Copyable, Movable):
             DType.DATAHORA,
             n,
             val^,
-            slab_int64(micros^),
+            SlabInteiro.de_i64(micros^),
             List[Float64](),
             List[UInt8](),
             StringStore.vazio(),
@@ -247,7 +254,7 @@ struct Coluna(Copyable, Movable):
         tipo: Int,
         n: Int,
         var validity_bits: Validity,
-        var ints: List[Int64],
+        var ints: SlabInteiro,
         var reals: List[Float64],
         var logics: List[UInt8],
         var textos: StringStore,
@@ -329,11 +336,11 @@ struct Coluna(Copyable, Movable):
             raise Error("coluna sem valores validos: " + self.nome)
         if not self.validity_bits.tem_ausentes():
             if self.tipo == DType.INTEIRO:
-                return soma_i64_densa(self.ints, self.n)
+                return soma_i64_densa(self.ints.bytes, self.ints.largura, self.n)
             return soma_f64_densa(self.reals, self.n)
         var na = self.validity_bits.para_bytes()
         if self.tipo == DType.INTEIRO:
-            return soma_i64(self.ints, na, self.n)
+            return soma_i64(self.ints.bytes, self.ints.largura, na, self.n)
         return soma_f64(self.reals, na, self.n)
 
     def media(self) raises -> Float64:
@@ -350,7 +357,7 @@ struct Coluna(Copyable, Movable):
                 return minimo_f64_densa(self.reals, self.n)
             var na = self.validity_bits.para_bytes()
             if self.tipo == DType.INTEIRO:
-                return minimo_i64(self.ints, na, self.n)
+                return minimo_i64(self.ints.bytes, self.ints.largura, na, self.n)
             return minimo_f64(self.reals, na, self.n)
         except:
             raise Error("coluna sem valores validos: " + self.nome)
@@ -362,7 +369,7 @@ struct Coluna(Copyable, Movable):
                 return maximo_f64_densa(self.reals, self.n)
             var na = self.validity_bits.para_bytes()
             if self.tipo == DType.INTEIRO:
-                return maximo_i64(self.ints, na, self.n)
+                return maximo_i64(self.ints.bytes, self.ints.largura, na, self.n)
             return maximo_f64(self.reals, na, self.n)
         except:
             raise Error("coluna sem valores validos: " + self.nome)
@@ -400,7 +407,7 @@ struct Coluna(Copyable, Movable):
             DType.TEXTO,
             n,
             val^,
-            List[Int64](),
+            SlabInteiro(),
             List[Float64](),
             List[UInt8](),
             dicionario^,

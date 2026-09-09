@@ -3,6 +3,56 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.37.0] — Slab de data em 32 bits
+
+Data cabe em 32 bits com folga; inteiro e datahora precisam de 64. Em vez de um
+`List` por largura na `Coluna` — o sexto campo paralelo que o roadmap recusava
+havia tres marcos — o slab de inteiros passou a **carregar a propria largura**.
+
+| | Int64 | Int32 |
+|---|---|---|
+| 5M datas em memoria | 38 MiB | **19 MiB** |
+| ler 5M datas do Parquet | 10 ms | **9 ms** |
+
+Metade da memoria, mesmo tempo: a bifurcacao por largura acontece uma vez, fora do
+laco. Os benchmarks do projeto nao tem coluna de data e nao se moveram — leitura
+42 ms, pipeline 65 ms, fluxo 88 ms.
+
+### Corrigido
+
+- **Coluna de data com poucos valores distintos era escrita errada.** A pagina de
+  dicionario saia com oito bytes por valor numa coluna cujo tipo fisico e INT32; o
+  pyarrow lia o dobro de entradas, metade delas zero, e metade das linhas voltava
+  como 1970-01-01. O defeito estava la desde a 0.33.0 e ficou invisivel porque a
+  fixture de datas tinha tres linhas — poucas para dicionarizar. O dicionario
+  numerico agora carrega a propria largura.
+- **A escolha entre dicionario e PLAIN contava 8 bytes por data.** Sao 4. O
+  dicionario parecia barato em casos onde o PLAIN era menor.
+- **O delta em coluna de data podia pedir mais de 32 bits por minibloco**, que e o
+  teto do tipo fisico INT32. Agora e recusado, e a recusa vira PLAIN.
+
+### Adicionado
+
+- `SlabInteiro` em `tucano/buffer.mojo`: bytes + largura + n, com `de_i64` (8
+  bytes) e `de_dias` (4, com guarda de faixa).
+- Fixture `datas.parquet` — 400 linhas, quatro colunas: repetida (dicionario),
+  crescente (delta), espalhada com buracos (delta + niveis) e carimbo de tempo.
+  Entrou no round-trip e na verificacao com pyarrow.
+- Tres testes: largura por tipo, recusa fora da faixa, e data atravessando
+  ordenacao, agrupamento e a ida e volta pelo Parquet.
+
+### Alterado
+
+- Os quatro kernels de inteiro (`soma_i64_densa`, `soma_i64`, `minimo_i64`,
+  `maximo_i64`) e a compactacao do executor recebem a largura e bifurcam fora do
+  laco.
+- `Coluna.de_datas` **recusa** dia que nao cabe em 32 bits em vez de truncar:
+  estreitar em silencio devolveria uma data errada, e data errada nao denuncia —
+  parece uma data.
+- As factories de inteiro deixaram de assumir a `List` recebida; copiam uma vez
+  para dentro do slab de bytes. E o preco da largura variavel, e o CONTRATO foi
+  corrigido para dizer isso.
+
 ## [0.36.0] — A escrita, medida
 
 Escrever 5M x 5 leva 1,29 s contra 470 ms do pyarrow — e o arquivo sai com 12 MiB

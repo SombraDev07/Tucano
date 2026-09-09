@@ -537,7 +537,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Excel `.xlsx`: leitura e escrita, interop verificada | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-243 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+246 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Por muitos marcos o roadmap registrou paralelismo como bloqueado pela linguagem. **Estava

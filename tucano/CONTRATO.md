@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.36.0 — M0 → M27; leitura multithread; HTTP do painel fora do caminho crítico.
+Versão 0.37.0 — M0 → M28; leitura multithread; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -97,9 +97,9 @@ Sem `std.python`, sem biblioteca de dados em Python no runtime.
 | `Tri` | Verdadeiro / Falso / Desconhecido |
 | `DataCivil` | Ano/mês/dia do calendário |
 
-`data` guarda **dias desde 1970-01-01** e `datahora` guarda **microssegundos desde
-1970-01-01T00:00:00**, ambos no slab de inteiros: fisicamente inteiros, com o tipo lógico
-decidindo a semântica (mesma separação que o Arrow faz com Date32 e Timestamp[us]).
+`data` guarda **dias desde 1970-01-01** (em 32 bits) e `datahora` guarda **microssegundos
+desde 1970-01-01T00:00:00** (em 64), ambos no slab de inteiros: fisicamente inteiros, com o
+tipo lógico decidindo a semântica (mesma separação que o Arrow faz com Date32 e Timestamp[us]).
 `eh_numerico()` é falso para os dois — `soma()` de datas é erro; `eh_temporal()` é
 verdadeiro.
 
@@ -113,23 +113,25 @@ verdadeiro.
 ```
 Coluna
 ├── validity : bitmap empacotado (List[UInt8]) + contagem de ausentes O(1)
-├── ints     : slab contíguo Int64  — inteiro, data e datahora
+├── ints     : SlabInteiro — bytes + largura (4 para data, 8 para inteiro e datahora)
 ├── reals    : slab contíguo Float64
 ├── logics   : slab contíguo UInt8 0/1
-└── textos   : StringStore (offsets + bytes UTF-8)
+├── textos   : StringStore (offsets + bytes UTF-8)
+└── codigos  : Int32 por linha quando a coluna de texto é dicionarizada
 ```
 
-- As factories numéricas (`de_inteiros`, `de_reais`, `de_datas`, `de_datahoras`) **assumem**
-  a `List` recebida como slab da coluna, sem copiá-la: um `List` do Mojo já é contíguo, e
-  copiar só tocava páginas novas para chegar aos mesmos bytes. Quem passa uma lista viva
-  continua funcionando — o Mojo insere a cópia na chamada. As de texto e lógicos ainda
-  convertem, porque ali o layout de destino é outro.
+- **`ints` carrega a própria largura.** Data cabe em 32 bits — dias desde 1970 não passam de
+  alguns milhões — e inteiro e datahora precisam de 64. Um `List` por largura significaria um
+  campo novo na `Coluna` para cada tipo; um slab de bytes com a largura ao lado resolve os
+  dois com um campo só. Quem lê no caminho quente decide pela largura **uma vez, fora do
+  laço**: somar 20 milhões de inteiros mede 7 ms por bitcast e 7 ms por `List` tipado.
+- `SlabInteiro.de_dias` **recusa** o que não cabe em 32 bits em vez de truncar: estreitar em
+  silêncio devolveria uma data errada, e data errada não denuncia — parece uma data.
+- As factories de real (`de_reais`) **assumem** a `List` recebida como slab, sem copiá-la: um
+  `List` do Mojo já é contíguo. As numéricas inteiras copiam uma vez para dentro do slab de
+  bytes, que é o preço da largura variável; as de texto e lógicos convertem, porque ali o
+  layout de destino é outro.
 - O que a coluna garante é **contiguidade**, não `capacity == len`.
-- `List` aqui é o slab contíguo do Mojo — não uma lista de objetos.
-├── codigos  : Int32 por linha quando a coluna de texto é dicionarizada
-```
-
-- As factories (`de_inteiros`, …) recebem a `List` por posse; ver acima.
 - `List` aqui é o slab contíguo do Mojo — não uma lista de objetos.
 - O layout interno não é API pública. Os kernels SIMD acessam esses slabs por ponteiro.
 

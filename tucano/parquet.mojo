@@ -868,6 +868,7 @@ from .codecs import (
     descomprimir_snappy,
     decodificar_delta_i64,
     codificar_delta_i64,
+    DELTA_LARGURA_MAXIMA,
     comprimir_snappy,
     decodificar_rle,
     decodificar_rle_i32,
@@ -2362,11 +2363,17 @@ def _fatiar(col: Coluna, ini: Int, fim: Int) raises -> Coluna:
     var vals = List[Int64](capacity=n)
     vals.resize(unsafe_uninit_length=n)
     if n > 0:
-        _ = external_call["memcpy", Int](
-            vals.unsafe_ptr().unsafe_bitcast[UInt8](),
-            col.ints.unsafe_ptr().unsafe_offset(ini).unsafe_bitcast[UInt8](),
-            n * 8,
-        )
+        var pd = vals.unsafe_ptr()
+        if col.ints.largura == 4:
+            var po = col.ints.bytes.unsafe_ptr().unsafe_bitcast[Int32]()
+            for i in range(n):
+                pd.unsafe_store(i, Int64(po.unsafe_load(ini + i)))
+        else:
+            _ = external_call["memcpy", Int](
+                vals.unsafe_ptr().unsafe_bitcast[UInt8](),
+                col.ints.bytes.unsafe_ptr().unsafe_offset(ini * 8),
+                n * 8,
+            )
     if col.tipo == DType.DATA:
         return Coluna.de_datas(col.nome, vals^, aus^)
     if col.tipo == DType.DATAHORA:
@@ -2396,10 +2403,25 @@ struct _DicNumerico(Movable):
     var codigos: List[Int32]
     var vale: Bool
 
-    def __init__(out self, var distintos: List[Int64], var codigos: List[Int32], vale: Bool):
+    var largura: Int
+    """Bytes por valor **na pagina**, que e o tamanho do tipo fisico do Parquet:
+    quatro para DATA (INT32), oito para o resto. A primeira versao escrevia oito
+    sempre, e um leitor de fora — pyarrow inclusive — lia o dicionario de uma
+    coluna de datas como o dobro de entradas, metade delas zero. O dicionario
+    carrega a propria largura pela mesma razao que o slab: quem escreve os bytes
+    nao precisa saber de que coluna vieram."""
+
+    def __init__(
+        out self,
+        var distintos: List[Int64],
+        var codigos: List[Int32],
+        vale: Bool,
+        largura: Int = 8,
+    ):
         self.distintos = distintos^
         self.codigos = codigos^
         self.vale = vale
+        self.largura = largura
 
 
 def _dicionario_numerico(col: Coluna) raises -> _DicNumerico:
@@ -2447,19 +2469,24 @@ def _dicionario_numerico(col: Coluna) raises -> _DicNumerico:
     var largura = 0
     if len(distintos) > 1:
         largura = largura_de_bits(len(distintos) - 1)
-    var com_dicionario = len(distintos) * 8 + (presentes * largura + 7) // 8
-    var em_plain = presentes * 8
+    # data ocupa quatro bytes na pagina, nao oito: contar oito faria o
+    # dicionario parecer barato num caso em que o PLAIN e menor
+    var bytes_por_valor = 4 if col.tipo == DType.DATA else 8
+    var com_dicionario = (
+        len(distintos) * bytes_por_valor + (presentes * largura + 7) // 8
+    )
+    var em_plain = presentes * bytes_por_valor
     if com_dicionario >= em_plain:
         return _DicNumerico(vazio_i^, vazio_c^, False)
-    return _DicNumerico(distintos^, codigos^, True)
+    return _DicNumerico(distintos^, codigos^, True, bytes_por_valor)
 
 
 def _valores_plain_dicionario_numerico(dic: _DicNumerico) -> List[UInt8]:
-    """PLAIN dos valores distintos: oito bytes little-endian cada."""
-    var out = List[UInt8](capacity=len(dic.distintos) * 8)
+    """PLAIN dos valores distintos, little-endian, na largura do tipo fisico."""
+    var out = List[UInt8](capacity=len(dic.distintos) * dic.largura)
     for v in dic.distintos:
         var x = Int(v)
-        for k in range(8):
+        for k in range(dic.largura):
             out.append(UInt8((x >> (8 * k)) & 0xFF))
     return out^
 
@@ -2503,10 +2530,17 @@ def _delta_se_valer(col: Coluna) raises -> List[UInt8]:
     var presentes = _inteiros_presentes(col)
     if len(presentes) < 8:
         return vazio^
+    # data e INT32 dos dois lados da conta: o PLAIN a bater custa quatro bytes
+    # por valor, e o minibloco nao pode passar dos 32 bits do tipo fisico
+    var em_plain = 8
+    var teto = DELTA_LARGURA_MAXIMA
+    if col.tipo == DType.DATA:
+        em_plain = 4
+        teto = 32
     # o codec recusa faixas que nao cabem; recusa dele e resposta aqui
     try:
-        var bytes = codificar_delta_i64(presentes)
-        if len(bytes) < len(presentes) * 8:
+        var bytes = codificar_delta_i64(presentes, teto)
+        if len(bytes) < len(presentes) * em_plain:
             return bytes^
         return vazio^
     except:
