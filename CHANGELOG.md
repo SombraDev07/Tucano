@@ -3,6 +3,46 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.39.0] — A escrita, em ondas
+
+A 0.38.0 pos uma thread por coluna e parou ai: com cinco colunas, cinco nucleos
+de dezesseis. Tres coisas mudaram, e a escrita passou de 594 para **430 ms** —
+o mesmo tempo do pyarrow, com um arquivo 3,2x menor.
+
+### Corrigido
+
+- **A montagem do arquivo era quadratica.** Concatenar os pedacos num `List` que
+  cresce parecia inocente: o `resize` realoca para o tamanho pedido, entao cada
+  um dos 250 pedacos copiava o arquivo inteiro de novo. Juntar 12 MiB em 250
+  pedacos custava 62 ms; com uma alocacao do tamanho final e `memcpy` no lugar,
+  custa 0,6 ms.
+
+### Alterado
+
+- **O padrao de row group passou a ser 500 mil linhas** (era o arquivo inteiro
+  num grupo so). O padrao antigo era o pior dos dois lados: a leitura em fluxo
+  nao tinha granularidade — o "pico de um row group" era o arquivo inteiro — e a
+  escrita nao tinha o que paralelizar alem das colunas. Em 500 mil o arquivo
+  cresce 5% sobre o minimo, a escrita fica 2,4x mais rapida e a leitura e a mais
+  rapida da tabela medida. Passar `0` continua gravando tudo num grupo so.
+  Em troca, a leitura em fluxo segura 500 mil linhas por pico em vez de 100 mil,
+  e mede 93 ms contra 90.
+- **Varios row groups sao codificados ao mesmo tempo**, em ondas. Como os
+  offsets de cada pedaco sao relativos a ele mesmo, a ordem so importa na
+  montagem. A politica esta em `grupos_por_onda()`, com a tabela que a escolheu:
+  duas tarefas por nucleo, com teto de 2 milhoes de linhas em voo — sem teto,
+  codificar em paralelo viraria copiar a tabela inteira.
+
+### Numeros publicados de novo
+
+Todos remedidos sobre o arquivo que o padrao de hoje escreve (10 MiB, era 12):
+
+| 5M x 5 | Tucano | pyarrow | Polars | pandas | DuckDB |
+|---|---|---|---|---|---|
+| escrever | **430 ms / 10,1 MiB** | 430 ms / 31,9 MiB | 92 ms / 43,6 MiB | — | — |
+| ler tudo | **39 ms** | 47 ms | 43 ms | 92 ms | 4 ms |
+| pipeline (1 thread) | **61 ms** | — | 150 ms | 237 ms | 71 ms |
+
 ## [0.38.0] — Escrita paralela por coluna
 
 O M27 mediu a escrita e nao achou gordura: montar o dicionario, montar a pagina,

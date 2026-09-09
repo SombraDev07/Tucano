@@ -30,7 +30,7 @@ def _gerar(caminho: String, n: Int) raises:
     cols.append(Coluna.de_reais("peso", pesos^))
     cols.append(Coluna.de_textos("grupo", grupos^))
     cols.append(Coluna.de_textos("nota", notas^))
-    para_parquet(Tabela(cols^), caminho, 100_000)
+    para_parquet(Tabela(cols^), caminho)  # row groups do padrao
 
 
 def _medir(caminho: String, colunas: List[String]) raises -> Int:

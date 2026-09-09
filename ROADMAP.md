@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M29 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M30 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -279,6 +279,7 @@ de datas, com a leitura no mesmo tempo. A dívida sai da lista.
 | M27 | A escrita, medida | crítica | ✅ feito | perfil por fase; as codificações pagam a si mesmas |
 | M28 | Slab de data em Int32 | crítica | ✅ feito | 38 → 19 MiB por 5M datas; leitura igual |
 | M29 | Escrita paralela por coluna | crítica | ✅ feito | 1227 → 594 ms; encosta no pyarrow |
+| M30 | A escrita, em ondas | crítica | ✅ feito | 594 → 430 ms; empata com o pyarrow |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | ✅ feito | `para_xlsx` — ZIP com método 0, sem compressor |
@@ -2610,6 +2611,100 @@ workload justifica.
 - [x] `bench-escrita` no repositório, dos dois lados — o número do M27 era de um
       script solto
 - [x] o arquivo escrito em paralelo é byte a byte o mesmo do serial
+- [x] 246 testes verdes, oito passos de verificação verdes
+
+---
+
+## M30 — A escrita, em ondas ✅
+
+O M29 pôs uma thread por coluna e parou aí. Com cinco colunas num row group,
+isso usa cinco núcleos de dezesseis. Medindo por fase o que sobrou de 626 ms:
+
+| fase | ms |
+|---|---|
+| recortar as fatias (serial) | 137 |
+| codificar (5 threads) | 356 |
+| montar o arquivo (serial) | **90** |
+| rodapé, buffer, escrita | ~43 |
+
+### Os 90 ms de montagem eram quadráticos
+
+Concatenar os pedaços num `List` que cresce parecia inocente. Não é: o `resize`
+realoca para o tamanho pedido, então cada um dos 250 pedaços copiava o arquivo
+inteiro de novo. Medido em separado, juntar 12 MiB em 250 pedaços:
+
+| forma | µs |
+|---|---|
+| `resize` a cada pedaço | 62 502 |
+| `reserve` uma vez, `resize` a cada pedaço | 5 979 |
+| **uma alocação do tamanho final, `memcpy` no lugar** | **604** |
+
+Os pedaços ficam separados até o fim, o rodapé é montado antes, e o arquivo é
+alocado uma vez com o tamanho exato. 626 → 554 ms.
+
+### Ondas: os row groups também são independentes
+
+Como os offsets de cada pedaço são relativos a ele mesmo (M29), row groups
+diferentes podem ser codificados ao mesmo tempo — a ordem só importa na
+montagem. A onda tem tamanho porque cada grupo em voo segura a sua fatia da
+tabela viva; sem teto, codificar em paralelo viraria copiar a tabela inteira.
+
+| grupos por onda | ms |
+|---|---|
+| 1 (só por coluna) | 554 |
+| 2 | 433 |
+| 4 | 389 |
+| 6 | 371 |
+| **8** | **349** |
+| 12 | 357 |
+| 16 | 394 |
+
+A curva achata perto de oito, e a política ficou em `grupos_por_onda()`: duas
+tarefas por núcleo, limitadas por um teto de 2 milhões de linhas em voo.
+
+### O padrão de row group mudou — 500 mil linhas
+
+Um arquivo inteiro num row group só era o padrão antigo, e era o pior dos dois
+lados: a leitura em fluxo não tinha granularidade nenhuma (o "pico de um row
+group" era o arquivo inteiro) e a escrita não tinha o que paralelizar além das
+colunas. Medido, 5M × 5:
+
+| por grupo | escrita | arquivo | leitura |
+|---|---|---|---|
+| tudo num grupo | 1002 ms | 9,6 MiB | 43 ms |
+| 2.000.000 | 798 | 9,7 | 43 |
+| 1.000.000 | 584 | 9,8 | 42 |
+| **500.000** | **424** | **10,1** | **36** |
+| 250.000 | 358 | 10,6 | 38 |
+| 100.000 | 321 | 12,0 | 40 |
+| 50.000 | 330 | 14,5 | 43 |
+
+Grupo menor escreve mais rápido e ocupa mais: cada grupo carrega o próprio
+dicionário, e dicionário repetido é o que engorda o arquivo. Em 500 mil o
+arquivo cresce 5% sobre o mínimo, a escrita fica 2,4× mais rápida e a leitura é
+a mais rápida da tabela. `0` continua querendo dizer "tudo num grupo".
+
+O que isso custa está dito: a leitura em fluxo passa a segurar 500 mil linhas em
+vez de 100 mil por pico, e mede 93 ms contra 90.
+
+### Onde a escrita chegou
+
+5M × 5, no padrão de hoje:
+
+| | ms | MiB |
+|---|---|---|
+| Tucano | **430** | **10,1** |
+| pyarrow | 430 | 31,9 |
+| Polars | 92 | 43,6 |
+
+**Mesmo tempo do pyarrow, arquivo 3,2× menor.** Era 2,7× mais lento no M27.
+
+### Critério de saída
+
+- [x] a montagem do arquivo deixou de ser quadrática, com o número medido
+- [x] a política de onda mora em `paralelo.mojo`, com a tabela que a escolheu
+- [x] o padrão de row group é medido, não herdado
+- [x] o arquivo sai byte a byte igual ao da versão serial
 - [x] 246 testes verdes, oito passos de verificação verdes
 
 ---

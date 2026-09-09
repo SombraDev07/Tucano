@@ -56,7 +56,7 @@ def main():
     linha = [
         l.split() for l in ENTRADA.read_text().splitlines() if l and not l.startswith("#")
     ][0]
-    n, ns_um, bytes_um, ns_cem, bytes_cem = (int(x) for x in linha)
+    n, ns_padrao, bytes_padrao, ns_um, bytes_um = (int(x) for x in linha)
 
     t = tabela(n)
     df = pl.from_arrow(t)
@@ -72,8 +72,8 @@ def main():
         df.write_parquet(DESTINO, compression="snappy", row_group_size=por_grupo)
 
     for titulo, por_grupo, ns_tucano, bytes_tucano in [
-        ("um row group", n, ns_um, bytes_um),
-        ("grupos de 100k", 100_000, ns_cem, bytes_cem),
+        ("row groups de 500k (o padrao do Tucano)", 500_000, ns_padrao, bytes_padrao),
+        ("tudo num row group", n, ns_um, bytes_um),
     ]:
         print(f"  {titulo}")
         print(f"    {'':<10} {'ms':>8} {'MiB':>8}")

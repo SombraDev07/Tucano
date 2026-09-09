@@ -465,19 +465,19 @@ pixi run bench-comparativo              # pipeline completo
 pixi run -e comparativo referencia-1t   # pipeline, uma thread
 ```
 
-**Ler 5 milhões de linhas × 5 colunas de Parquet — 44 MiB — e materializar em memória:**
+**Ler 5 milhões de linhas × 5 colunas de Parquet — 10 MiB — e materializar em memória:**
 
 | | ler tudo | ler 2 de 5 colunas |
 |---|---|---|
-| Tucano | **38 ms** | 23 ms |
-| pandas 3.0.5 | 74 ms | 32 ms |
-| pyarrow | 43 ms | 21 ms |
-| Polars 1.44 | 31 ms | 12 ms |
-| DuckDB 1.5.5 | 2 ms | 1 ms |
+| Tucano | **39 ms** | 22 ms |
+| pandas 3.0.5 | 92 ms | 42 ms |
+| pyarrow | 47 ms | 33 ms |
+| Polars 1.44 | 43 ms | 14 ms |
+| DuckDB 1.5.5 | 4 ms | 3 ms |
 
 O arquivo é o que o próprio Tucano escreve com o padrão de hoje, e cada coluna recebe a
 codificação que a mede menor: `id` em `DELTA_BINARY_PACKED`, `valor` e `peso` em dicionário
-numérico, os textos em `RLE_DICTIONARY`. São **12 MiB** onde o mesmo dado em PLAIN ocupa 43 —
+numérico, os textos em `RLE_DICTIONARY`. São **10 MiB** onde o mesmo dado em PLAIN ocupa 43 —
 e escolher a codificação deixa até a **escrita** mais rápida, porque sobra menos byte para o
 Snappy comprimir.
 
@@ -485,26 +485,26 @@ Snappy comprimir.
 
 | | tempo | vs Tucano |
 |---|---|---|
-| Tucano | **63 ms** | — |
-| Tucano **em fluxo** (pico de 1 row group) | 90 ms | era 900 ms |
-| pandas 3.0.5 (1 thread) | 220 ms | Tucano **3,5×** mais rápido |
-| Polars (1 thread) | 163 ms | Tucano **2,6×** mais rápido |
-| DuckDB (1 thread) | 75 ms | Tucano **1,2×** mais rápido |
-| Polars (16 threads) | 53 ms | 1,2× |
-| DuckDB (16 threads) | 11 ms | 5,7× |
+| Tucano | **61 ms** | — |
+| Tucano **em fluxo** (pico de 1 row group) | 93 ms | era 900 ms |
+| pandas 3.0.5 (1 thread) | 237 ms | Tucano **3,9×** mais rápido |
+| Polars (1 thread) | 150 ms | Tucano **2,5×** mais rápido |
+| DuckDB (1 thread) | 71 ms | Tucano **1,2×** mais rápido |
+| Polars (16 threads) | 45 ms | 1,4× |
+| DuckDB (16 threads) | 14 ms | 4,4× |
 
 **Escrever as mesmas 5M × 5 linhas em Parquet** — tempo e tamanho andam juntos aqui, porque
 escrever PLAIN é rápido e produz um arquivo que todo leitor paga para sempre:
 
 | | ms | MiB |
 |---|---|---|
-| Tucano | **594** | **12,0** |
-| pyarrow | 474 | 40,8 |
-| Polars | 81 | 43,8 |
+| Tucano | **430** | **10,1** |
+| pyarrow | 430 | 31,9 |
+| Polars | 92 | 43,6 |
 
-Somos 1,25× mais lentos que o pyarrow e o arquivo sai **3,4× menor**; o Polars escreve em um
-sétimo do tempo e produz 3,6× mais bytes. A escrita se paga uma vez; a leitura, sempre.
-A codificação de cada coluna roda em uma thread — ver `bench-escrita`.
+**O mesmo tempo do pyarrow, com um arquivo 3,2× menor.** O Polars escreve em um quinto do
+tempo e produz 4,3× mais bytes. A escrita se paga uma vez; a leitura, sempre. Cada coluna de
+cada row group é codificada numa thread — ver `bench-escrita`.
 
 Uma thread contra uma thread: o Tucano passa pandas, Polars e o DuckDB neste workload. O que resta para o DuckDB em 16 núcleos é paralelismo, e nos operadores ele foi
 **medido e recusado**: compactar três colunas em três threads mediu 20 ms contra 13 da versão

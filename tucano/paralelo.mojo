@@ -103,6 +103,48 @@ def nucleos() -> Int:
     return n
 
 
+# Quantas linhas de fatia a escrita pode segurar viva de uma vez. A codificacao
+# de um row group e independente da dos outros, entao varios podem ser
+# codificados ao mesmo tempo — mas cada um em voo tem a sua fatia da tabela na
+# memoria, e sem teto o escritor acabaria copiando a tabela inteira para
+# codificar em paralelo.
+comptime LINHAS_MAXIMAS_POR_ONDA = 2_000_000
+
+
+def grupos_por_onda(colunas: Int, linhas_por_grupo: Int) -> Int:
+    """Quantos row groups codificar ao mesmo tempo na escrita.
+
+    Uma coluna por thread satura em `colunas` threads, e com cinco colunas isso
+    deixa onze nucleos de dezesseis parados. Medido, escrevendo 5M x 5 em grupos
+    de 100 mil linhas:
+
+        grupos por onda    ms
+             1 (so coluna) 554
+             2             433
+             4             389
+             6             371
+             8             349
+            12             357
+            16             394
+
+    A curva achata perto de oito e depois so oscila — dai o alvo de duas tarefas
+    por nucleo, e nao mais. O teto de linhas e o que impede que um row group
+    grande transforme a onda numa copia da tabela.
+    """
+    if colunas < 1:
+        return 1
+    var n = (2 * nucleos() + colunas - 1) // colunas
+    if n < 1:
+        n = 1
+    if linhas_por_grupo > 0:
+        var teto = LINHAS_MAXIMAS_POR_ONDA // linhas_por_grupo
+        if teto < 1:
+            teto = 1
+        if n > teto:
+            n = teto
+    return n
+
+
 def threads_para(tarefas: Int, linhas_por_tarefa: Int) -> Int:
     """Quantas threads usar — 1 significa fazer em linha, sem thread nenhuma.
 

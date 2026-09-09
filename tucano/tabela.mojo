@@ -20,6 +20,7 @@ from .expr import Expr
 from .plano import Etapa, TipoEtapa, descrever_logico, descrever_fisico
 from .agregacao import Agregacao, contar
 from .parquet import (
+    LINHAS_POR_GRUPO_PADRAO,
     ler_parquet_lote,
     para_parquet_lote,
     esquema_parquet,
@@ -451,14 +452,18 @@ def ler_parquet(
 
 
 def para_parquet(
-    tabela: Tabela, caminho: String, linhas_por_grupo: Int = 0,
+    tabela: Tabela, caminho: String,
+    linhas_por_grupo: Int = LINHAS_POR_GRUPO_PADRAO,
     compressao: String = "snappy",
 ) raises:
     """Grava a tabela em Parquet.
 
-    `linhas_por_grupo` divide o arquivo em row groups. Grupos menores permitem
-    leitura em fluxo com pico de memoria menor. `compressao` e `"snappy"`
-    (padrao) ou `"nenhuma"`.
+    `linhas_por_grupo` divide o arquivo em row groups — 500 mil por padrao, o
+    numero medido em `LINHAS_POR_GRUPO_PADRAO`. Grupos menores permitem leitura
+    em fluxo com pico de memoria menor e escrita mais paralela, e custam alguns
+    por cento de arquivo, porque cada grupo carrega o proprio dicionario. Passar
+    `0` grava tudo num grupo so. `compressao` e `"snappy"` (padrao) ou
+    `"nenhuma"`.
     """
     para_parquet_lote(
         tabela.lote(), tabela.nomes(), caminho, linhas_por_grupo, compressao

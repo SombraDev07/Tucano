@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.38.0 — M0 → M29; leitura multithread; HTTP do painel fora do caminho crítico.
+Versão 0.39.0 — M0 → M30; leitura multithread; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -340,7 +340,10 @@ rodapé; `coletar()` e
 rodando — pular grupo é I/O, não substitui a seleção.
 
 `para_parquet(tabela, caminho, linhas_por_grupo)` divide o arquivo em row groups; grupos
-menores dão pico menor na leitura em fluxo e mais oportunidade de poda.
+menores dão pico menor na leitura em fluxo, mais oportunidade de poda e escrita mais
+paralela, e custam alguns por cento de arquivo, porque cada grupo carrega o próprio
+dicionário. O padrão é **500 mil linhas** (`LINHAS_POR_GRUPO_PADRAO`), medido; `0` grava tudo
+num grupo só.
 
 ### SQL
 
@@ -500,7 +503,7 @@ duas encolhe. Na leitura, as três são entendidas.
 |---|---|
 | `ler_parquet(caminho)` | lê o arquivo inteiro |
 | `ler_parquet(caminho, [nomes])` | **column pruning**: as outras colunas nunca são lidas |
-| `para_parquet(tabela, caminho)` | escreve (Snappy; `compressao="nenhuma"` desliga) |
+| `para_parquet(tabela, caminho)` | escreve (Snappy e row groups de 500 mil linhas por padrão) |
 | `esquema_parquet(caminho)` | esquema só do rodapé, sem tocar nos dados |
 | `metadados_parquet(caminho)` | linhas, row groups, codificações, compressão |
 

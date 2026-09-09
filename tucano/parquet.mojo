@@ -18,7 +18,11 @@ from std.ffi import external_call
 from std.memory import UnsafePointer
 from .thrift import LeitorThrift, TTipo, CampoThrift, ListaThrift
 from .arquivo import LeitorArquivo
-from .paralelo import LINHAS_MINIMAS_POR_TAREFA, threads_para
+from .paralelo import (
+    LINHAS_MINIMAS_POR_TAREFA,
+    grupos_por_onda,
+    threads_para,
+)
 from .expr import Expr, ExprNode, Kind
 from .codecs import bits_para_real64, bits_para_real32
 
@@ -2731,6 +2735,29 @@ def _bytes_stats(tipo: Int, bits: Int) -> List[UInt8]:
     return out^
 
 
+# Quantas linhas cabem num row group quando ninguem diz. Um arquivo inteiro num
+# grupo so era o padrao antigo, e era o pior dos dois lados: a leitura em fluxo
+# nao tinha granularidade nenhuma — o "pico de um row group" virava o arquivo
+# inteiro — e a escrita nao tinha o que paralelizar alem das colunas.
+#
+# Medido, 5M x 5 colunas:
+#
+#     por grupo    escrita    arquivo    leitura
+#     tudo num       1002 ms   9,6 MiB     43 ms
+#     2.000.000       798      9,7         43
+#     1.000.000       584      9,8         42
+#       500.000       424     10,1         36
+#       250.000       358     10,6         38
+#       100.000       321     12,0         40
+#        50.000       330     14,5         43
+#
+# Grupo menor escreve mais rapido e ocupa mais: cada grupo carrega o proprio
+# dicionario, e dicionario repetido e o que engorda o arquivo. Em 500 mil o
+# arquivo cresce 5% sobre o minimo, a escrita fica 2,4x mais rapida e a leitura
+# e a mais rapida da tabela. Passar `0` continua querendo dizer "tudo num grupo".
+comptime LINHAS_POR_GRUPO_PADRAO = 500_000
+
+
 struct _PedacoCodificado(Movable):
     """Uma coluna de um row group ja em bytes, pronta para entrar no arquivo.
 
@@ -2902,7 +2929,7 @@ def para_parquet_lote(
     colunas: List[Coluna],
     nomes: List[String],
     caminho: String,
-    linhas_por_grupo: Int = 0,
+    linhas_por_grupo: Int = LINHAS_POR_GRUPO_PADRAO,
     compressao: String = "snappy",
 ) raises:
     """Grava um lote de colunas em Parquet.
@@ -2916,9 +2943,14 @@ def para_parquet_lote(
     if len(colunas) > 0:
         n_linhas = colunas[0].tamanho()
 
-    var arquivo = List[UInt8]()
-    for b in String("PAR1").as_bytes():
-        arquivo.append(b)
+    # os pedacos ficam separados ate o fim, e o arquivo e alocado **uma vez**
+    # com o tamanho exato. Concatenar num `List` que cresce parecia inocente e
+    # custava 90 ms: o `resize` realoca para o tamanho pedido, entao cada um
+    # dos 250 pedacos copiava o arquivo inteiro de novo. Medido em separado:
+    # 62 ms para juntar 12 MiB em 250 pedacos, contra 0,6 ms com uma alocacao
+    # so.
+    var pedacos = List[_PedacoCodificado]()
+    var pos = 4  # depois do "PAR1"
 
     # fronteiras dos row groups
     var passo = linhas_por_grupo
@@ -2948,34 +2980,52 @@ def para_parquet_lote(
     var offset_dic = List[Int]()
     var deltas_usados = List[Bool]()
     var stats = List[StatsFaixa]()
-    for g in range(len(inicios)):
+    # Quantos row groups codificar de uma vez. Uma coluna por thread satura em
+    # `len(colunas)` threads, e com cinco colunas isso deixa onze nucleos de
+    # dezesseis parados. Os pedacos nao dependem da posicao — os offsets sao
+    # relativos — entao grupos diferentes tambem podem ser codificados ao mesmo
+    # tempo, e a ordem so importa na montagem.
+    #
+    # A onda existe por memoria: com todos os grupos de uma vez, as fatias de
+    # todos eles ficariam vivas ao mesmo tempo, que e a tabela inteira copiada.
+    var por_onda = grupos_por_onda(len(colunas), passo)
+
+    var g = 0
+    while g < len(inicios):
+        var ate = g + por_onda
+        if ate > len(inicios):
+            ate = len(inicios)
         var linhas_grupo = fins[g] - inicios[g]
 
         # recortar e serial de proposito: e a fatia que a thread leva consigo,
         # e o recorte ja e um `memcpy` — mandar a thread recortar so mudaria
         # quem paga a mesma copia
         var tarefas = List[_TarefaEscrita]()
-        for c in range(len(colunas)):
-            tarefas.append(
-                _TarefaEscrita(
-                    _fatiar(colunas[c], inicios[g], fins[g]), codec, linhas_grupo
+        for gg in range(g, ate):
+            for c in range(len(colunas)):
+                tarefas.append(
+                    _TarefaEscrita(
+                        _fatiar(colunas[c], inicios[gg], fins[gg]),
+                        codec,
+                        fins[gg] - inicios[gg],
+                    )
                 )
-            )
 
         _rodar_tarefas_de_escrita(tarefas, linhas_grupo)
 
         # a montagem volta a ser serial: o arquivo tem uma ordem, e as threads
         # so produziram os pedacos que entram nela
-        for c in range(len(tarefas)):
-            if tarefas[c].erro != "":
-                raise Error(tarefas[c].erro)
-            if len(tarefas[c].saida) != 1:
+        for k in range(len(tarefas)):
+            var c = k % len(colunas)
+            if tarefas[k].erro != "":
+                raise Error(tarefas[k].erro)
+            if len(tarefas[k].saida) != 1:
                 raise Error(
                     "parquet: a coluna '" + nomes[c] + "' nao voltou da codificacao"
                 )
-            var pedaco = tarefas[c].saida.pop()
-            var base = len(arquivo)
-            _acrescentar(arquivo, pedaco.bytes)
+            var pedaco = tarefas[k].saida.pop()
+            var base = pos
+            pos += len(pedaco.bytes)
             stats.append(pedaco.stats)
             deltas_usados.append(pedaco.usa_delta)
             offsets.append(base)
@@ -2985,6 +3035,8 @@ def para_parquet_lote(
             offset_dic.append(
                 -1 if pedaco.dic_rel < 0 else base + pedaco.dic_rel
             )
+            pedacos.append(pedaco^)
+        g = ate
 
     # ---- FileMetaData
     var w = EscritorThrift()
@@ -3078,10 +3130,32 @@ def para_parquet_lote(
     w.sair()
 
     var meta = w.finalizar()
-    for b in meta:
-        arquivo.append(b)
-    _por_le(arquivo, len(meta), 4)
+
+    # ---- montagem: uma alocacao, um memcpy por pedaco
+    var rodape = List[UInt8]()
+    _acrescentar(rodape, meta)
+    _por_le(rodape, len(meta), 4)
     for b in String("PAR1").as_bytes():
-        arquivo.append(b)
+        rodape.append(b)
+
+    var arquivo = List[UInt8]()
+    arquivo.resize(unsafe_uninit_length=pos + len(rodape))
+    var destino = arquivo.unsafe_ptr()
+    var magica = String("PAR1").as_bytes()
+    for i in range(4):
+        destino.unsafe_store(i, magica[i])
+    var onde = 4
+    for i in range(len(pedacos)):
+        ref bytes_do_pedaco = pedacos[i].bytes
+        var n = len(bytes_do_pedaco)
+        if n > 0:
+            _ = external_call["memcpy", Int](
+                destino.unsafe_offset(onde), bytes_do_pedaco.unsafe_ptr(), n
+            )
+        onde += n
+    if len(rodape) > 0:
+        _ = external_call["memcpy", Int](
+            destino.unsafe_offset(onde), rodape.unsafe_ptr(), len(rodape)
+        )
 
     Path(caminho).write_bytes(arquivo)
