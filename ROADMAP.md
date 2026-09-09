@@ -132,10 +132,12 @@ Falta para o 1.0, e nada disso é questão de escopo:
 |---|---|
 | ~~**Escrita `.xlsx`**~~ | Feito no M14: `para_xlsx`, uma aba, verificado contra o openpyxl. |
 | ~~**Paralelismo por thread**~~ | Feito no M13: leitura usa uma thread por coluna, 105 → 69 ms. Os operadores de execução ainda são de uma thread — é o que separa o Tucano do DuckDB em 16 núcleos. |
-| **Publicação em canal conda** | `recipe.yaml` está pronto; falta um canal (prefix.dev ou equivalente). Decisão de projeto. |
+| **Publicação em canal conda** | `recipe.yaml` e `tools/publicar_canal.sh` prontos e testados; o canal é o GitHub Pages do próprio repositório. Falta ligar o Pages e dar o `push` — ato do dono. |
 | ~~**Slab de data em Int32**~~ | Feito no M28: o slab carrega a própria largura. 38 → 19 MiB por 5M datas, leitura no mesmo tempo. |
 
-GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Do que falta para o 1.0, **sobrou um item, e ele não é código**: o canal conda, que é decisão de projeto — `recipe.yaml` está pronto e esperando um canal.
+GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Do que falta para o 1.0, **sobrou um item, e ele não é código**: publicar o canal conda.
+
+E ele deixou de ser uma pergunta em aberto. Um canal conda é uma árvore de arquivos estática servida por HTTP — `noarch/` com os `.conda` e um `repodata.json`. Verificado ponta a ponta: pacote construído com `rattler-build`, árvore servida por um `python -m http.server`, `pixi install` resolvendo e instalando em `lib/mojo/`, script do usuário rodando sem `-I`. O GitHub Pages do próprio repositório serve essa árvore, então **o canal é o GitHub**. `tools/publicar_canal.sh` empacota, acumula as versões já publicadas e deixa o commit pronto na branch `gh-pages`; falta ligar o Pages nas configurações e dar o `push`, que é ato do dono.
 
 | Peça | Status |
 |------|--------|

@@ -141,16 +141,31 @@ A fonte é recompilada a cada execução; o `.mojoc` já vem compilado. Em troca
 à versão exata do compilador** — trocou de Mojo, roda `pixi run build` de novo. Se os dois
 estiverem instalados, a fonte ganha.
 
-### Quando houver canal conda
+### Pelo canal conda (quando publicado)
 
-`recipe.yaml` está pronto e instala a fonte em `lib/mojo/`. Com um canal publicado
-(prefix.dev ou equivalente), o uso vira o equivalente Mojo do `pip install pandas`:
+Aí o uso vira o equivalente Mojo do `pip install pandas`, e o Tucano entra como dependência
+declarada do projeto de quem usa:
 
 ```bash
-pixi add tucano -c <canal>
+pixi add tucano -c https://sombradev07.github.io/Tucano
 ```
 
-Falta só o canal — é decisão de projeto, não código.
+**Um canal conda é só uma árvore de arquivos estática servida por HTTP** — `noarch/` com os
+`.conda` e um `repodata.json` ao lado. Não há nada de especial nele, e o GitHub Pages serve
+essa árvore tão bem quanto qualquer outro host. Verificado ponta a ponta: com o canal servido
+por um `python -m http.server` qualquer, `pixi install` busca o `repodata.json`, baixa o
+pacote e o instala em `lib/mojo/` — o script do usuário roda sem `-I`.
+
+Para publicar (dono do projeto):
+
+```bash
+./tools/publicar_canal.sh            # empacota e deixa o commit pronto em gh-pages
+git -C .publicacao push origin gh-pages
+```
+
+Uma vez só, antes da primeira publicação: **Settings → Pages → Source = "Deploy from a
+branch", branch `gh-pages`, pasta `/ (root)`**. O script acumula versões — quem fixou uma
+versão antiga continua resolvendo.
 
 ## Começando
 

@@ -3,6 +3,36 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.42.1] — O canal conda e o proprio GitHub
+
+Sem mudanca de biblioteca. A pergunta "como o usuario instala" tinha como
+resposta "falta um canal conda", que soava como um item de infraestrutura por
+vir. Nao e: **um canal conda e uma arvore de arquivos estatica servida por
+HTTP** — `noarch/` com os `.conda` e um `repodata.json` ao lado.
+
+Verificado ponta a ponta, nao suposto:
+
+1. `rattler-build build --recipe recipe.yaml` produz `canal/noarch/tucano-*.conda`
+   e o `repodata.json` junto;
+2. a arvore servida por um `python -m http.server` qualquer e um canal valido:
+   um projeto novo com `channels = ["http://localhost:8765/canal"]` e
+   `tucano = "*"` resolveu, instalou em `lib/mojo/tucano` e rodou o script sem
+   `-I`;
+3. construir de novo dentro da arvore ja publicada **acumula** as versoes: o
+   `repodata.json` sai com todas, entao quem fixou uma versao antiga continua
+   resolvendo.
+
+Como o GitHub Pages serve arvore estatica, o canal e o proprio repositorio.
+
+### Adicionado
+
+- `tools/publicar_canal.sh` — empacota dentro da branch `gh-pages`, lista as
+  versoes que ficaram no canal e **para antes do push**: publicar e ato do dono,
+  nao efeito colateral de script.
+- Ambiente `publicar` no pixi, com `rattler-build`.
+- A receita apontava para `github.com/SEU-USUARIO/tucano`, marcador que nunca foi
+  preenchido.
+
 ## [0.42.0] — Abrir o Parquet dos outros
 
 Levantamento para o 1.0 feito com arquivo na mao: seis Parquets escritos pelo

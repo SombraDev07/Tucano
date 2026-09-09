@@ -7,6 +7,10 @@
 *.mojoc
 *.mojopkg
 
+# canal conda gerado por `pixi run -e publicar empacotar` — vai para a branch
+# gh-pages, nao para a main
+/canal
+
 # fixtures Parquet SAO commitadas (geradas por `pixi run -e fixtures fixtures`)
 
 # saidas de teste
