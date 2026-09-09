@@ -3,6 +3,40 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.35.0] — A divisao em faixas saiu
+
+Sem mudanca de API. O [0.28.0] dividiu a coluna em faixas de row group e o
+[0.33.0] tornou isso inutil: depois que as codificacoes encolheram o arquivo,
+juntar as faixas passou a custar mais do que a divisao economizava.
+
+| ler, 5M linhas | com divisao | sem |
+|---|---|---|
+| 1 coluna | 13 ms | **8 ms** |
+| 2 colunas | 27 ms | **19 ms** |
+| 3 colunas | 39 ms | **19 ms** |
+| 5 colunas | 21 ms | 20 ms |
+
+Melhor ou igual em todos. Pipeline completo: 76 -> 65-72 ms, porque ele poda para
+tres colunas — justamente o caso que dividia e perdia.
+
+### Removido
+
+- A divisao da coluna em faixas, e com ela **285 linhas** — as mais perigosas do
+  leitor. Era ali que as tarefas escreviam num destino compartilhado por endereco
+  cru, sem verificacao de tempo de vida.
+
+### Medido e mantido
+
+A thread por coluna: com `TUCANO_THREADS=1` contra o padrao, **identico** — no
+arquivo do benchmark e tambem num Parquet de 62 MiB escrito pelo pyarrow em
+PLAIN + Snappy, a forma cara de decodificar. A leitura ficou limitada por banda
+de memoria, nao por CPU.
+
+Fica assim mesmo: a divisao perdia por motivo **estrutural** (uma alocacao e uma
+copia da coluna inteira, em qualquer maquina); a thread por coluna empata por
+motivo **desta maquina**, e nao custa complexidade — cada tarefa e dona de tudo
+que usa.
+
 ## [0.34.0] — Escrever .xlsx
 
 `para_xlsx(tabela, caminho)` grava a planilha numa aba; `planilha="Nome"` nomeia

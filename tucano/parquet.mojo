@@ -18,7 +18,7 @@ from std.ffi import external_call
 from std.memory import UnsafePointer
 from .thrift import LeitorThrift, TTipo, CampoThrift, ListaThrift
 from .arquivo import LeitorArquivo
-from .paralelo import threads_para, nucleos, LINHAS_MINIMAS_POR_TAREFA
+from .paralelo import LINHAS_MINIMAS_POR_TAREFA
 from .expr import Expr, ExprNode, Kind
 from .codecs import bits_para_real64, bits_para_real32
 
@@ -1959,8 +1959,7 @@ def esquema_parquet(caminho: String) raises -> Schema:
 
 
 def _decodificar_coluna(
-    caminho: String, c: Int, filtro: Expr,
-    grupo_ini: Int = 0, grupo_fim: Int = -1,
+    caminho: String, c: Int, filtro: Expr
 ) raises -> Coluna:
     """Decodifica **uma** coluna do arquivo, do zero ao `Coluna` pronto.
 
@@ -1971,13 +1970,7 @@ def _decodificar_coluna(
     """
     var leitor = LeitorArquivo(caminho)
     var m = _metadados_do_leitor(leitor, caminho)
-    var todos = _grupos_a_ler(m, filtro)
-    var grupos = List[Int]()
-    var ate = grupo_fim
-    if ate < 0 or ate > len(todos):
-        ate = len(todos)
-    for k in range(grupo_ini, ate):
-        grupos.append(todos[k])
+    var grupos = _grupos_a_ler(m, filtro)
     var esperado = 0
     for g in grupos:
         esperado += m.grupos[g].num_linhas
@@ -2024,47 +2017,21 @@ struct _TarefaColuna(Movable):
     `saida` e uma lista de zero ou um elemento porque `Coluna` nao tem valor
     vazio que signifique "ainda nao": lista de um diz "pronta" sem inventar uma
     coluna de mentira. `erro` guarda o que a thread nao pode lancar.
+
+    Nenhum campo aponta para fora: a tarefa e dona de tudo que usa, e e por isso
+    que ela roda em thread sem um unico mutex.
     """
 
     var caminho: String
     var indice: Int
     var filtro: Expr
-    var grupo_ini: Int
-    var grupo_fim: Int
-    var destino_valores: Int
-    """Endereco do slab final da coluna, ou 0 quando a tarefa devolve a coluna.
-
-    Quando a coluna e dividida, o pai aloca o slab **uma vez** e cada faixa
-    escreve na sua parte. As faixas sao trechos de linha contiguos e disjuntos,
-    dados pelo rodape — nenhuma tarefa escreve onde outra le nem onde outra
-    escreve. Sem isso, o pai empilhava as faixas depois do `join`, e alocar mais
-    escrever os quarenta MiB em serie custava vinte milissegundos: mais do que a
-    divisao economizava.
-
-    O endereco viaja como `Int` porque campo de struct nao pode expor
-    `AnyOrigin` — a mesma regra do M13, contornada do mesmo jeito.
-    """
-    var destino_ausentes: Int
-    var linha_ini: Int
-    var destino_real: Bool
     var saida: List[Coluna]
     var erro: String
 
-    def __init__(
-        out self, caminho: String, indice: Int, filtro: Expr,
-        grupo_ini: Int = 0, grupo_fim: Int = -1,
-        destino_valores: Int = 0, destino_ausentes: Int = 0,
-        linha_ini: Int = 0, destino_real: Bool = False,
-    ):
+    def __init__(out self, caminho: String, indice: Int, filtro: Expr):
         self.caminho = caminho
         self.indice = indice
         self.filtro = filtro.copy()
-        self.grupo_ini = grupo_ini
-        self.grupo_fim = grupo_fim
-        self.destino_valores = destino_valores
-        self.destino_ausentes = destino_ausentes
-        self.linha_ini = linha_ini
-        self.destino_real = destino_real
         self.saida = List[Coluna]()
         self.erro = ""
 
@@ -2088,143 +2055,12 @@ def _trabalhador_coluna(
 def _executar_tarefa(mut tarefa: _TarefaColuna) raises:
     """O trabalho de uma tarefa, identico dentro e fora de thread.
 
-    Estar num so lugar e o que impede o caminho sequencial de esquecer de
-    escrever no destino — que foi exatamente o erro cometido ao separa-los.
+    Estar num so lugar e o que impede o caminho sequencial de divergir do
+    paralelo — que foi exatamente o erro cometido ao separa-los.
     """
-    var pedaco = _decodificar_coluna(
-        tarefa.caminho, tarefa.indice, tarefa.filtro,
-        tarefa.grupo_ini, tarefa.grupo_fim,
+    tarefa.saida.append(
+        _decodificar_coluna(tarefa.caminho, tarefa.indice, tarefa.filtro)
     )
-    if tarefa.destino_valores == 0:
-        tarefa.saida.append(pedaco^)
-    else:
-        _escrever_no_destino(
-            pedaco, tarefa.destino_valores, tarefa.destino_ausentes,
-            tarefa.linha_ini, tarefa.destino_real,
-        )
-
-
-def _escrever_no_destino(
-    pedaco: Coluna, endereco_valores: Int, endereco_ausentes: Int,
-    linha_ini: Int, eh_real: Bool,
-) raises:
-    """Copia a faixa para a sua parte do slab final, em bloco."""
-    var quantos = pedaco.tamanho()
-    if quantos == 0:
-        return
-    if eh_real:
-        var destino = UnsafePointer[Float64, origin=AnyOrigin[mut=True]](
-            unsafe_from_address=endereco_valores
-        )
-        _ = external_call["memcpy", Int](
-            destino.unsafe_offset(linha_ini).unsafe_bitcast[UInt8](),
-            pedaco.reals.unsafe_ptr().unsafe_bitcast[UInt8](),
-            quantos * 8,
-        )
-    else:
-        var destino = UnsafePointer[Int64, origin=AnyOrigin[mut=True]](
-            unsafe_from_address=endereco_valores
-        )
-        _ = external_call["memcpy", Int](
-            destino.unsafe_offset(linha_ini).unsafe_bitcast[UInt8](),
-            pedaco.ints.unsafe_ptr().unsafe_bitcast[UInt8](),
-            quantos * 8,
-        )
-    var aus = UnsafePointer[Bool, origin=AnyOrigin[mut=True]](
-        unsafe_from_address=endereco_ausentes
-    )
-    for i in range(quantos):
-        aus.unsafe_offset(linha_ini + i)[] = pedaco.eh_ausente(i)
-    return
-
-
-# Abaixo disso a juncao das faixas custa mais que a divisao economiza.
-comptime _FAIXAS_MINIMAS_PARA_DIVIDIR = 4
-
-
-def _pode_dividir(tipo_tucano: Int) -> Bool:
-    """Coluna que se junta por copia de bloco pode ser dividida em faixas.
-
-    Texto dicionarizado fica de fora: cada faixa construiria o proprio
-    dicionario, e junta-los e trabalho de verdade — nao a copia de dois slabs.
-    Como as colunas de texto ja sao as baratas depois do M10.6, dividi-las nao
-    pagaria a complicacao.
-    """
-    return (
-        tipo_tucano == DType.INTEIRO
-        or tipo_tucano == DType.REAL
-        or tipo_tucano == DType.DATA
-        or tipo_tucano == DType.DATAHORA
-        or tipo_tucano == DType.LOGICO
-    )
-
-
-def _juntar_pedacos(nome: String, var pedacos: List[Coluna]) raises -> Coluna:
-    """Empilha as faixas de uma coluna numerica, na ordem.
-
-    Cada faixa decodificou row groups contiguos, entao empilhar na ordem
-    reconstroi a coluna exatamente como a leitura sequencial a teria feito.
-    """
-    if len(pedacos) == 1:
-        # assume a faixa unica em vez de copia-la: copiar aqui custaria a coluna
-        # inteira de novo, e e o caso comum — sem divisao, ha sempre uma so
-        return pedacos.pop()
-
-    var total = 0
-    var tem_ausente = False
-    for p in pedacos:
-        total += p.tamanho()
-        if p.validity_bits.n_ausentes > 0:
-            tem_ausente = True
-
-    var ausentes = List[Bool]()
-    if tem_ausente:
-        ausentes = List[Bool](capacity=total)
-        for p in pedacos:
-            for i in range(p.tamanho()):
-                ausentes.append(p.eh_ausente(i))
-
-    var tipo = pedacos[0].tipo
-    if tipo == DType.REAL:
-        # copia em bloco: as faixas ja sao slabs contiguos, e empilhar valor a
-        # valor gastaria mais que a decodificacao economizou
-        var vals = List[Float64](capacity=total)
-        vals.resize(unsafe_uninit_length=total)
-        var em = 0
-        for p in pedacos:
-            var quantos = p.tamanho()
-            if quantos > 0:
-                _ = external_call["memcpy", Int](
-                    vals.unsafe_ptr().unsafe_offset(em).unsafe_bitcast[UInt8](),
-                    p.reals.unsafe_ptr().unsafe_bitcast[UInt8](),
-                    quantos * 8,
-                )
-            em += quantos
-        return Coluna.de_reais(nome, vals^, ausentes^)
-    if tipo == DType.LOGICO:
-        var vals = List[Bool](capacity=total)
-        for p in pedacos:
-            for i in range(p.tamanho()):
-                vals.append(Int(p.logics[i]) != 0)
-        return Coluna.de_logicos(nome, vals^, ausentes^)
-
-    var vals = List[Int64](capacity=total)
-    vals.resize(unsafe_uninit_length=total)
-    var em = 0
-    for p in pedacos:
-        var quantos = p.tamanho()
-        if quantos > 0:
-            _ = external_call["memcpy", Int](
-                vals.unsafe_ptr().unsafe_offset(em).unsafe_bitcast[UInt8](),
-                p.ints.unsafe_ptr().unsafe_bitcast[UInt8](),
-                quantos * 8,
-            )
-        em += quantos
-    if tipo == DType.DATA:
-        return Coluna.de_datas(nome, vals^, ausentes^)
-    if tipo == DType.DATAHORA:
-        return Coluna.de_datahoras(nome, vals^, ausentes^)
-    return Coluna.de_inteiros(nome, vals^, ausentes^)
 
 
 def ler_parquet_lote(
@@ -2244,12 +2080,15 @@ def ler_parquet_lote(
     o grupo e lido. O operador de filtro no plano continua rodando — pular
     grupo e so I/O, nao substitui a selecao.
 
-    **Uma coluna por thread** quando ha mais de uma e o arquivo e grande o
-    bastante. Colunas nao dependem umas das outras: cada uma le a sua faixa de
-    bytes com `pread`, que nao usa o cursor do arquivo, e escreve no seu proprio
-    destino. Nao ha mutex no caminho quente porque nao ha estado compartilhado —
-    a decisao de projeto que torna isso verdade e cada tarefa reler o rodape em
-    vez de dividir os metadados.
+    **Uma coluna por thread**, e nada mais fino que isso. Colunas nao dependem
+    umas das outras: cada uma le a sua faixa de bytes com `pread`, que nao usa o
+    cursor do arquivo, e escreve no seu proprio destino. Nao ha mutex no caminho
+    quente porque nao ha estado compartilhado — a decisao de projeto que torna
+    isso verdade e cada tarefa reler o rodape em vez de dividir os metadados.
+
+    Dividir a coluna em faixas de row group existiu do M20 ao M25 e **saiu**:
+    depois que as codificacoes encolheram o arquivo, juntar as faixas passou a
+    custar mais que a divisao economizava. Ver M26.
 
     Devolve lote, nao `Tabela`: assim o leitor pode ser chamado de dentro do
     `coletar()`, depois que o otimizador ja decidiu quais colunas o plano usa.
@@ -2266,104 +2105,12 @@ def ler_parquet_lote(
     for g in grupos:
         linhas += m.grupos[g].num_linhas
 
-    # Os nucleos sao divididos entre as colunas: cada uma recebe faixas de row
-    # groups, e cada faixa e uma tarefa que continua dona do que precisa. Sem
-    # isso, o tempo total e o da coluna mais cara — e ela costuma ser a de maior
-    # entropia, que e justamente a que menos comprime e mais custa a decodificar.
-    # Os nucleos sao repartidos entre as colunas pedidas.
-    # linhas de cada row group, para saber onde cada faixa comeca no slab final
-    var linhas_do_grupo = List[Int]()
-    for g in grupos:
-        linhas_do_grupo.append(m.grupos[g].num_linhas)
-
     var tarefas = List[_TarefaColuna]()
-    var quantas_de = List[Int]()
-    var destinos_reais = List[List[Float64]]()
-    var destinos_inteiros = List[List[Int64]]()
-    var destinos_ausentes = List[List[Bool]]()
-    var indice_destino = List[Int]()  # -1 quando a coluna nao e dividida
-    for k in range(len(querer)):
-        var c = querer[k]
-        var divisoes = 1
-        if _pode_dividir(_tipo_tucano(m.coluna_do_esquema(c))):
-            divisoes = nucleos() // len(querer)
-            if divisoes > len(grupos):
-                divisoes = len(grupos)
-        # Juntar as faixas custa fixo — alocar e escrever o slab da coluna outra
-        # vez. So compensa quando ha faixas o bastante para a decodificacao cair
-        # bem abaixo disso; abaixo do minimo a coluna vai inteira, numa tarefa.
-        if divisoes < _FAIXAS_MINIMAS_PARA_DIVIDIR:
-            divisoes = 1
-        # linhas de menos nao pagam a thread, mesmo com nucleo sobrando
-        while divisoes > 1 and linhas // divisoes < LINHAS_MINIMAS_POR_TAREFA:
-            divisoes -= 1
-        var tipo_k = _tipo_tucano(m.coluna_do_esquema(c))
-        var end_val = 0
-        var end_aus = 0
-        var eh_real_k = tipo_k == DType.REAL
-        if divisoes > 1:
-            # o slab final, alocado uma vez; as faixas o escrevem em paralelo, e
-            # com isso a falha de pagina tambem se divide entre as threads
-            # toda posicao e escrita por exatamente uma faixa, entao nao ha o
-            # que inicializar — zerar aqui seria uma passada em serie sobre a
-            # mascara inteira, logo antes de sobrescreve-la
-            var au = List[Bool](capacity=linhas)
-            au.resize(unsafe_uninit_length=linhas)
-            if eh_real_k:
-                var dv = List[Float64](capacity=linhas)
-                dv.resize(unsafe_uninit_length=linhas)
-                end_val = Int(dv.unsafe_ptr())
-                destinos_reais.append(dv^)
-                destinos_inteiros.append(List[Int64]())
-            else:
-                var dv = List[Int64](capacity=linhas)
-                dv.resize(unsafe_uninit_length=linhas)
-                end_val = Int(dv.unsafe_ptr())
-                destinos_inteiros.append(dv^)
-                destinos_reais.append(List[Float64]())
-            end_aus = Int(au.unsafe_ptr())
-            destinos_ausentes.append(au^)
-            indice_destino.append(len(destinos_ausentes) - 1)
-        else:
-            indice_destino.append(-1)
-
-        var passo = (len(grupos) + divisoes - 1) // divisoes
-        if passo < 1:
-            passo = 1
-        # conta o que foi criado, nao o que se previa criar: `passo` arredonda
-        # para cima, entao o numero de faixas pode sair menor que `divisoes`
-        var criadas = 0
-        var ini = 0
-        var linha = 0
-        while ini < len(grupos):
-            var fim = ini + passo
-            if fim > len(grupos):
-                fim = len(grupos)
-            tarefas.append(
-                _TarefaColuna(
-                    caminho, c, filtro, ini, fim,
-                    end_val, end_aus, linha, eh_real_k,
-                )
-            )
-            for g in range(ini, fim):
-                linha += linhas_do_grupo[g]
-            criadas += 1
-            ini = fim
-        if criadas == 0:
-            tarefas.append(_TarefaColuna(caminho, c, filtro, 0, 0))
-            criadas = 1
-        quantas_de.append(criadas)
+    for c in querer:
+        tarefas.append(_TarefaColuna(caminho, c, filtro))
 
     var n = len(tarefas)
-    # a decisao de usar thread e sobre o numero de TAREFAS, nao de colunas: uma
-    # coluna dividida em dezesseis faixas sao dezesseis tarefas, e decidir pelo
-    # numero de colunas mandava esse caso inteiro para o caminho sequencial
-    # Cada faixa ja tem ao menos `LINHAS_MINIMAS_POR_TAREFA` linhas por
-    # construcao, e coluna nao dividida processa o arquivo inteiro. Entao a
-    # pergunta que sobra e so se ha mais de uma tarefa e trabalho que pague a
-    # thread. Dividir `linhas` pelo numero de tarefas subestimava as duas coisas.
     var usar_thread = n > 1 and linhas >= LINHAS_MINIMAS_POR_TAREFA
-
     var tids = List[Int]()
     tids.resize(n, 0)
     var criadas = 0
@@ -2380,54 +2127,22 @@ def ler_parquet_lote(
     for i in range(criadas):
         _ = external_call["pthread_join", Int32](tids[i], Int(0))
 
-    # o que nao coube em thread sai aqui, na mesma funcao que a thread chamaria
+    # o que nao coube em thread sai aqui, pela mesma funcao que a thread
+    # teria chamado
     for i in range(criadas, n):
-        # o que nao coube em thread sai aqui, pela mesma funcao que a thread
-        # teria chamado
         _executar_tarefa(tarefas[i])
 
     var saida = List[Coluna]()
-    var t = 0
-    for k in range(len(querer)):
-        var nome = m.coluna_do_esquema(querer[k]).nome
-        var d = indice_destino[k]
-        if d >= 0:
-            # as faixas ja escreveram no slab: so falta vesti-lo de coluna
-            for _ in range(quantas_de[k]):
-                if tarefas[t].erro != "":
-                    raise Error(tarefas[t].erro)
-                t += 1
-            var tipo_k = _tipo_tucano(m.coluna_do_esquema(querer[k]))
-            # assume os vetores em vez de copia-los: sao o resultado, e copiar
-            # aqui devolveria o custo que escrever em paralelo economizou
-            var au = List[Bool]()
-            swap(au, destinos_ausentes[d])
-            if tipo_k == DType.REAL:
-                var vv = List[Float64]()
-                swap(vv, destinos_reais[d])
-                saida.append(Coluna.de_reais(nome, vv^, au^))
-            else:
-                var vv = List[Int64]()
-                swap(vv, destinos_inteiros[d])
-                if tipo_k == DType.DATA:
-                    saida.append(Coluna.de_datas(nome, vv^, au^))
-                elif tipo_k == DType.DATAHORA:
-                    saida.append(Coluna.de_datahoras(nome, vv^, au^))
-                else:
-                    saida.append(Coluna.de_inteiros(nome, vv^, au^))
-            continue
-        var pedacos = List[Coluna]()
-        for _ in range(quantas_de[k]):
-            if tarefas[t].erro != "":
-                raise Error(tarefas[t].erro)
-            if len(tarefas[t].saida) != 1:
-                raise Error(
-                    "parquet: a coluna '" + nome
-                    + "' nao voltou da decodificacao"
-                )
-            pedacos.append(tarefas[t].saida.pop())
-            t += 1
-        saida.append(_juntar_pedacos(nome, pedacos^))
+    for i in range(n):
+        if tarefas[i].erro != "":
+            raise Error(tarefas[i].erro)
+        if len(tarefas[i].saida) != 1:
+            raise Error(
+                "parquet: a coluna '"
+                + m.coluna_do_esquema(tarefas[i].indice).nome
+                + "' nao voltou da decodificacao"
+            )
+        saida.append(tarefas[i].saida.pop())
     return saida^
 
 

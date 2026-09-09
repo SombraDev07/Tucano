@@ -124,18 +124,18 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M25 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M26 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
 | O que falta | Por quê |
 |---|---|
-| **Escrita `.xlsx`** | `para_csv` já grava a tabela; falta `para_xlsx` — a planilha que o analista abre. M14. |
+| ~~**Escrita `.xlsx`**~~ | Feito no M14: `para_xlsx`, uma aba, verificado contra o openpyxl. |
 | ~~**Paralelismo por thread**~~ | Feito no M13: leitura usa uma thread por coluna, 105 → 69 ms. Os operadores de execução ainda são de uma thread — é o que separa o Tucano do DuckDB em 16 núcleos. |
 | **Publicação em canal conda** | `recipe.yaml` está pronto; falta um canal (prefix.dev ou equivalente). Decisão de projeto. |
 | **Slab de data em Int32** | Dívida rastreada com gatilho explícito — ver abaixo. |
 
-GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. **Saída para o analista:** `para_csv` já existe (M5); **escrita `.xlsx` entra no 1.0** — é o simétrico do `ler_xlsx`.
+GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Do que falta para o 1.0, **os dois itens restantes não são código**: um é decisão de projeto (o canal conda) e o outro espera a reescrita de storage que o roadmap já registra.
 
 | Peça | Status |
 |------|--------|
@@ -249,6 +249,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M23 | As três técnicas dos maduros | crítica | ✅ feito | as três mais lentas; o alvo é o escritor |
 | M24 | Escritor com DELTA_BINARY_PACKED | crítica | ✅ feito | arquivo 43 → 25 MiB; coluna inteira 28 → 7 ms |
 | M25 | Dicionário em coluna numérica | crítica | ✅ feito | arquivo 25 → 12 MiB; leitura passa o pyarrow |
+| M26 | Remover a divisão em faixas | crítica | ✅ feito | 285 linhas a menos, e mais rápido |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -2323,6 +2324,56 @@ o que a mede melhor. O pyarrow lê tudo, verificado valor a valor.
 - [x] a escolha vem da conta dos dois tamanhos, não de um limiar chutado
 - [x] pyarrow lê as colunas novas — `RLE_DICTIONARY` em real e inteiro
 - [x] 240 testes verdes, interoperabilidade nos dois formatos
+
+---
+
+## M26 — A divisão em faixas saiu ✅
+
+O M20 dividiu a coluna em faixas de row group, o M21 consertou a decisão que a
+mandava para o caminho sequencial, e o M25 tornou as duas coisas inúteis.
+
+Ler **três** colunas custava 58 ms; ler **cinco**, 39. A diferença: com três, a
+divisão liga (16 núcleos ÷ 3 = 5 faixas, acima do limiar); com cinco, não liga.
+O limiar de quatro faixas foi medido no arquivo de 43 MiB — o de hoje tem 12, e
+decodificar ficou tão barato que juntar as faixas nunca se paga.
+
+| ler, 5M linhas | com divisão | sem |
+|---|---|---|
+| 1 coluna | 13 ms | **8 ms** |
+| 2 colunas | 27 ms | **19 ms** |
+| 3 colunas | 39 ms | **19 ms** |
+| 5 colunas | 21 ms | 20 ms |
+
+Melhor ou igual em todos. **285 linhas a menos**, e são as mais perigosas do
+leitor: a divisão era onde as tarefas escreviam num destino compartilhado por
+endereço cru, sem verificação de tempo de vida. Saiu junto.
+
+O pipeline completo caiu de 76 para 65–72 ms, porque ele poda para três colunas —
+justamente o caso que dividia e perdia.
+
+### E a thread por coluna? Neutra, e fica
+
+Medido no mesmo arquivo, com `TUCANO_THREADS=1` contra o padrão: **idêntico**.
+Também num Parquet de 62 MiB escrito pelo pyarrow em PLAIN + Snappy, que é a
+forma cara de decodificar: 45 ms dos dois jeitos.
+
+A leitura ficou **limitada por banda de memória**, não por CPU — as codificações
+do M24 e do M25 tiraram tanto trabalho do decodificador que sobrou só mover
+bytes. Oito threads entregam ~1,75× mais banda que uma nesta máquina, e o resto
+do ganho some na alocação.
+
+A divisão saiu porque perde por motivo **estrutural** — uma alocação e uma cópia
+da coluna inteira, em qualquer máquina. A thread por coluna fica porque empata
+por motivo **desta máquina**: onde houver mais banda por núcleo, o decodificador
+volta a ser o limite. Ela não custa complexidade perigosa: cada tarefa é dona de
+tudo que usa, e não há um mutex sequer.
+
+### Critério de saída
+
+- [x] a divisão em faixas removida, com a medição que a condena registrada
+- [x] nenhuma tarefa escreve em memória de outra — o endereço cru saiu junto
+- [x] a thread por coluna medida contra `TUCANO_THREADS=1`, e mantida com o motivo
+- [x] 243 testes verdes, oito passos de verificação verdes
 
 ---
 
