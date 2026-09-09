@@ -45,6 +45,7 @@ struct PConvertido:
 
     comptime NENHUM = -1
     comptime UTF8 = 0
+    comptime DECIMAL = 5
     comptime DATE = 6
     comptime TIME_MILLIS = 7
     comptime TIME_MICROS = 8
@@ -511,6 +512,12 @@ def _ler_tipo_logico(mut l: LeitorThrift, bytes: List[UInt8]) raises -> Int:
             break
         if c.id == 1:
             resultado = PConvertido.UTF8
+            l.pular_valor(bytes, c.tipo)
+        elif c.id == 5:
+            # DecimalType: escala e precisao ficam aqui, e nao ha tipo decimal
+            # no Tucano. O que importa e **marcar**, para `_tipo_tucano` recusar
+            # em vez de devolver o inteiro sem escala.
+            resultado = PConvertido.DECIMAL
             l.pular_valor(bytes, c.tipo)
         elif c.id == 6:
             resultado = PConvertido.DATE
@@ -1219,9 +1226,29 @@ def _ler_plain(
 
 def _tipo_tucano(e: ElementoEsquema) raises -> Int:
     """Tipo fisico + tipo convertido -> tipo logico do Tucano."""
+    if e.convertido == PConvertido.DECIMAL:
+        # DECIMAL e guardado como inteiro sem escala — 123,45 vira 12345 em
+        # INT32. Sem tipo decimal, ler essa coluna como INTEIRO devolveria
+        # numero errado **sem avisar**, que e o unico defeito pior que recusar.
+        # Virar REAL tambem nao serve: decimal existe exatamente para o dinheiro
+        # nao passar por float.
+        raise Error(
+            "parquet: coluna '" + e.nome + "' e DECIMAL, e o Tucano nao tem"
+            + " tipo decimal. Converta na origem (para Float64, ou para inteiro"
+            + " na menor unidade) e leia de novo"
+        )
     if e.tipo == PTipo.BOOLEAN:
         return DType.LOGICO
-    if e.tipo == PTipo.BYTE_ARRAY or e.tipo == PTipo.FLBA:
+    if e.tipo == PTipo.FLBA:
+        # FIXED_LEN_BYTE_ARRAY nao tem prefixo de tamanho: cada valor ocupa
+        # `type_length` bytes. O leitor de BYTE_ARRAY le quatro bytes de tamanho
+        # antes de cada valor, e sobre FLBA isso ora estoura a pagina, ora
+        # devolve lixo — recusar e o que nao mente.
+        raise Error(
+            "parquet: coluna '" + e.nome + "' e FIXED_LEN_BYTE_ARRAY, ainda nao"
+            + " suportado"
+        )
+    if e.tipo == PTipo.BYTE_ARRAY:
         return DType.TEXTO
     if e.tipo == PTipo.FLOAT or e.tipo == PTipo.DOUBLE:
         return DType.REAL

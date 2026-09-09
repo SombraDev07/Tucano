@@ -13,6 +13,7 @@ as fixtures mudarem.
 """
 
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pyarrow as pa
@@ -124,6 +125,25 @@ def main():
         }
     )
     _escrever("datas.parquet", datas, compression="none", use_dictionary=False)
+
+    # 4c. decimal: o Tucano nao tem tipo decimal, e um DECIMAL(9,2) guardado
+    # como INT32 seria lido como o inteiro sem escala — 123,45 viraria 12345,
+    # sem aviso. A fixture existe para o leitor **recusar**, nao para ler.
+    decimal = pa.table(
+        {
+            "preco": pa.array(
+                [Decimal("123.45"), Decimal("-67.89"), Decimal("0.01")],
+                type=pa.decimal128(9, 2),
+            )
+        }
+    )
+    _escrever(
+        "decimal.parquet",
+        decimal,
+        compression="none",
+        use_dictionary=False,
+        store_decimal_as_integer=True,
+    )
 
     # 5. snappy, a compressao padrao na pratica
     _escrever("snappy.parquet", simples, compression="snappy", use_dictionary=False)

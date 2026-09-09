@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.41.0 — M0 → M32; leitura multithread; HTTP do painel fora do caminho crítico.
+Versão 0.41.1 — M0 → M32; leitura multithread; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -507,15 +507,29 @@ duas encolhe. Na leitura, as três são entendidas.
 | `esquema_parquet(caminho)` | esquema só do rodapé, sem tocar nos dados |
 | `metadados_parquet(caminho)` | linhas, row groups, codificações, compressão |
 
-Leitura cobre: esquema plano, `PLAIN` e `RLE_DICTIONARY`, níveis de definição RLE/bit-packed,
-páginas V1 e V2, sem compressão e Snappy, múltiplos row groups, tipos lógicos por
-`ConvertedType` e `LogicalType`.
+**Leitura cobre:** esquema plano; `PLAIN`, `RLE_DICTIONARY` e `DELTA_BINARY_PACKED`; níveis
+de definição RLE/bit-packed; páginas V1 e V2; sem compressão e Snappy; múltiplos row groups;
+tipos lógicos por `ConvertedType` e `LogicalType`.
 
-Escrita: `PLAIN` para numéricas e texto de alta cardinalidade; `RLE_DICTIONARY` para
-texto já dicionarizado. O rodapé leva min/max numérico e `distinct_count` no texto
-dicionarizado (NDV do row group). Páginas em **Snappy** por padrão
-(`para_parquet(..., compressao="nenhuma")` desliga). Colunas opcionais, um ou mais
-row groups.
+**Leitura recusa, com erro explícito:**
+
+| o que | por quê |
+|---|---|
+| GZIP, Zstd, Brotli, LZO, LZ4 | só há decodificador de Snappy; não há dependência externa |
+| `DECIMAL` | não há tipo decimal, e o valor no arquivo é o inteiro **sem escala** |
+| `INT96` | carimbo de tempo legado (Impala/Hive antigo) |
+| `FIXED_LEN_BYTE_ARRAY` | valor sem prefixo de tamanho; o leitor de `BYTE_ARRAY` não serve |
+
+Recusar é a regra sobre a qual não se negocia: um `DECIMAL(9,2)` lido como inteiro devolveria
+`12345` onde o arquivo diz `123,45` — **número errado sem aviso**, que é o único defeito pior
+que a recusa.
+
+**Escrita:** cada coluna recebe a codificação que **mede** menor — `DELTA_BINARY_PACKED` para
+inteiro e data quando o delta encolhe, dicionário numérico quando os valores distintos são
+poucos, `RLE_DICTIONARY` para texto já dicionarizado, `PLAIN` quando nenhuma das outras ganha.
+O rodapé leva min/max numérico e `distinct_count` no texto dicionarizado (NDV do row group).
+Páginas em **Snappy** por padrão (`para_parquet(..., compressao="nenhuma")` desliga). Colunas
+opcionais, row groups de 500 mil linhas por padrão.
 A interoperabilidade é verificada lendo os arquivos gerados com outra implementação
 (`pixi run -e fixtures interop`), não com o próprio leitor: um leitor e um escritor
 com o mesmo mal-entendido concordam entre si.

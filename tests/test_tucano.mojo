@@ -378,6 +378,31 @@ def test_dicionario_numerico_faixa_e_extremos() raises:
             assert_equal(volta.pegar(nome).texto_em(i), t.pegar(nome).texto_em(i))
 
 
+def test_parquet_recusa_decimal() raises:
+    """DECIMAL guardado como inteiro sem escala: 123,45 chega como 12345.
+
+    Ler isso como INTEIRO devolveria numero errado **sem avisar**, que e o unico
+    defeito pior que recusar. Virar REAL tambem nao serve: decimal existe para o
+    dinheiro nao passar por float.
+    """
+    var pegou = False
+    try:
+        _ = ler_parquet("tests/fixtures/decimal.parquet")
+    except e:
+        pegou = True
+        assert_true("DECIMAL" in String(e))
+        assert_true("preco" in String(e))
+    assert_true(pegou)
+
+    # o esquema tambem recusa, e nao devolve um tipo mentiroso
+    var pegou_esquema = False
+    try:
+        _ = esquema_parquet("tests/fixtures/decimal.parquet")
+    except:
+        pegou_esquema = True
+    assert_true(pegou_esquema)
+
+
 def test_ler_csv_infere_tipos_e_na() raises:
     var tab = ler_csv("tests/fixtures/pessoas.csv")
     assert_equal(tab.linhas(), 4)

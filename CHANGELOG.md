@@ -3,6 +3,30 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.41.1] — DECIMAL devolvia numero errado sem avisar
+
+Achado ao levantar o que falta para o 1.0. Uma coluna `DECIMAL(9,2)` gravada como
+INT32 — o que o pyarrow faz com `store_decimal_as_integer` — era lida como
+INTEIRO: o arquivo diz `123,45` e o Tucano devolvia **12345**, sem erro nenhum.
+`DECIMAL` nao estava no `ConvertedType` que o leitor conhece nem na uniao do
+`LogicalType`, entao a escala simplesmente nao era vista.
+
+Agora e recusado, nas duas formas em que aparece (inteiro com escala e
+`FIXED_LEN_BYTE_ARRAY`), com erro que diz o nome da coluna e o que fazer. Virar
+`Float64` automaticamente nao serve: decimal existe exatamente para o dinheiro
+nao passar por float.
+
+`FIXED_LEN_BYTE_ARRAY` tambem passou a ser recusado. Ele era mapeado para texto e
+lido pelo caminho de `BYTE_ARRAY`, que espera quatro bytes de tamanho antes de
+cada valor — ora estourava a pagina, ora devolvia lixo.
+
+### Documentado
+
+- O contrato e o README passaram a trazer a **matriz** do que a leitura cobre e do
+  que ela recusa, com o porque de cada recusa. A descricao da escrita no contrato
+  estava parada na 0.32.0: nao mencionava `DELTA_BINARY_PACKED` nem o dicionario
+  numerico, que sao o que produz o arquivo tres vezes menor.
+
 ## [0.41.0] — O custo de codificar
 
 Metade do trabalho da escrita estava em montar o dicionario numerico da coluna
