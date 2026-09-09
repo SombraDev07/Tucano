@@ -133,7 +133,7 @@ Falta para o 1.0, e nada disso é questão de escopo:
 | ~~**Escrita `.xlsx`**~~ | Feito no M14: `para_xlsx`, uma aba, verificado contra o openpyxl. |
 | ~~**Paralelismo por thread**~~ | Feito no M13: leitura usa uma thread por coluna, 105 → 69 ms. Os operadores de execução ainda são de uma thread — é o que separa o Tucano do DuckDB em 16 núcleos. |
 | **Publicação em canal conda** | `recipe.yaml` está pronto; falta um canal (prefix.dev ou equivalente). Decisão de projeto. |
-| **Slab de data em Int32** | Dívida rastreada com gatilho explícito — ver abaixo. |
+| **Slab de data em Int32** | Medida e quantificada: ~5% de memória em tabela típica, contra ~40 pontos de refatoração no código mais quente. Decisão do dono — ver abaixo. |
 
 GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Do que falta para o 1.0, **os dois itens restantes não são código**: um é decisão de projeto (o canal conda) e o outro espera a reescrita de storage que o roadmap já registra.
 
@@ -196,7 +196,7 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Do q
 | Junção e ordenação mais baratas | ✅ M16 — 74 e 100 ns/linha |
 | Escritor com `DELTA_BINARY_PACKED` | ✅ M24 — arquivo 42% menor |
 | Chave de grupo composta | ✅ M17 — 34 ns/linha |
-| Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
+| Slab de data em Int32 | ⏸ medida; decisão pendente — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
 
 ### Dívidas concretas identificadas
@@ -209,7 +209,32 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Do q
 
 **4. Slab de data em Int32 — dívida rastreada.** Já foi adiada duas vezes, então deixa de ser "herdada do marco anterior" e passa a ter gatilho explícito. Datas e datahoras vivem hoje no slab `Int64` da `Coluna`. O motivo original — velocidade de cálculo — foi resolvido no M4: o kernel de calendário converte para Int32 justamente porque Int64 não vetoriza divisão no AVX2. O que resta é memória: 4 bytes contra 8 por linha de data.
 
-Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de melhorá-la. **Gatilho:** entra junto do redesenho de `Coluna` para um buffer de bytes tipado (largura + tipo lógico, em vez de um `List` por tipo) — que é a forma certa e a que o M9 vai precisar para spill em disco.
+Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de melhorá-la. **Gatilho original:** entrava junto do redesenho de `Coluna` para um buffer de bytes tipado (largura + tipo lógico, em vez de um `List` por tipo) — que é a forma certa e a que o M9 ia precisar para spill em disco.
+
+**Reavaliada e medida (2026-09-09).** Três coisas mudaram, e nenhuma na direção esperada:
+
+*O prêmio, medido.* Uma coluna de 5 milhões de datas ocupa **38 MiB** em `Int64` e ocuparia
+19 em `Int32`; lê-la custa 14 ms e custaria uns 10. Nos benchmarks do projeto o ganho é
+**zero** — nenhum deles tem coluna de data. Numa tabela analítica típica, com uma coluna de
+data entre dez, são ~5% da memória.
+
+*A objeção técnica caiu.* Media-se o receio de que um buffer de bytes com largura em tempo de
+execução fosse mais lento que um `List` tipado. Não é: somar 20 milhões de inteiros custa
+**7 ms dos dois jeitos**, com a largura decidida fora do laço. A forma certa não custa nada
+no caminho comum.
+
+*Mas a segunda justificativa do gatilho evaporou.* O M9 fechou **sem precisar de spill** — a
+execução em fluxo troca os dados pelo estado dos grupos, e o pico fica num row group. O
+redesenho tinha duas razões; sobrou uma.
+
+*E as três implementações limpas têm custo real:* um sexto `List` é o que este parágrafo já
+recusa; sobrecarregar o slab de `codigos` piora os dois significados; e tornar o slab inteiro
+ciente da largura toca ~40 pontos nos caminhos mais quentes — ordenação, junção, agrupamento,
+compactação — além de exigir variante de largura em quatro kernels.
+
+**Decisão pendente do dono do projeto**, agora com número dos dois lados: ~5% de memória em
+tabela típica contra ~40 pontos de refatoração no código mais quente. A dívida deixa de estar
+adiada por inércia e passa a estar adiada por medida.
 
 ---
 
