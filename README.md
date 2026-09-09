@@ -300,7 +300,8 @@ varredura_parquet("enorme.parquet")
 Agregar não exige ter tudo em memória: exige carregar o **estado dos grupos**, que é
 proporcional ao número de grupos e não ao de linhas. Sobre um arquivo de 72 MB em 40 row
 groups, o pico foi **467 KiB** — 0,6% do arquivo, por 6% a mais de tempo, com resultado
-idêntico.
+idêntico. O pico é **um row group**, então ele segue o `linhas_por_grupo` de quem escreveu o
+arquivo: no padrão de hoje, 500 mil linhas.
 
 O arquivo nunca é carregado inteiro: a leitura é por faixa, e cada pedaço de coluna sai do
 disco na sua própria faixa de bytes.

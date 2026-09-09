@@ -2699,12 +2699,41 @@ vez de 100 mil por pico, e mede 93 ms contra 90.
 
 **Mesmo tempo do pyarrow, arquivo 3,2× menor.** Era 2,7× mais lento no M27.
 
+### O que sobrou, medido e não feito
+
+Perfilando de novo no padrão de hoje, dos ~500 ms de uma execução avulsa:
+
+| fase | ms |
+|---|---|
+| recortar as fatias (**serial**) | 144 |
+| codificar (20 tarefas em onda) | 300 |
+| montar, rodapé, escrita | ~65 |
+
+Recortar é agora a maior parcela serial — 28% da escrita — e não é trabalho
+necessário: a fatia existe só para a tarefa ter o que levar consigo. As duas
+saídas conhecidas:
+
+1. **Recortar dentro da tarefa.** Exige que a tarefa alcance a coluna de origem,
+   e uma struct de tarefa não pode ter campo com origin apagada — passaria o
+   endereço como `Int`, reconstruído dentro do trabalhador (é o que `_do_ambiente`
+   já faz com o `getenv`). Só leitura, e o `join` acontece antes de a tabela
+   morrer. Ganho estimado: ~100 ms.
+2. **Não recortar.** Passar `(coluna, ini, fim)` para as oito funções de
+   codificação, que hoje varrem `0..n`. Tira a cópia em vez de paralelizá-la —
+   ~144 ms e a memória das fatias — mas mexe em todo o caminho de escrita, e
+   depende igualmente do endereço da coluna de origem.
+
+Nenhuma das duas entrou hoje: as duas trocam a invariante que faz o desenho
+paralelo ser simples ("a tarefa é dona de tudo que usa") por 20% da escrita, e
+essa troca merece ser feita de propósito, não de passagem. Fica medida.
+
 ### Critério de saída
 
 - [x] a montagem do arquivo deixou de ser quadrática, com o número medido
 - [x] a política de onda mora em `paralelo.mojo`, com a tabela que a escolheu
 - [x] o padrão de row group é medido, não herdado
 - [x] o arquivo sai byte a byte igual ao da versão serial
+- [x] o que sobrou está perfilado, com as saídas descritas e o custo delas
 - [x] 246 testes verdes, oito passos de verificação verdes
 
 ---
