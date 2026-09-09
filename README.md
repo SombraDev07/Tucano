@@ -65,8 +65,8 @@ o que for mais conveniente na hora.
 - **SQL sobre o mesmo motor** — `SELECT` vira as mesmas etapas da API fluente e passa pelo
   mesmo otimizador. `JOIN ... USING` é o `unir`; `HAVING` é o `onde` depois de agregar;
   `SELECT DISTINCT` é o `agrupar` sem agregação. Não há um segundo interpretador.
-- **Excel `.xlsx`** — `ler_xlsx` abre a planilha como `Tabela`. Primeira aba, ou
-  `planilha="Nome"`. Sem `.xls` antigo, sem escrita.
+- **Excel `.xlsx`** — `ler_xlsx` abre a planilha como `Tabela` e `para_xlsx` grava. Sem
+  `.xls` antigo. Leitura verificada contra o openpyxl, nos dois sentidos.
 - **Leitura em várias threads** — uma por coluna, acima de 10 mil linhas. `TUCANO_THREADS`
   fixa quantas, para quem embute o Tucano onde já existe um conjunto de threads.
 - **Filtro sem materializar** — `coluna > literal` compara o slab contra o escalar difundido
@@ -383,6 +383,8 @@ para_csv(tabela, "saida.csv")               # cita o que precisar ser citado
 
 ler_xlsx("vendas.xlsx")                     # primeira planilha
 ler_xlsx("vendas.xlsx", "Cidades")         # aba pelo nome
+para_xlsx(tabela, "saida.xlsx")             # uma tabela, uma aba
+para_xlsx(tabela, "saida.xlsx", "Vendas")   # nomeando a aba
 ```
 
 Aspas RFC 4180 valem na leitura e na escrita: delimitador e quebra de linha dentro do campo,
@@ -531,10 +533,10 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Execução em fluxo com memória limitada | ✅ |
 | SQL sobre o mesmo planner | ✅ |
 | Arrow IPC: leitura e escrita, interop verificada | ✅ |
-| Excel `.xlsx`: leitura | ✅ |
+| Excel `.xlsx`: leitura e escrita, interop verificada | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-240 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+243 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Por muitos marcos o roadmap registrou paralelismo como bloqueado pela linguagem. **Estava

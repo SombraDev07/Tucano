@@ -24,8 +24,10 @@ passo "testes"            ./pixi run test
 passo "exemplo"           ./pixi run exemplo
 passo "round-trip parquet" ./pixi run parquet-roundtrip
 passo "round-trip arrow"   ./pixi run arrow-roundtrip
+passo "round-trip xlsx"    ./pixi run xlsx-roundtrip
 passo "interop parquet"    ./pixi run -e fixtures interop
 passo "interop arrow"      ./pixi run -e fixtures interop-arrow
+passo "interop xlsx"       ./pixi run -e fixtures interop-xlsx
 
 if [ "$falhou" -eq 0 ]; then
   printf '\n\033[32mtudo verde\033[0m\n'

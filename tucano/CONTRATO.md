@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.33.0 — M0 → M25; leitura multithread; HTTP do painel fora do caminho crítico.
+Versão 0.34.0 — M0 → M25 + escrita .xlsx; leitura multithread; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -440,6 +440,7 @@ pública.
 | `LeitorCSV(caminho, …)` | leitura em fatias: `.proximo(n)`, `.fim()`, `.restantes()` |
 | `para_csv(tabela, caminho, delimitador)` | escrita |
 | `ler_xlsx(caminho, planilha, tem_cabecalho)` | primeira aba, ou `planilha="Nome"` |
+| `para_xlsx(tabela, caminho, planilha)` | uma tabela, um arquivo, uma aba |
 
 O caminho é `bytes → scanner → parser tipado → buffers`: nenhuma `String` por célula. Só
 coluna de texto materializa `String`, e no fim.
@@ -457,8 +458,13 @@ correto por construção enquanto mantissa ≤ 2⁵³ e casas ≤ 22; fora disso
 fronteiras dos campos ficam inteiros em memória. E/S com memória limitada é M9.
 
 **`.xlsx`**: `ler_xlsx(caminho)` lê a primeira planilha; `planilha="Nome"` escolhe a aba.
-Primeira linha é cabeçalho, como no CSV. Data no serial do Excel vira `data` quando o
-estilo da célula é data. `.xls` antigo (BIFF) é recusado. Não há escritor.
+Primeira linha é cabeçalho, como no CSV. `.xls` antigo (BIFF) é recusado.
+
+Data e datahora são o mesmo número na planilha, e a hora é a **fração do dia** — é a fração
+que decide qual dos dois, não o formato da célula, que cada escritor escolhe como quer.
+
+`para_xlsx(tabela, caminho)` escreve uma tabela numa aba, sem fórmula. Ausente vira célula
+vazia. Os membros do ZIP vão armazenados, sem compressão: o arquivo é maior e abre igual.
 
 ### Threads
 

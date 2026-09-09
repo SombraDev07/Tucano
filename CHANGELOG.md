@@ -3,6 +3,30 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.34.0] — Escrever .xlsx
+
+`para_xlsx(tabela, caminho)` grava a planilha numa aba; `planilha="Nome"` nomeia
+a aba. Uma tabela, um arquivo, sem formula.
+
+### Adicionado
+
+- **`para_xlsx`** — texto, inteiro, real, logico, data e datahora. Ausente vira
+  celula vazia, que e como a planilha guarda vazio.
+- **Escritor de ZIP** (`escrever_zip`, com CRC-32), metodo 0: armazenado. Isso
+  dispensa um compressor DEFLATE inteiro, que seria um modulo a manter para
+  economizar bytes que o Excel abre igual.
+- **`interop-xlsx`**: o `openpyxl` le o que o Tucano escreve, dentro do
+  `verificar_tudo.sh`. Round-trip proprio nao prova nada.
+
+### Corrigido
+
+- **A leitura perdia a hora.** A grade do [0.20.0] so tinha data, e truncava
+  datahora para o dia. Na planilha os dois sao o mesmo numero — a hora e a
+  **fracao do dia** — entao quem distingue e a parte fracionaria, nao o
+  `numFmtId`, que cada escritor escolhe como quer.
+- **Nome de aba com entidade XML nao era encontrado.** `Vendas & Cia` sai como
+  `Vendas &amp; Cia`, como manda o formato, e a leitura nao desescapava.
+
 ## [0.33.0] — Dicionario tambem para coluna numerica
 
 Depois do [0.32.0] a leitura era, quase inteira, uma coluna so: `valor` ocupava 22

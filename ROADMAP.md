@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13 e M15 → M25 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M25 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -1497,19 +1497,67 @@ sistema.
 
 ---
 
-## M14 — Escrever .xlsx
+## M14 — Escrever .xlsx ✅
 
-A leitura já existe. A saída que o analista pede é a planilha: `para_xlsx(tabela, caminho)`, uma aba, valores, sem fórmula e sem estilo. O CSV já cobre o caso “arquivo de tabela” (`para_csv`, M5); o `.xlsx` é o mesmo dado no formato que o Excel abre nativo.
+A leitura existia desde o M12. A saída que o analista pede é a planilha:
+`para_xlsx(tabela, caminho)`, uma aba, valores, sem fórmula. Uma tabela, um
+arquivo.
 
-Uma forma: `para_xlsx(tabela, caminho)` grava a primeira aba; `planilha="Nome"` nomeia a aba. Round-trip com o próprio `ler_xlsx` e leitura por outra implementação (o Excel, ou o gerador de fixture invertido). Sem `.xls`. Sem várias abas no mesmo arquivo neste marco — uma tabela, um arquivo.
+### ZIP sem compressor
+
+`.xlsx` é ZIP de XML, e o ZIP tem o método 0 — **armazenado**. Escrever com ele
+dispensa um compressor DEFLATE inteiro, que seria um módulo a manter para
+economizar bytes que o Excel abre igual. Quem quiser o arquivo menor comprime por
+fora; ele continua um ZIP válido.
+
+O que entrou foi um CRC-32 e o enquadramento: cabeçalho local por membro,
+diretório central, e o registro de fim. O leitor de ZIP do M12 lê o que o
+escritor produz, o que fecha a primeira volta.
+
+### O único estilo que existe
+
+`numFmtId` 14 e 22 — data e datahora. Sem eles a célula apareceria como o número
+de série cru, e nem o Excel nem o `ler_xlsx` saberiam que aquilo é uma data. É o
+mínimo que o formato exige para não mentir, e nada além.
+
+### A hora estava sendo perdida na volta
+
+Escrever datahora expôs um buraco da leitura do M12: a grade só tinha `_DATA`, e
+truncava a hora. Round-trip que perde informação não fecha marco.
+
+A correção não precisou de estilo novo. **Na planilha, data e datahora são o mesmo
+número — a hora é a fração do dia.** Quem distingue é a parte fracionária, não o
+`numFmtId`, que cada escritor escolhe como quer. A leitura passou a decidir pela
+fração, e a hora sobrevive à volta, inclusive antes da epoch.
+
+### Dois defeitos que os testes acharam
+
+O nome de aba `Vendas & Cia` sai escapado no XML, como manda o formato — e a
+leitura **não desescapava**, então a aba nunca era encontrada pelo nome. Um `&`
+num nome de aba é comum o bastante para isso ser um bug de verdade.
+
+E a checagem de "tabela sem colunas" em `para_xlsx` era código morto: a própria
+`Tabela` já recusa. Saiu, junto com o teste que afirmava a mensagem errada.
+
+### Verificação cruzada
+
+O ambiente de fixtures ganhou `openpyxl`, e `verificar_tudo.sh` ganhou dois
+passos: a ida e volta pelo próprio Tucano, e a leitura por outra implementação.
+Round-trip próprio não prova nada — um leitor e um escritor com o mesmo
+mal-entendido concordam entre si.
+
+O openpyxl lê os arquivos e confere valor a valor, incluindo `bru & co`,
+`<carlos>`, a célula ausente como vazia, e `2024-01-15 08:30:00` com a hora
+exata.
 
 ### Critério de saída
 
-- [ ] `para_xlsx(tabela, caminho)` e `para_xlsx(tabela, caminho, planilha="Nome")`
-- [ ] tipos: inteiro, real, lógico, texto, data, ausente
-- [ ] `ler_xlsx` lê de volta o que o Tucano escreveu
-- [ ] outra implementação abre o arquivo (fixture invertida)
-- [ ] `.xls` continua recusado
+- [x] `para_xlsx(tabela, caminho)`; `planilha="Nome"` nomeia a aba
+- [x] texto, inteiro, real, lógico, data e datahora; ausente vira célula vazia
+- [x] `&`, `<` e `>` escapados no conteúdo e no nome da aba
+- [x] mais de 26 colunas — a 27ª é `AA`
+- [x] openpyxl lê o que o Tucano escreve, dentro do `verificar_tudo.sh`
+- [x] 243 testes verdes
 
 ---
 
@@ -2361,4 +2409,4 @@ tempo, RAM, throughput, **startup**, scaling por cores, I/O
 19. ~~**Próximo com retorno:** abrir `.xlsx`~~ — M12
 20. ~~**Próximo com retorno:** decodificador Snappy~~ — M10.12
 21. ~~**Próximo com retorno:** `SELECT DISTINCT`~~ — M10.13
-22. **Próximo com retorno:** `para_xlsx` — `para_csv` já existe; falta a planilha que o Excel abre nativo
+22. ~~**Próximo com retorno:** `para_xlsx`~~ — M14

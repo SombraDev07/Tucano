@@ -1,4 +1,4 @@
-"""Leitura de .xlsx (Office Open XML) — M12.
+"""Leitura e escrita de .xlsx (Office Open XML) — M12 e M14.
 
 Uma forma: `ler_xlsx(caminho)` devolve a primeira planilha como `Tabela`.
 `planilha="Nome"` escolhe a aba. Primeira linha e cabecalho, como no CSV.
@@ -13,7 +13,8 @@ from .coluna import Coluna
 from .tabela import Tabela
 from .tipos import Tipo
 from .datas import dias_desde_epoch
-from .zip import Zip
+from .dtype import DType
+from .zip import Zip, escrever_zip
 
 
 def _encontrar(b: List[UInt8], ini: Int, alvo: String) -> Int:
@@ -228,6 +229,22 @@ def _fmt_parece_data(fmt: String) -> Bool:
     return False
 
 
+def _serial_para_micros(n: Float64) -> Int64:
+    """Serial com fracao -> microssegundos desde 1970-01-01.
+
+    A planilha nao tem tipo separado para data e datahora: as duas sao o mesmo
+    numero, e a hora e a **fracao do dia**. Quem distingue e a parte
+    fracionaria, nao o formato — e por isso a leitura decide por ela, e nao pelo
+    `numFmtId`, que cada escritor escolhe como quer.
+    """
+    var chao = Float64(Int(n))
+    if n < chao:
+        chao -= 1.0
+    var dias = Int64(Int(chao) + dias_desde_epoch(1899, 12, 30))
+    var micros_do_dia = Int64((n - chao) * 86400000000.0 + 0.5)
+    return dias * Int64(86400000000) + micros_do_dia
+
+
 def _serial_para_dias(n: Float64) -> Int64:
     """Excel 1900 (com o leap bug) -> dias desde 1970-01-01."""
     var inteiro = Int(n)
@@ -242,6 +259,7 @@ comptime _TEXTO = 1
 comptime _NUMERO = 2
 comptime _LOGICO = 3
 comptime _DATA = 4
+comptime _DATAHORA = 5
 
 
 struct _Grade(Movable):
@@ -251,6 +269,7 @@ struct _Grade(Movable):
     var texto: List[String]
     var numero: List[Float64]
     var dias: List[Int64]
+    var micros: List[Int64]
 
     def __init__(out self, n_linhas: Int, n_cols: Int):
         self.n_linhas = n_linhas
@@ -260,11 +279,13 @@ struct _Grade(Movable):
         self.texto = List[String]()
         self.numero = List[Float64]()
         self.dias = List[Int64]()
+        self.micros = List[Int64]()
         for _ in range(n):
             self.tipo.append(_VAZIA)
             self.texto.append("")
             self.numero.append(0.0)
             self.dias.append(Int64(0))
+            self.micros.append(Int64(0))
 
     def idx(self, linha: Int, col: Int) -> Int:
         return linha * self.n_cols + col
@@ -382,7 +403,9 @@ def _planilhas(xml: List[UInt8]) raises -> Tuple[List[String], List[String]]:
         var fim = _fim_tag(xml, t)
         if fim < 0:
             break
-        var nome = _attr(xml, t, fim, "name")
+        # o nome da aba e atributo XML: `&` e `<` chegam como entidade, e sem
+        # desfazer isso a aba "Vendas & Cia" nunca seria encontrada pelo nome
+        var nome = _unescape(_attr(xml, t, fim, "name"))
         var rid = _attr(xml, t, fim, "r:id")
         if rid == "":
             rid = _attr(xml, t, fim, "id")
@@ -466,9 +489,17 @@ def _preencher_celula(
     if estilo >= 0 and estilo < len(xf_data):
         data = xf_data[estilo]
     if data:
-        g.tipo[k] = _DATA
-        g.numero[k] = atof(valor)
-        g.dias[k] = _serial_para_dias(g.numero[k])
+        var serial = atof(valor)
+        g.numero[k] = serial
+        var chao = Float64(Int(serial))
+        if serial < chao:
+            chao -= 1.0
+        if serial != chao:
+            g.tipo[k] = _DATAHORA
+            g.micros[k] = _serial_para_micros(serial)
+        else:
+            g.tipo[k] = _DATA
+            g.dias[k] = _serial_para_dias(serial)
         return
     g.tipo[k] = _NUMERO
     g.texto[k] = valor
@@ -598,6 +629,7 @@ def _nome_coluna(g: _Grade, col: Int, tem_cabecalho: Bool) raises -> String:
 
 def _tipo_coluna(g: _Grade, col: Int, linha_ini: Int) raises -> Int:
     var so_data = True
+    var tem_hora = False
     var so_logico = True
     var so_int = True
     var so_num = True
@@ -608,7 +640,9 @@ def _tipo_coluna(g: _Grade, col: Int, linha_ini: Int) raises -> Int:
         if t == _VAZIA:
             continue
         tem = True
-        if t != _DATA:
+        if t == _DATAHORA:
+            tem_hora = True
+        if t != _DATA and t != _DATAHORA:
             so_data = False
         if t != _LOGICO:
             so_logico = False
@@ -620,12 +654,16 @@ def _tipo_coluna(g: _Grade, col: Int, linha_ini: Int) raises -> Int:
             so_logico = False
             if "." in g.texto[k] or "e" in g.texto[k] or "E" in g.texto[k]:
                 so_int = False
-        elif t == _DATA or t == _LOGICO:
+        elif t == _DATA or t == _DATAHORA or t == _LOGICO:
             so_int = False
             so_num = False
     if not tem:
         return Tipo.TEXTO
     if so_data:
+        # data e datahora na mesma coluna: datahora, porque data e datahora a
+        # meia-noite, e o contrario perderia a hora
+        if tem_hora:
+            return Tipo.DATAHORA
         return Tipo.DATA
     if so_logico:
         return Tipo.LOGICO
@@ -640,6 +678,20 @@ def _coluna_da_grade(
     g: _Grade, col: Int, linha_ini: Int, nome: String, tipo: Int
 ) raises -> Coluna:
     var ausentes = List[Bool]()
+    if tipo == Tipo.DATAHORA:
+        var vals = List[Int64]()
+        for linha in range(linha_ini, g.n_linhas):
+            var k = g.idx(linha, col)
+            if g.tipo[k] == _VAZIA:
+                vals.append(Int64(0))
+                ausentes.append(True)
+            elif g.tipo[k] == _DATA:
+                vals.append(g.dias[k] * Int64(86400000000))
+                ausentes.append(False)
+            else:
+                vals.append(g.micros[k])
+                ausentes.append(False)
+        return Coluna.de_datahoras(nome, vals^, ausentes^)
     if tipo == Tipo.DATA:
         var vals = List[Int64]()
         for linha in range(linha_ini, g.n_linhas):
@@ -802,3 +854,252 @@ def ler_xlsx(
         var tipo = _tipo_coluna(grade, c, linha_ini)
         colunas.append(_coluna_da_grade(grade, c, linha_ini, nome, tipo))
     return Tabela(colunas^)
+
+
+# ------------------------------------------------------------------ escrita
+#
+# Uma tabela, um arquivo, uma aba. Sem formula, sem estilo alem do minimo que
+# faz o Excel mostrar data como data — sem ele, a celula apareceria como o
+# numero de serie cru, e o `ler_xlsx` tambem nao saberia que aquilo e data.
+#
+# Os membros vao armazenados, sem DEFLATE. Comprimir XML de planilha economiza
+# bytes que o Excel abre igual, e um compressor e um modulo inteiro para manter.
+
+comptime _ESTILO_COMUM = 0
+comptime _ESTILO_DATA = 1
+comptime _ESTILO_DATAHORA = 2
+
+# 1970-01-01 no calendario de serie do Excel. Vem da mesma conta que a leitura
+# usa ao contrario, para os dois nao poderem discordar.
+comptime _SERIAL_DA_EPOCH = 25569
+
+
+def _escapar_xml(valor: String) raises -> String:
+    """Escapa em bytes, nao em `String`.
+
+    Concatenar `String` por caractere alocaria uma por byte de nome de coluna;
+    e o UTF-8 passa intacto, porque so os tres caracteres da sintaxe do XML
+    precisam virar entidade.
+    """
+    var out = List[UInt8]()
+    for b in valor.as_bytes():
+        if b == UInt8(38):  # &
+            for c in String("&amp;").as_bytes():
+                out.append(c)
+        elif b == UInt8(60):  # <
+            for c in String("&lt;").as_bytes():
+                out.append(c)
+        elif b == UInt8(62):  # >
+            for c in String("&gt;").as_bytes():
+                out.append(c)
+        elif b < UInt8(32) and b != UInt8(9) and b != UInt8(10) and b != UInt8(13):
+            # controle que o XML nao aceita: some, em vez de gerar um arquivo
+            # que nenhum leitor abre
+            continue
+        else:
+            out.append(b)
+    if len(out) == 0:
+        return String("")
+    return String(from_utf8=Span(out)[0 : len(out)])
+
+
+def _letra_da_coluna(indice: Int) -> String:
+    """0 -> A, 25 -> Z, 26 -> AA."""
+    var s = String("")
+    var n = indice
+    while True:
+        var r = n % 26
+        s = String(chr(65 + r)) + s
+        n = n // 26 - 1
+        if n < 0:
+            break
+    return s^
+
+
+def _bytes_de(texto: String) -> List[UInt8]:
+    var out = List[UInt8]()
+    for b in texto.as_bytes():
+        out.append(b)
+    return out^
+
+
+def _parte_content_types() -> String:
+    return String(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        "</Types>"
+    )
+
+
+def _parte_rels_raiz() -> String:
+    return String(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1"'
+        ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"'
+        ' Target="xl/workbook.xml"/>'
+        "</Relationships>"
+    )
+
+
+def _parte_workbook(planilha: String) raises -> String:
+    return String(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        "<sheets><sheet name=\""
+    ) + _escapar_xml(planilha) + String(
+        '" sheetId="1" r:id="rId1"/></sheets></workbook>'
+    )
+
+
+def _parte_rels_workbook() -> String:
+    return String(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1"'
+        ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"'
+        ' Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId2"'
+        ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"'
+        ' Target="styles.xml"/>'
+        "</Relationships>"
+    )
+
+
+def _parte_styles() -> String:
+    """Tres formatos: o comum, data e datahora.
+
+    `numFmtId` 14 e 22 sao embutidos do proprio formato — nao precisam de
+    `numFmt` declarado — e estao na faixa que o `ler_xlsx` reconhece como data.
+    """
+    return String(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+        '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+        "<borders count=\"1\"><border/></borders>"
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="3">'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        '<xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+        '<xf numFmtId="22" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+        "</cellXfs>"
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        "</styleSheet>"
+    )
+
+
+def _celula(
+    endereco: String, tipo_xml: String, estilo: Int, valor: String
+) -> String:
+    var s = String("<c r=\"") + endereco + "\""
+    if estilo != _ESTILO_COMUM:
+        s += " s=\"" + String(estilo) + "\""
+    if tipo_xml == "inlineStr":
+        s += " t=\"inlineStr\"><is><t xml:space=\"preserve\">" + valor + "</t></is></c>"
+        return s^
+    if tipo_xml == "b":
+        s += " t=\"b\"><v>" + valor + "</v></c>"
+        return s^
+    s += "><v>" + valor + "</v></c>"
+    return s^
+
+
+def _parte_planilha(tabela: Tabela) raises -> String:
+    var cols = tabela.lote()
+    var nomes = tabela.nomes()
+    var linhas = tabela.linhas()
+    var s = String(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        "<sheetData>"
+    )
+
+    s += "<row r=\"1\">"
+    for c in range(len(nomes)):
+        s += _celula(
+            _letra_da_coluna(c) + "1", "inlineStr", _ESTILO_COMUM,
+            _escapar_xml(nomes[c]),
+        )
+    s += "</row>"
+
+    for i in range(linhas):
+        var r = i + 2
+        s += "<row r=\"" + String(r) + "\">"
+        for c in range(len(cols)):
+            var endereco = _letra_da_coluna(c) + String(r)
+            ref coluna = cols[c]
+            # ausente nao vira celula: celula que falta e como o Excel guarda
+            # vazio, e e assim que o `ler_xlsx` a le de volta
+            if coluna.eh_ausente(i):
+                continue
+            if coluna.tipo == DType.TEXTO:
+                s += _celula(
+                    endereco, "inlineStr", _ESTILO_COMUM,
+                    _escapar_xml(coluna.texto_bruto(i)),
+                )
+            elif coluna.tipo == DType.LOGICO:
+                var v = String("0")
+                if Int(coluna.logics[i]) != 0:
+                    v = "1"
+                s += _celula(endereco, "b", _ESTILO_COMUM, v)
+            elif coluna.tipo == DType.DATA:
+                var serial = Int(coluna.dias_em(i)) + _SERIAL_DA_EPOCH
+                s += _celula(endereco, "n", _ESTILO_DATA, String(serial))
+            elif coluna.tipo == DType.DATAHORA:
+                var micros = Int(coluna.micros_em(i))
+                var dia = micros // 86_400_000_000
+                if micros < 0 and micros % 86_400_000_000 != 0:
+                    dia -= 1
+                var resto = micros - dia * 86_400_000_000
+                var fracao = Float64(resto) / 86_400_000_000.0
+                s += _celula(
+                    endereco, "n", _ESTILO_DATAHORA,
+                    String(Float64(dia + _SERIAL_DA_EPOCH) + fracao),
+                )
+            elif coluna.tipo == DType.REAL:
+                var x = coluna.reals[i]
+                if x != x or x > 1.0e308 or x < -1.0e308:
+                    # NaN e infinito nao existem na planilha; celula vazia diz a
+                    # verdade melhor que um numero inventado
+                    continue
+                s += _celula(endereco, "n", _ESTILO_COMUM, String(x))
+            else:
+                s += _celula(endereco, "n", _ESTILO_COMUM, String(coluna.ints[i]))
+        s += "</row>"
+
+    s += "</sheetData></worksheet>"
+    return s^
+
+
+def para_xlsx(
+    tabela: Tabela, caminho: String, planilha: String = "Planilha1"
+) raises:
+    """Grava a tabela como planilha, numa aba.
+
+    Uma forma: uma tabela, um arquivo, uma aba. Sem formula e sem varias abas —
+    isso e compatibilidade com o Excel, nao o motor.
+    """
+    var nomes = List[String]()
+    var conteudos = List[List[UInt8]]()
+
+    nomes.append("[Content_Types].xml")
+    conteudos.append(_bytes_de(_parte_content_types()))
+    nomes.append("_rels/.rels")
+    conteudos.append(_bytes_de(_parte_rels_raiz()))
+    nomes.append("xl/workbook.xml")
+    conteudos.append(_bytes_de(_parte_workbook(planilha)))
+    nomes.append("xl/_rels/workbook.xml.rels")
+    conteudos.append(_bytes_de(_parte_rels_workbook()))
+    nomes.append("xl/styles.xml")
+    conteudos.append(_bytes_de(_parte_styles()))
+    nomes.append("xl/worksheets/sheet1.xml")
+    conteudos.append(_bytes_de(_parte_planilha(tabela)))
+
+    Path(caminho).write_bytes(escrever_zip(nomes, conteudos))

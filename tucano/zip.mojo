@@ -148,3 +148,111 @@ struct Zip(Movable):
                 + " em '" + caminho + "' nao suportada (use store ou deflate)"
             )
         raise Error("zip: membro '" + caminho + "' nao existe")
+
+
+# ---------------------------------------------------------------- escrita
+#
+# So o que o .xlsx precisa: metodo 0 (armazenado), sem ZIP64 e sem senha. Nao ha
+# compressor DEFLATE aqui — comprimir XML de planilha economizaria bytes que o
+# Excel abre igual, e um compressor e um modulo inteiro para manter. Quem quiser
+# o arquivo menor comprime o `.xlsx` por fora; ele continua um ZIP valido.
+
+def _crc32_tabela() -> List[UInt32]:
+    var t = List[UInt32]()
+    t.resize(256, UInt32(0))
+    for i in range(256):
+        var c = UInt32(i)
+        for _ in range(8):
+            if c & UInt32(1) != 0:
+                c = UInt32(0xEDB88320) ^ (c >> 1)
+            else:
+                c = c >> 1
+        t[i] = c
+    return t^
+
+
+def crc32(dados: List[UInt8]) -> UInt32:
+    var t = _crc32_tabela()
+    var c = UInt32(0xFFFFFFFF)
+    var p = dados.unsafe_ptr()
+    var pt = t.unsafe_ptr()
+    for i in range(len(dados)):
+        var idx = Int((c ^ UInt32(p.unsafe_load(i))) & UInt32(0xFF))
+        c = pt.unsafe_load(idx) ^ (c >> 8)
+    return c ^ UInt32(0xFFFFFFFF)
+
+
+def _le16(mut out: List[UInt8], v: Int):
+    out.append(UInt8(v & 0xFF))
+    out.append(UInt8((v >> 8) & 0xFF))
+
+
+def _le32(mut out: List[UInt8], v: Int):
+    for k in range(4):
+        out.append(UInt8((v >> (8 * k)) & 0xFF))
+
+
+def escrever_zip(
+    nomes: List[String], conteudos: List[List[UInt8]]
+) raises -> List[UInt8]:
+    """Monta um ZIP com os membros dados, todos armazenados sem compressao."""
+    if len(nomes) != len(conteudos):
+        raise Error("zip: nomes e conteudos com tamanhos diferentes")
+    var arquivo = List[UInt8]()
+    var offsets = List[Int]()
+    var crcs = List[UInt32]()
+
+    for i in range(len(nomes)):
+        offsets.append(len(arquivo))
+        var nome = nomes[i].as_bytes()
+        var c = crc32(conteudos[i])
+        crcs.append(c)
+        _le32(arquivo, 0x04034B50)  # PK\x03\x04
+        _le16(arquivo, 20)  # versao necessaria
+        _le16(arquivo, 0)  # sem bandeiras
+        _le16(arquivo, 0)  # metodo 0: armazenado
+        _le16(arquivo, 0)  # hora
+        _le16(arquivo, 0x21)  # data: 1980-01-01, a mais antiga que o ZIP tem
+        _le32(arquivo, Int(c))
+        _le32(arquivo, len(conteudos[i]))
+        _le32(arquivo, len(conteudos[i]))
+        _le16(arquivo, len(nome))
+        _le16(arquivo, 0)  # sem campo extra
+        for b in nome:
+            arquivo.append(b)
+        for b in conteudos[i]:
+            arquivo.append(b)
+
+    var inicio_central = len(arquivo)
+    for i in range(len(nomes)):
+        var nome = nomes[i].as_bytes()
+        _le32(arquivo, 0x02014B50)  # PK\x01\x02
+        _le16(arquivo, 20)  # versao de quem escreveu
+        _le16(arquivo, 20)  # versao necessaria
+        _le16(arquivo, 0)
+        _le16(arquivo, 0)
+        _le16(arquivo, 0)
+        _le16(arquivo, 0x21)
+        _le32(arquivo, Int(crcs[i]))
+        _le32(arquivo, len(conteudos[i]))
+        _le32(arquivo, len(conteudos[i]))
+        _le16(arquivo, len(nome))
+        _le16(arquivo, 0)  # extra
+        _le16(arquivo, 0)  # comentario
+        _le16(arquivo, 0)  # disco
+        _le16(arquivo, 0)  # atributos internos
+        _le32(arquivo, 0)  # atributos externos
+        _le32(arquivo, offsets[i])
+        for b in nome:
+            arquivo.append(b)
+
+    var tamanho_central = len(arquivo) - inicio_central
+    _le32(arquivo, 0x06054B50)  # PK\x05\x06
+    _le16(arquivo, 0)
+    _le16(arquivo, 0)
+    _le16(arquivo, len(nomes))
+    _le16(arquivo, len(nomes))
+    _le32(arquivo, tamanho_central)
+    _le32(arquivo, inicio_central)
+    _le16(arquivo, 0)  # sem comentario
+    return arquivo^

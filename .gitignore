@@ -13,3 +13,4 @@
 tests/fixtures/_saida_*.csv
 tests/fixtures/_saida_*.parquet
 tests/fixtures/_saida_*.arrow
+tests/fixtures/_saida_*.xlsx

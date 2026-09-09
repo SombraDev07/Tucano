@@ -17,7 +17,7 @@ from .tabela import (
     ler_arrow,
 )
 from .csv import ler_csv, ler_csv_tipado, LeitorCSV, para_csv
-from .xlsx import ler_xlsx
+from .xlsx import ler_xlsx, para_xlsx
 from .tipos import Tipo
 from .datas import (
     DataCivil,

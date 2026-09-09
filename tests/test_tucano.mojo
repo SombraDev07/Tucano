@@ -67,6 +67,7 @@ from tucano import (
     TipoEtapa,
     Consulta,
     ler_xlsx,
+    para_xlsx,
 )
 from tucano.codecs import (
     decodificar_rle,
@@ -4235,6 +4236,100 @@ def test_deflate_bloco_armazenado() raises:
     assert_equal(len(o), 276)
     assert_equal(Int(o[0]), 0)
     assert_equal(Int(o[255]), 255)
+
+
+def test_xlsx_ida_e_volta() raises:
+    """Escreve e le de volta, com os tipos e o que o XML precisa escapar.
+
+    O `&` e o `<` no meio de um nome de coluna sao o caso que gera arquivo que
+    nenhum leitor abre, se o escape faltar — e o Excel nao diz onde esta o erro,
+    so recusa a planilha.
+    """
+    var nomes = List[String]()
+    for x in ["ana", "bru & co", "<carlos>", ""]:
+        nomes.append(String(x))
+    var aus = List[Bool]()
+    for b in [False, False, False, True]:
+        aus.append(Bool(b))
+    var qtd = List[Int64]()
+    for x in [1, 20, -3, 400]:
+        qtd.append(Int64(x))
+    var preco = List[Float64]()
+    for x in [1.5, 2.25, -0.75, 100.0]:
+        preco.append(Float64(x))
+    var ok = List[Bool]()
+    for b in [True, False, True, False]:
+        ok.append(Bool(b))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("a & b", nomes^, aus^))
+    cols.append(Coluna.de_inteiros("qtd", qtd^))
+    cols.append(Coluna.de_reais("preco", preco^))
+    cols.append(Coluna.de_logicos("ok", ok^))
+    var caminho = String("tests/fixtures/_saida_planilha.xlsx")
+    para_xlsx(Tabela(cols^), caminho, "Vendas & Cia")
+
+    var v = ler_xlsx(caminho)
+    assert_equal(v.linhas(), 4)
+    assert_equal(v.colunas(), 4)
+    assert_equal(v.nomes()[0], "a & b")
+    assert_equal(v.pegar("a & b").texto_em(1), "bru & co")
+    assert_equal(v.pegar("a & b").texto_em(2), "<carlos>")
+    assert_true(v.pegar("a & b").eh_ausente(3))
+    assert_equal(v.pegar("qtd").texto_em(2), "-3")
+    assert_equal(v.pegar("preco").texto_em(1), "2.25")
+    assert_equal(v.pegar("ok").texto_em(0), "True")
+    assert_equal(v.pegar("ok").texto_em(1), "False")
+
+    # a aba nomeada tambem volta
+    var so_ela = ler_xlsx(caminho, "Vendas & Cia")
+    assert_equal(so_ela.linhas(), 4)
+
+
+def test_xlsx_datahora_mantem_a_hora() raises:
+    """Data e datahora sao o mesmo numero na planilha; a hora e a fracao do dia.
+
+    Quem distingue na volta e a parte fracionaria, nao o `numFmtId` — cada
+    escritor escolhe o formato como quer, e a fracao nao mente.
+    """
+    var dias = List[Int64]()
+    dias.append(Int64(dias_desde_epoch(2024, 1, 15)))
+    dias.append(Int64(dias_desde_epoch(1969, 12, 31)))
+    var micros = List[Int64]()
+    micros.append(
+        Int64(dias_desde_epoch(2024, 1, 15)) * 86400000000
+        + Int64(8 * 3600 + 30 * 60) * 1000000
+    )
+    micros.append(
+        Int64(dias_desde_epoch(1969, 12, 31)) * 86400000000
+        + Int64(23 * 3600 + 59 * 60 + 59) * 1000000
+    )
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_datas("quando", dias^))
+    cols.append(Coluna.de_datahoras("carimbo", micros^))
+    var caminho = String("tests/fixtures/_saida_datas.xlsx")
+    para_xlsx(Tabela(cols^), caminho)
+
+    var v = ler_xlsx(caminho)
+    assert_equal(v.pegar("quando").texto_em(0), "2024-01-15")
+    assert_equal(v.pegar("quando").texto_em(1), "1969-12-31")
+    # a hora sobrevive, inclusive antes da epoch
+    assert_equal(v.pegar("carimbo").texto_em(0), "2024-01-15T08:30:00")
+    assert_equal(v.pegar("carimbo").texto_em(1), "1969-12-31T23:59:59")
+
+
+def test_xlsx_mais_de_26_colunas() raises:
+    """A 27a coluna e `AA`, nao `[`. Contar em base 26 sem digito zero erra ali."""
+    var cols = List[Coluna]()
+    for c in range(30):
+        var v = List[Int64]()
+        v.append(Int64(c))
+        cols.append(Coluna.de_inteiros("c" + String(c), v^))
+    var caminho = String("tests/fixtures/_saida_largura.xlsx")
+    para_xlsx(Tabela(cols^), caminho)
+    var v = ler_xlsx(caminho)
+    assert_equal(v.colunas(), 30)
+    assert_equal(v.nomes()[26], "c26")
+    assert_equal(v.pegar("c29").texto_em(0), "29")
 
 
 def test_xlsx_primeira_planilha() raises:
