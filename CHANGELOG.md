@@ -3,6 +3,40 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.42.0] — Abrir o Parquet dos outros
+
+Levantamento para o 1.0 feito com arquivo na mao: seis Parquets escritos pelo
+pyarrow, um por codec, mais `DECIMAL` e `INT96`.
+
+| arquivo | antes | agora |
+|---|---|---|
+| sem compressao, Snappy | ok | ok |
+| **GZIP** | recusa | **le** |
+| **INT96** | recusa | **le** |
+| DECIMAL | **valor errado sem aviso** | recusa explicita (0.41.1) |
+| Zstd, Brotli, LZ4 | recusa | recusa |
+
+### Adicionado
+
+- **GZIP na leitura.** O inflate ja existia por causa do `.xlsx`; faltava o
+  embrulho gzip — magica, cabecalho e rodape com CRC-32 e tamanho, os dois
+  conferidos. `desgzipar()` em `tucano/deflate.mojo`.
+- **INT96**, o carimbo de tempo legado do Impala/Hive: oito bytes de
+  nanossegundos dentro do dia mais quatro de dia juliano, convertidos para
+  microssegundos. Fixture com carimbos dos dois lados da epoch.
+- Fixtures `gzip.parquet` e `int96.parquet`, conferidas coluna a coluna contra o
+  mesmo dado sem compressao.
+
+### Alterado
+
+- **O inflate ficou 2,5x mais rapido** — ler 5M x 3 em GZIP caiu de 866 para
+  348 ms. O decodificador era o de referencia: um bit por chamada de fluxo, nove
+  por simbolo. Agora espia quinze bits de uma vez e o laco do Huffman anda num
+  inteiro local; a copia LZ77 escreve por ponteiro em espaco ja reservado. Vale
+  para o `.xlsx` tambem.
+- GZIP existe para o arquivo **abrir**: em Snappy o mesmo arquivo custa 52 ms, e
+  o pyarrow le o GZIP em 32. Quem vai reler muito regrava em Snappy.
+
 ## [0.41.1] — DECIMAL devolvia numero errado sem avisar
 
 Achado ao levantar o que falta para o 1.0. Uma coluna `DECIMAL(9,2)` gravada como

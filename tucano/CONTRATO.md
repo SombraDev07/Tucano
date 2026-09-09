@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.41.1 — M0 → M32; leitura multithread; HTTP do painel fora do caminho crítico.
+Versão 0.42.0 — M0 → M33; leitura multithread; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -508,16 +508,20 @@ duas encolhe. Na leitura, as três são entendidas.
 | `metadados_parquet(caminho)` | linhas, row groups, codificações, compressão |
 
 **Leitura cobre:** esquema plano; `PLAIN`, `RLE_DICTIONARY` e `DELTA_BINARY_PACKED`; níveis
-de definição RLE/bit-packed; páginas V1 e V2; sem compressão e Snappy; múltiplos row groups;
-tipos lógicos por `ConvertedType` e `LogicalType`.
+de definição RLE/bit-packed; páginas V1 e V2; sem compressão, **Snappy e GZIP**; `INT96`
+(carimbo legado do Impala/Hive, convertido para microssegundos); múltiplos row groups; tipos
+lógicos por `ConvertedType` e `LogicalType`.
+
+GZIP existe para o arquivo **abrir**, não para ser rápido: 5M × 3 colunas custam 52 ms em
+Snappy e 348 em GZIP, porque o inflate é o do `.xlsx` e não o do zlib. Quem vai ler o mesmo
+arquivo muitas vezes ganha regravando em Snappy.
 
 **Leitura recusa, com erro explícito:**
 
 | o que | por quê |
 |---|---|
-| GZIP, Zstd, Brotli, LZO, LZ4 | só há decodificador de Snappy; não há dependência externa |
+| Zstd, Brotli, LZO, LZ4 | não há decodificador; e não se entra dependência externa por isso |
 | `DECIMAL` | não há tipo decimal, e o valor no arquivo é o inteiro **sem escala** |
-| `INT96` | carimbo de tempo legado (Impala/Hive antigo) |
 | `FIXED_LEN_BYTE_ARRAY` | valor sem prefixo de tamanho; o leitor de `BYTE_ARRAY` não serve |
 
 Recusar é a regra sobre a qual não se negocia: um `DECIMAL(9,2)` lido como inteiro devolveria

@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M32 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M33 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -283,6 +283,7 @@ de datas, com a leitura no mesmo tempo. A dívida sai da lista.
 | M31 | A pergunta feita por linha | crítica | ✅ feito | 430 → 241 ms; 1,8× o pyarrow |
 | M31.1 | Recortar dentro da tarefa | crítica | ❌ **medido e recusado** | banda de memória; +8% com tudo num grupo |
 | M32 | O custo de codificar | crítica | ✅ feito | 251 → 128 ms; 3,4× o pyarrow |
+| M33 | Abrir o Parquet dos outros | crítica | ✅ feito | GZIP e INT96; DECIMAL deixou de mentir |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | ✅ feito | `para_xlsx` — ZIP com método 0, sem compressor |
@@ -2985,6 +2986,77 @@ mora em `buffer.mojo` e serve aos dois.
 - [x] teste cobrindo os dois caminhos: faixa estreita com negativos, faixa larga,
       `Int64` mínimo e máximo na mesma coluna, e bits de `Float64`
 - [x] 247 testes verdes, oito passos de verificação verdes
+
+---
+
+## M33 — Abrir o Parquet dos outros ✅
+
+Levantamento para o 1.0, feito com arquivo na mão em vez de com a lista de
+features: escrever seis Parquets com o pyarrow — um por codec — mais `DECIMAL` e
+`INT96`, e tentar abrir os oito.
+
+| arquivo | antes | agora |
+|---|---|---|
+| sem compressão, Snappy | ✅ | ✅ |
+| **GZIP** | ❌ | ✅ |
+| **INT96** | ❌ | ✅ |
+| **DECIMAL** | ⚠️ **valor errado, sem aviso** | ❌ recusa explícita |
+| `FIXED_LEN_BYTE_ARRAY` | ⚠️ lixo ou erro confuso | ❌ recusa explícita |
+| Zstd, Brotli, LZ4 | ❌ | ❌ |
+
+### O achado que justificou o levantamento
+
+`DECIMAL(9,2)` gravado como INT32 — o que o pyarrow faz com
+`store_decimal_as_integer` — era lido como INTEIRO. O arquivo diz `123,45` e o
+Tucano devolvia **12345**, sem erro nenhum. `DECIMAL` não estava no
+`ConvertedType` conhecido nem na união do `LogicalType`, então a escala
+simplesmente não era vista.
+
+Recusa, e não conversão: virar `Float64` automaticamente seria trocar um erro
+silencioso por outro, porque decimal existe exatamente para o dinheiro não passar
+por float.
+
+### GZIP custou pouco porque o inflate já existia
+
+O `.xlsx` é um ZIP com método 8, então `tucano/deflate.mojo` já tinha inflate
+completo desde o M12. Faltava o **embrulho**: o codec GZIP do Parquet é um membro
+gzip inteiro — magica, cabeçalho e rodapé com CRC-32 e tamanho, os dois
+conferidos. `desgzipar()` são setenta linhas em cima do que já havia.
+
+### E aí mediu 866 ms
+
+Ler 5M × 3 colunas: 56 ms em Snappy, **866 em GZIP** — o pyarrow lê o mesmo
+arquivo em 32. O decodificador era o de referência: um bit por chamada de fluxo,
+nove chamadas por símbolo, e a cópia LZ77 com dois acessos verificados por byte.
+
+| | ms |
+|---|---|
+| decodificador de referência | 866 |
+| espiar 15 bits e andar em inteiro local | **348** |
+
+Duas mudanças: `espiar`/`consumir` no fluxo de bits — o laço do Huffman trabalha
+num inteiro local e só avisa quantos bits gastou — e a cópia LZ77 escrevendo por
+ponteiro em espaço já reservado. Vale para o `.xlsx` também.
+
+Ainda são 10× o zlib, e o próximo passo conhecido é a tabela de consulta de 9
+bits, que resolve o caso comum sem andar bit a bit. Não entrou: GZIP existe para
+o arquivo **abrir**, e o formato que o Tucano otimiza é o Snappy — quem vai reler
+muito o mesmo arquivo regrava e paga 52 ms.
+
+### INT96
+
+Doze bytes: oito de nanossegundos dentro do dia, quatro de dia juliano. Não é um
+inteiro de 96 bits, e lê-lo como tal daria um número sem significado. A fixture
+tem carimbos dos **dois lados da epoch** de propósito — a conta de quem só testou
+com data futura passa despercebida.
+
+### Critério de saída
+
+- [x] os oito arquivos do levantamento testados um a um, antes e depois
+- [x] o valor errado silencioso virou recusa, com o nome da coluna no erro
+- [x] fixtures commitadas para GZIP, INT96 e DECIMAL
+- [x] GZIP conferido contra o mesmo dado sem compressão, coluna a coluna
+- [x] 249 testes verdes, oito passos de verificação verdes
 
 ---
 

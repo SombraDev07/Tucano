@@ -378,6 +378,38 @@ def test_dicionario_numerico_faixa_e_extremos() raises:
             assert_equal(volta.pegar(nome).texto_em(i), t.pegar(nome).texto_em(i))
 
 
+def test_parquet_gzip_e_int96() raises:
+    """O que outras implementacoes escrevem e o Tucano precisa abrir.
+
+    As duas fixtures tem o mesmo conteudo lógico da `int96`, entao a conferencia
+    e coluna contra coluna, e nao contra valores escritos a mao: se a conversao
+    de dia juliano estivesse errada, as duas discordariam.
+    """
+    var g = ler_parquet("tests/fixtures/gzip.parquet")
+    var i96 = ler_parquet("tests/fixtures/int96.parquet")
+    assert_equal(g.linhas(), 400)
+    assert_equal(i96.linhas(), 400)
+    for c in range(g.colunas()):
+        var nome = g.nomes()[c]
+        for i in range(g.linhas()):
+            assert_equal(i96.pegar(nome).texto_em(i), g.pegar(nome).texto_em(i))
+
+    # carimbo antes da epoch: dia juliano menor que 2440588, e o resultado tem
+    # de ser negativo em microssegundos
+    assert_equal(i96.pegar("quando").texto_em(0), "2024-01-01T00:00:00")
+    assert_equal(i96.pegar("quando").texto_em(1), "1960-06-15T00:00:37")
+    assert_true(i96.pegar("quando").tipo == DType.DATAHORA)
+
+    # e a ida e volta: o Tucano escreve em INT64, nunca em INT96
+    var caminho = String("tests/fixtures/_saida_int96.parquet")
+    para_parquet(i96, caminho)
+    var volta = ler_parquet(caminho)
+    for i in range(volta.linhas()):
+        assert_equal(
+            volta.pegar("quando").texto_em(i), i96.pegar("quando").texto_em(i)
+        )
+
+
 def test_parquet_recusa_decimal() raises:
     """DECIMAL guardado como inteiro sem escala: 123,45 chega como 12345.
 

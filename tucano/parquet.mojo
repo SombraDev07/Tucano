@@ -891,6 +891,7 @@ from .codecs import (
 from std.collections import Dict
 from .coluna import Coluna
 from .buffer import StringStore, espalhar_chave
+from .deflate import desgzipar
 from .executor import coletar_linhas
 from .dtype import DType
 from .schema import Campo, Schema
@@ -1023,10 +1024,22 @@ def _descomprimir(
         return out^
     if codec == PCompressao.SNAPPY:
         return descomprimir_snappy(bytes, ini, ini + comprimido)
+    if codec == PCompressao.GZIP:
+        # o inflate ja existia por causa do `.xlsx`; o que faltava era o
+        # embrulho gzip, que e cabecalho com magica e rodape com CRC
+        var membro = List[UInt8](capacity=comprimido)
+        membro.resize(unsafe_uninit_length=comprimido)
+        if comprimido > 0:
+            _ = external_call["memcpy", Int](
+                membro.unsafe_ptr(),
+                bytes.unsafe_ptr().unsafe_offset(ini),
+                comprimido,
+            )
+        return desgzipar(membro^)
     raise Error(
         "parquet: compressao "
         + PCompressao.nome(codec)
-        + " ainda nao suportada (ha suporte a sem compressao e Snappy)"
+        + " ainda nao suportada (ha suporte a sem compressao, Snappy e GZIP)"
     )
 
 
@@ -1041,6 +1054,31 @@ def _int32(b: List[UInt8], pos: Int) -> Int:
     if v >= 0x80000000:
         v -= 0x100000000
     return v
+
+
+# Dia juliano de 1970-01-01. O INT96 conta dias julianos porque veio do mundo
+# do Impala, que herdou a convencao da astronomia.
+comptime _JULIANO_DA_EPOCH = 2440588
+
+
+def _int96_para_micros(b: List[UInt8], pos: Int) -> Int:
+    """INT96 -> microssegundos desde a epoch.
+
+    Doze bytes little-endian: os oito primeiros sao **nanossegundos dentro do
+    dia**, os quatro ultimos o **dia juliano**. Nao e um inteiro de 96 bits; e
+    um par, e le-lo como inteiro daria um numero sem significado nenhum.
+
+    Nanossegundo nao cabe no Tucano, que guarda microssegundo — a divisao por
+    mil trunca, como faz qualquer leitor que nao tem o tipo de nanossegundo.
+    """
+    var nanos = 0
+    var p = b.unsafe_ptr()
+    for i in range(8):
+        nanos |= Int(p.unsafe_load(pos + i)) << (8 * i)
+    var dia = 0
+    for i in range(4):
+        dia |= Int(p.unsafe_load(pos + 8 + i)) << (8 * i)
+    return (dia - _JULIANO_DA_EPOCH) * 86_400_000_000 + nanos // 1000
 
 
 def _int64(b: List[UInt8], pos: Int) -> Int:
@@ -1181,6 +1219,13 @@ def _ler_plain(
             out.inteiros.append(Int64(_int32(b, pos)))
             pos += 4
         return
+    if tipo == PTipo.INT96:
+        for _ in range(quantidade):
+            if pos + 12 > fim:
+                raise Error("parquet: PLAIN int96 truncado")
+            out.inteiros.append(Int64(_int96_para_micros(b, pos)))
+            pos += 12
+        return
     if tipo == PTipo.INT64:
         for _ in range(quantidade):
             if pos + 8 > fim:
@@ -1248,6 +1293,11 @@ def _tipo_tucano(e: ElementoEsquema) raises -> Int:
             "parquet: coluna '" + e.nome + "' e FIXED_LEN_BYTE_ARRAY, ainda nao"
             + " suportado"
         )
+    if e.tipo == PTipo.INT96:
+        # carimbo de tempo legado do Impala/Hive. Nao ha tipo convertido: o
+        # proprio INT96 quer dizer "timestamp em nanossegundos", e e assim que
+        # todo leitor o trata.
+        return DType.DATAHORA
     if e.tipo == PTipo.BYTE_ARRAY:
         return DType.TEXTO
     if e.tipo == PTipo.FLOAT or e.tipo == PTipo.DOUBLE:

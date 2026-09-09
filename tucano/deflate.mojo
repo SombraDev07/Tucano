@@ -1,6 +1,9 @@
-"""Inflate DEFLATE cru (RFC 1951) — o metodo 8 do ZIP.
+"""Inflate DEFLATE cru (RFC 1951) — o metodo 8 do ZIP e o miolo do gzip.
 
-Sem enquadramento zlib: o ZIP guarda o bloco cru, sem CMF/FLG nem Adler-32.
+O ZIP guarda o bloco **cru**, sem CMF/FLG nem Adler-32; o gzip embrulha o mesmo
+bloco num cabecalho com magica e num rodape com CRC-32 e tamanho. `inflar` faz o
+miolo, `desgzipar` tira o embrulho — o Parquet com codec GZIP chama o segundo.
+
 O decoder e o mesmo papel do Snappy no Parquet: um codec, nao um formato.
 """
 
@@ -125,30 +128,59 @@ def _dist_extra() -> List[Int]:
 
 
 struct _Bits(Movable):
+    """Fluxo de bits do DEFLATE, do menos significativo para o mais.
+
+    `espiar` + `consumir` existem por causa do Huffman: decodificar um simbolo
+    anda de um em um bit, e pedir um bit por vez ao fluxo custava uma chamada e
+    um remanejo do buffer por bit — nove por simbolo, no caso comum. Espiando
+    quinze bits de uma vez, o laco do decodificador trabalha num inteiro local e
+    so avisa quantos bits gastou.
+
+    Perto do fim os bits que faltam sao **fabricados como zero** em vez de dar
+    erro na hora: um simbolo pode terminar no ultimo byte, e quem sabe se o
+    fluxo acabou cedo demais e o `consumir`, que confere se os bits gastos eram
+    reais.
+    """
+
     var dados: List[UInt8]
     var pos: Int
     var buf: Int
     var nbuf: Int
+    var nfab: Int
+    """Bits fabricados no topo do buffer — zeros que nao vieram da entrada."""
 
     def __init__(out self, var dados: List[UInt8]):
         self.dados = dados^
         self.pos = 0
         self.buf = 0
         self.nbuf = 0
+        self.nfab = 0
+
+    def encher(mut self, n: Int):
+        var p = self.dados.unsafe_ptr()
+        var fim = len(self.dados)
+        while self.nbuf < n:
+            if self.pos < fim:
+                self.buf |= Int(p.unsafe_load(self.pos)) << self.nbuf
+                self.pos += 1
+            else:
+                self.nfab += 8
+            self.nbuf += 8
+
+    def espiar(mut self, n: Int) -> Int:
+        self.encher(n)
+        return self.buf & ((1 << n) - 1)
+
+    def consumir(mut self, n: Int) raises:
+        if n > self.nbuf - self.nfab:
+            raise Error("deflate: entrada truncada")
+        self.buf >>= n
+        self.nbuf -= n
 
     def bits(mut self, n: Int) raises -> Int:
         """Le `n` bits, menos significativo primeiro."""
-        var val = self.buf
-        while self.nbuf < n:
-            if self.pos >= len(self.dados):
-                raise Error("deflate: entrada truncada")
-            val |= Int(self.dados[self.pos]) << self.nbuf
-            self.pos += 1
-            self.nbuf += 8
-        var mascara = (1 << n) - 1
-        var out = val & mascara
-        self.buf = val >> n
-        self.nbuf -= n
+        var out = self.espiar(n)
+        self.consumir(n)
         return out
 
     def alinhar(mut self):
@@ -205,13 +237,21 @@ def _construir(mut h: _Huffman, comprimentos: List[Int], n: Int) raises:
 
 
 def _decodificar(mut b: _Bits, h: _Huffman) raises -> Int:
+    """Anda pelos comprimentos de codigo ate o codigo caber num deles.
+
+    Os quinze bits vem de uma vez, e o laco mexe so em inteiro local — era uma
+    chamada de fluxo por bit, e um simbolo gasta nove no caso comum.
+    """
+    var espiados = b.espiar(_MAXBITS)
     var code = 0
     var first = 0
     var index = 0
+    var pc = h.count.unsafe_ptr()
     for bits in range(1, _MAXBITS + 1):
-        code |= b.bits(1)
-        var count = h.count[bits]
+        code |= (espiados >> (bits - 1)) & 1
+        var count = pc.unsafe_load(bits)
         if code - count < first:
+            b.consumir(bits)
             return h.symbol[index + (code - first)]
         index += count
         first += count
@@ -243,12 +283,20 @@ def _dist_fixos() -> List[Int]:
 
 
 def _copiar(mut out: List[UInt8], distancia: Int, comprimento: Int) raises:
+    """Copia de tras para a frente, byte a byte e **na ordem**.
+
+    Distancia menor que o comprimento e o caso normal do LZ77 — e assim que uma
+    sequencia repetida se estende — entao a copia nao pode virar `memcpy`: cada
+    byte escrito pode ser fonte de um byte seguinte.
+    """
     var n = len(out)
     if distancia <= 0 or distancia > n:
         raise Error("deflate: distancia de copia invalida")
+    out.resize(unsafe_uninit_length=n + comprimento)
+    var p = out.unsafe_ptr()
     var origem = n - distancia
     for i in range(comprimento):
-        out.append(out[origem + i])
+        p.unsafe_store(n + i, p.unsafe_load(origem + i))
 
 
 def _bloco_codigos(
@@ -391,3 +439,89 @@ def inflar(var dados: List[UInt8]) raises -> List[UInt8]:
         if ultimo != 0:
             break
     return out^
+
+
+def _crc32_tabela() -> List[UInt32]:
+    var t = List[UInt32]()
+    t.resize(256, UInt32(0))
+    for i in range(256):
+        var c = UInt32(i)
+        for _ in range(8):
+            if c & UInt32(1) != 0:
+                c = UInt32(0xEDB88320) ^ (c >> 1)
+            else:
+                c = c >> 1
+        t[i] = c
+    return t^
+
+
+def crc32(dados: List[UInt8]) -> UInt32:
+    var t = _crc32_tabela()
+    var c = UInt32(0xFFFFFFFF)
+    var p = dados.unsafe_ptr()
+    var pt = t.unsafe_ptr()
+    for i in range(len(dados)):
+        var idx = Int((c ^ UInt32(p.unsafe_load(i))) & UInt32(0xFF))
+        c = pt.unsafe_load(idx) ^ (c >> 8)
+    return c ^ UInt32(0xFFFFFFFF)
+
+
+def desgzipar(var dados: List[UInt8]) raises -> List[UInt8]:
+    """Desembrulha o gzip (RFC 1952) e infla o que esta dentro.
+
+    E o que o Parquet chama de codec GZIP: o pedaco comprimido de uma pagina e um
+    membro gzip completo, com magica, cabecalho e rodape — nao um bloco DEFLATE
+    solto. Ler so o miolo daria "codigo Huffman invalido" logo no primeiro byte.
+
+    O rodape traz CRC-32 e tamanho, e os dois sao **conferidos**: um decoder que
+    nao confere devolve dado corrompido com a mesma cara de dado bom, e num
+    formato colunar isso vira numero errado numa coluna so.
+    """
+    var n = len(dados)
+    if n < 18:
+        raise Error("gzip: membro curto demais")
+    if dados[0] != UInt8(0x1F) or dados[1] != UInt8(0x8B):
+        raise Error("gzip: magica ausente")
+    if dados[2] != UInt8(8):
+        raise Error("gzip: metodo " + String(Int(dados[2])) + " nao e deflate")
+    var flags = Int(dados[3])
+    var pos = 10  # magica(2) metodo(1) flags(1) mtime(4) xfl(1) os(1)
+
+    if flags & 0x04 != 0:  # FEXTRA
+        if pos + 2 > n:
+            raise Error("gzip: campo extra truncado")
+        var extra = Int(dados[pos]) | (Int(dados[pos + 1]) << 8)
+        pos += 2 + extra
+    if flags & 0x08 != 0:  # FNAME
+        while pos < n and dados[pos] != UInt8(0):
+            pos += 1
+        pos += 1
+    if flags & 0x10 != 0:  # FCOMMENT
+        while pos < n and dados[pos] != UInt8(0):
+            pos += 1
+        pos += 1
+    if flags & 0x02 != 0:  # FHCRC
+        pos += 2
+    if pos + 8 > n:
+        raise Error("gzip: cabecalho ultrapassa o membro")
+
+    var miolo = List[UInt8](capacity=n - pos - 8)
+    for i in range(pos, n - 8):
+        miolo.append(dados[i])
+    var saida = inflar(miolo^)
+
+    var crc_bruto = 0
+    for i in range(4):
+        crc_bruto |= Int(dados[n - 8 + i]) << (8 * i)
+    var crc_dito = UInt32(crc_bruto)
+    var tam_dito = 0
+    for i in range(4):
+        tam_dito |= Int(dados[n - 4 + i]) << (8 * i)
+    if len(saida) != tam_dito:
+        raise Error(
+            "gzip: rodape diz " + String(tam_dito) + " bytes, inflou "
+            + String(len(saida))
+        )
+    if crc32(saida) != crc_dito:
+        raise Error("gzip: CRC-32 nao confere")
+    return saida^

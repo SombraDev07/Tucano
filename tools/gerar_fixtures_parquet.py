@@ -34,6 +34,30 @@ def _escrever(nome, tabela, **kwargs):
     )
 
 
+def temporal_grande():
+    """Carimbos dos dois lados da epoch, e um texto para exercitar o dicionario.
+
+    Antes de 1970 importa: o INT96 conta dia juliano e nanossegundos dentro do
+    dia, e a conta de quem so testou com data futura passa despercebida.
+    """
+    n = 400
+    return pa.table(
+        {
+            "quando": pa.array(
+                [
+                    datetime(2024, 1, 1) + timedelta(seconds=i * 37)
+                    if i % 2 == 0
+                    else datetime(1960, 6, 15) + timedelta(seconds=i * 37)
+                    for i in range(n)
+                ],
+                type=pa.timestamp("us"),
+            ),
+            "grupo": pa.array([f"g{i % 9}" for i in range(n)]),
+            "valor": pa.array([i * 0.25 for i in range(n)], type=pa.float64()),
+        }
+    )
+
+
 def main():
     DESTINO.mkdir(parents=True, exist_ok=True)
     print("gerando fixtures Parquet em", DESTINO)
@@ -143,6 +167,17 @@ def main():
         compression="none",
         use_dictionary=False,
         store_decimal_as_integer=True,
+    )
+
+    # 4d. gzip e INT96: o que outras implementacoes escrevem e o Tucano
+    # precisa abrir. O Polars grava zstd por padrao e o Spark grava gzip; o
+    # INT96 e o carimbo de tempo que Hive e Impala antigos deixaram por ai.
+    _escrever("gzip.parquet", temporal_grande(), compression="gzip")
+    _escrever(
+        "int96.parquet",
+        temporal_grande(),
+        compression="none",
+        use_deprecated_int96_timestamps=True,
     )
 
     # 5. snappy, a compressao padrao na pratica

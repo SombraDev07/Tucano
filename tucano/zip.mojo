@@ -7,7 +7,7 @@ Metodos 0 (store) e 8 (DEFLATE cru). ZIP64, criptografia e disco multiplo
 sao recusados com explicacao.
 """
 
-from .deflate import inflar
+from .deflate import crc32, inflar
 
 
 def _u16(b: List[UInt8], i: Int) raises -> Int:
@@ -156,31 +156,6 @@ struct Zip(Movable):
 # compressor DEFLATE aqui — comprimir XML de planilha economizaria bytes que o
 # Excel abre igual, e um compressor e um modulo inteiro para manter. Quem quiser
 # o arquivo menor comprime o `.xlsx` por fora; ele continua um ZIP valido.
-
-def _crc32_tabela() -> List[UInt32]:
-    var t = List[UInt32]()
-    t.resize(256, UInt32(0))
-    for i in range(256):
-        var c = UInt32(i)
-        for _ in range(8):
-            if c & UInt32(1) != 0:
-                c = UInt32(0xEDB88320) ^ (c >> 1)
-            else:
-                c = c >> 1
-        t[i] = c
-    return t^
-
-
-def crc32(dados: List[UInt8]) -> UInt32:
-    var t = _crc32_tabela()
-    var c = UInt32(0xFFFFFFFF)
-    var p = dados.unsafe_ptr()
-    var pt = t.unsafe_ptr()
-    for i in range(len(dados)):
-        var idx = Int((c ^ UInt32(p.unsafe_load(i))) & UInt32(0xFF))
-        c = pt.unsafe_load(idx) ^ (c >> 8)
-    return c ^ UInt32(0xFFFFFFFF)
-
 
 def _le16(mut out: List[UInt8], v: Int):
     out.append(UInt8(v & 0xFF))
