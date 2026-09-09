@@ -2310,10 +2310,68 @@ def _valores_plain(col: Coluna) raises -> List[UInt8]:
 
 
 def _fatiar(col: Coluna, ini: Int, fim: Int) raises -> Coluna:
-    var indices = List[Int](capacity=fim - ini)
+    """Recorta um trecho **contiguo** da coluna.
+
+    A primeira versao montava uma lista de indices e chamava `coletar_linhas`,
+    que e um gather — o caminho de quando as linhas vem espalhadas, como depois
+    de ordenar. Para uma faixa contigua sao dois memcpy.
+    """
+    var n = fim - ini
+    if n < 0:
+        n = 0
+    var aus = List[Bool](capacity=n)
     for i in range(ini, fim):
-        indices.append(i)
-    return coletar_linhas(col, indices)
+        aus.append(col.eh_ausente(i))
+
+    if col.tipo == DType.TEXTO:
+        if col.eh_dicionarizada():
+            var cods = List[Int32](capacity=n)
+            cods.resize(unsafe_uninit_length=n)
+            if n > 0:
+                _ = external_call["memcpy", Int](
+                    cods.unsafe_ptr().unsafe_bitcast[UInt8](),
+                    col.codigos.unsafe_ptr().unsafe_offset(ini).unsafe_bitcast[UInt8](),
+                    n * 4,
+                )
+            return Coluna.de_dicionario(col.nome, col.textos.copy(), cods^, aus^)
+        var vals = List[String](capacity=n)
+        for i in range(ini, fim):
+            if col.eh_ausente(i):
+                vals.append("")
+            else:
+                vals.append(col.texto_bruto(i))
+        return Coluna.de_textos(col.nome, vals^, aus^)
+
+    if col.tipo == DType.LOGICO:
+        var vals = List[Bool](capacity=n)
+        for i in range(ini, fim):
+            vals.append(Int(col.logics[i]) != 0)
+        return Coluna.de_logicos(col.nome, vals^, aus^)
+
+    if col.tipo == DType.REAL:
+        var vals = List[Float64](capacity=n)
+        vals.resize(unsafe_uninit_length=n)
+        if n > 0:
+            _ = external_call["memcpy", Int](
+                vals.unsafe_ptr().unsafe_bitcast[UInt8](),
+                col.reals.unsafe_ptr().unsafe_offset(ini).unsafe_bitcast[UInt8](),
+                n * 8,
+            )
+        return Coluna.de_reais(col.nome, vals^, aus^)
+
+    var vals = List[Int64](capacity=n)
+    vals.resize(unsafe_uninit_length=n)
+    if n > 0:
+        _ = external_call["memcpy", Int](
+            vals.unsafe_ptr().unsafe_bitcast[UInt8](),
+            col.ints.unsafe_ptr().unsafe_offset(ini).unsafe_bitcast[UInt8](),
+            n * 8,
+        )
+    if col.tipo == DType.DATA:
+        return Coluna.de_datas(col.nome, vals^, aus^)
+    if col.tipo == DType.DATAHORA:
+        return Coluna.de_datahoras(col.nome, vals^, aus^)
+    return Coluna.de_inteiros(col.nome, vals^, aus^)
 
 
 def _acrescentar(mut dest: List[UInt8], src: List[UInt8]):
@@ -2427,26 +2485,32 @@ def _indices_presentes(col: Coluna) raises -> List[Int32]:
     return out^
 
 
-def _vale_delta(col: Coluna) raises -> Bool:
+def _delta_se_valer(col: Coluna) raises -> List[UInt8]:
     """Decide entre DELTA_BINARY_PACKED e PLAIN medindo os dois.
 
     Nao ha heuristica melhor que codificar e comparar: o delta ganha muito em
     coluna que cresce, empata em ruido e perde em coluna aleatoria de 64 bits.
-    Codificar duas vezes custa escrita, e a escrita e o lado que se paga uma vez
-    para uma leitura que se paga sempre.
+
+    Devolve os **bytes**, nao um sim ou nao: a primeira versao respondia `Bool` e
+    o chamador codificava de novo para escrever, o que dobrava o trabalho da
+    coluna inteira.
     """
+    var vazio = List[UInt8]()
     if col.tipo == DType.REAL or col.tipo == DType.TEXTO:
-        return False
+        return vazio^
     if col.tipo == DType.LOGICO:
-        return False
+        return vazio^
     var presentes = _inteiros_presentes(col)
     if len(presentes) < 8:
-        return False
+        return vazio^
     # o codec recusa faixas que nao cabem; recusa dele e resposta aqui
     try:
-        return len(codificar_delta_i64(presentes)) < len(presentes) * 8
+        var bytes = codificar_delta_i64(presentes)
+        if len(bytes) < len(presentes) * 8:
+            return bytes^
+        return vazio^
     except:
-        return False
+        return vazio^
 
 
 def _inteiros_presentes(col: Coluna) raises -> List[Int64]:
@@ -2458,7 +2522,7 @@ def _inteiros_presentes(col: Coluna) raises -> List[Int64]:
 
 
 def _pagina_de_dados(
-    col: Coluna, dicionarizada: Bool, delta: Bool = False,
+    col: Coluna, dicionarizada: Bool, var delta: List[UInt8] = List[UInt8](),
     codigos_de_fora: List[Int32] = List[Int32](), cardinalidade_de_fora: Int = 0,
 ) raises -> List[UInt8]:
     """Pagina de dados V1: [tamanho dos niveis][niveis RLE][valores]."""
@@ -2491,8 +2555,9 @@ def _pagina_de_dados(
             largura = largura_de_bits(card - 1)
         pagina.append(UInt8(largura))
         _acrescentar(pagina, codificar_rle_i32(idxs, largura))
-    elif delta:
-        _acrescentar(pagina, codificar_delta_i64(_inteiros_presentes(col)))
+    elif len(delta) > 0:
+        # ja codificado por quem decidiu usar delta
+        _acrescentar(pagina, delta^)
     else:
         _acrescentar(pagina, _valores_plain(col))
     return pagina^
@@ -2712,16 +2777,17 @@ def para_parquet_lote(
                 _acrescentar(arquivo, cab_dic)
                 _acrescentar(arquivo, corpo_dic_c)
                 uncomp += len(cab_dic) + n_dic
-            var usa_delta = (
-                not usa_dic and not usa_dic_num and _vale_delta(fatia)
-            )
+            var delta_bytes = List[UInt8]()
+            if not usa_dic and not usa_dic_num:
+                delta_bytes = _delta_se_valer(fatia)
+            var usa_delta = len(delta_bytes) > 0
             var encoding = PCodificacao.PLAIN
             if usa_dic or usa_dic_num:
                 encoding = PCodificacao.RLE_DICTIONARY
             elif usa_delta:
                 encoding = PCodificacao.DELTA_BINARY_PACKED
             var pagina = _pagina_de_dados(
-                fatia, usa_dic or usa_dic_num, usa_delta,
+                fatia, usa_dic or usa_dic_num, delta_bytes^,
                 dic_num.codigos, len(dic_num.distintos),
             )
             var n_pag = len(pagina)

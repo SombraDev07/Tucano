@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M26 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M27 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -250,6 +250,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M24 | Escritor com DELTA_BINARY_PACKED | crítica | ✅ feito | arquivo 43 → 25 MiB; coluna inteira 28 → 7 ms |
 | M25 | Dicionário em coluna numérica | crítica | ✅ feito | arquivo 25 → 12 MiB; leitura passa o pyarrow |
 | M26 | Remover a divisão em faixas | crítica | ✅ feito | 285 linhas a menos, e mais rápido |
+| M27 | A escrita, medida | crítica | ✅ feito | perfil por fase; as codificações pagam a si mesmas |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -2373,6 +2374,63 @@ tudo que usa, e não há um mutex sequer.
 - [x] a divisão em faixas removida, com a medição que a condena registrada
 - [x] nenhuma tarefa escreve em memória de outra — o endereço cru saiu junto
 - [x] a thread por coluna medida contra `TUCANO_THREADS=1`, e mantida com o motivo
+- [x] 243 testes verdes, oito passos de verificação verdes
+
+---
+
+## M27 — A escrita, medida ✅
+
+Depois do M24 e do M25 o escritor passou a tentar duas codificações por coluna.
+Escrever 5M × 5 leva 1,29 s, contra 470 ms do pyarrow — mas o arquivo sai com
+12 MiB contra 40. Antes de decidir se isso é dívida, medir onde o tempo está.
+
+### Três palpites errados, e depois o perfil
+
+Tentei, nesta ordem: tirar a codificação delta duplicada, recortar a fatia em
+bloco em vez de gather, e trocar o `eh_ausente` por linha por uma leitura da
+máscara. As duas primeiras ajudaram pouco; a terceira **piorou** — `para_bytes()`
+aloca por chamada, e chamá-la em cinco lugares custou mais que os testes que ela
+economizava. Saiu.
+
+Só então instrumentei, em vez de continuar adivinhando:
+
+| fase | ms |
+|---|---|
+| montar o dicionário numérico | **308** |
+| montar a página (níveis + valores) | 230 |
+| comprimir com Snappy | 163 |
+| recortar a fatia | 117 |
+| min/max para as estatísticas | 126 |
+| codificar em delta | 50 |
+| resto (rodapé, buffer, escrita) | ~250 |
+
+Nada disso é desperdício: é o custo de escolher a codificação medindo, que é o
+que produz o arquivo três vezes menor. **O escritor não tem gordura — tem
+trabalho.**
+
+### E as codificações deixam a escrita mais rápida, não mais lenta
+
+Desligando as duas, o mesmo arquivo leva **2,68 s** e ocupa 43 MiB. PLAIN entrega
+ao Snappy três vezes e meia mais bytes para comprimir, e comprimir é o que custa.
+
+Ou seja: escolher a codificação **paga a si mesma na própria escrita**, antes de
+o primeiro leitor abrir o arquivo.
+
+### O que ficou
+
+Duas melhorias medidas: o delta deixou de ser codificado duas vezes (368 → 315 ms
+na coluna `id`, porque quem decidia jogava fora o resultado) e a fatia contígua
+virou dois `memcpy` em vez de um gather com lista de índices (146 → 117 ms).
+
+O resto fica como está, com o perfil registrado. Somos 2,7× mais lentos que o
+pyarrow para escrever, e o arquivo é 3,3× menor — a escrita se paga uma vez, a
+leitura se paga sempre.
+
+### Critério de saída
+
+- [x] o custo da escrita medido por fase, não estimado
+- [x] o que melhorou entrou; o que piorou saiu
+- [x] a comparação com o pyarrow publicada com os dois lados: tempo e tamanho
 - [x] 243 testes verdes, oito passos de verificação verdes
 
 ---

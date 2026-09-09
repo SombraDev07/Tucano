@@ -3,6 +3,40 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.36.0] — A escrita, medida
+
+Escrever 5M x 5 leva 1,29 s contra 470 ms do pyarrow — e o arquivo sai com 12 MiB
+contra 40. Antes de tratar isso como divida, medir onde o tempo esta.
+
+| fase | ms |
+|---|---|
+| montar o dicionario numerico | **308** |
+| montar a pagina (niveis + valores) | 230 |
+| comprimir com Snappy | 163 |
+| min/max para as estatisticas | 126 |
+| recortar a fatia | 117 |
+| codificar em delta | 50 |
+
+Nada disso e desperdicio: e o custo de escolher a codificacao medindo, que e o
+que produz o arquivo tres vezes menor. **Desligando as duas codificacoes, o mesmo
+arquivo leva 2,68 s e ocupa 43 MiB** — PLAIN entrega ao Snappy tres vezes e meia
+mais bytes para comprimir. Escolher a codificacao paga a si mesma na propria
+escrita.
+
+### Alterado
+
+- **O delta deixou de ser codificado duas vezes.** Quem decidia se valia a pena
+  jogava fora o resultado, e o escritor codificava de novo: 368 -> 315 ms na
+  coluna `id`.
+- **Fatia contigua vira dois `memcpy`**, em vez de montar uma lista de indices e
+  passar pelo gather que existe para linhas espalhadas: 146 -> 117 ms.
+
+### Recusado
+
+Trocar o `eh_ausente` por linha por uma leitura da mascara **piorou**:
+`para_bytes()` aloca por chamada, e chama-la em cinco lugares custou mais que os
+testes que economizava.
+
 ## [0.35.0] — A divisao em faixas saiu
 
 Sem mudanca de API. O [0.28.0] dividiu a coluna em faixas de row group e o
