@@ -15,7 +15,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 FIXTURES = RAIZ / "tests" / "fixtures"
 ESCRITOS = Path("/tmp")
 
-CASOS = ["simples", "com_na", "temporal", "datas", "grupos"]
+CASOS = ["simples", "com_na", "temporal", "datas", "sem_sinal", "int96", "grupos"]
 
 
 def comparar(nome):

@@ -1,6 +1,6 @@
 from tucano import ler_parquet, para_parquet
 def main() raises:
-    for nome in ["simples", "com_na", "temporal", "datas", "grupos"]:
+    for nome in ["simples", "com_na", "temporal", "datas", "sem_sinal", "int96", "grupos"]:
         var t = ler_parquet("tests/fixtures/" + nome + ".parquet")
         var saida = "/tmp/tucano_escrito_" + nome + ".parquet"
         para_parquet(t, saida)
