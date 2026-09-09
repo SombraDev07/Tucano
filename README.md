@@ -3,6 +3,12 @@
 **Biblioteca tabular nativa em Mojo.** Análise de dados com uma API direta, sobre um engine
 columnar vetorizado — do buffer ao kernel, sem Python em lugar nenhum.
 
+**Versão 1.0.0** · Apache-2.0 · 251 testes
+
+```bash
+pixi add tucano -c https://sombradev07.github.io/Tucano
+```
+
 ```mojo
 from tucano import ler_csv, coluna, lit, lit_int, mes
 
@@ -56,6 +62,13 @@ o que for mais conveniente na hora.
   do disco; o que sai vai comprimido. Lê `PLAIN`, `RLE_DICTIONARY` e `DELTA_BINARY_PACKED`,
   sem compressão, Snappy e GZIP, e o carimbo legado `INT96`; **recusa com erro explícito**
   Zstd, Brotli, LZ4, `DECIMAL` e `FIXED_LEN_BYTE_ARRAY` — ver [o contrato](tucano/CONTRATO.md).
+- **Escrita que escolhe a codificação medindo** — cada coluna sai em `DELTA_BINARY_PACKED`,
+  dicionário numérico, `RLE_DICTIONARY` ou `PLAIN`, o que der menor **para ela**. Cada coluna
+  de cada row group é codificada numa thread. 5M × 5 saem em 128 ms e 10,1 MiB, contra 440 ms
+  e 31,9 MiB do pyarrow.
+- **Recusa em vez de mentir** — o que o leitor não sabe interpretar vira erro com o nome da
+  coluna e o motivo, nunca um valor errado calado. Um `DECIMAL(9,2)` não volta como o inteiro
+  sem escala; um `UINT32` não volta negativo; arquivo estranho não mata o processo.
 - **Agrupamento e junção como operadores** — não funções soltas. Chave de texto repetida
   agrupa por indexação direta de array, sem hash: 14,7× mais rápido que chave composta.
   Junção interna hasheia o lado de menor custo (NDV ou número de linhas).
@@ -105,7 +118,7 @@ mojo precompile Tucano/tucano -o "$(dirname "$(which mojo)")/../lib/mojo/tucano.
 Pronto. `from tucano import ...` passa a funcionar em **qualquer diretório**, sem `-I` e sem
 copiar arquivo para dentro do projeto:
 
-```python
+```mojo
 from tucano import ler_csv, coluna, lit
 
 def main() raises:
@@ -613,30 +626,41 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 
 ## Estado do projeto
 
+**1.0.0** — a definição de pronto está cumprida, e a partir daqui vale versionamento
+semântico: o que o [contrato](tucano/CONTRATO.md) chama de estável não muda de assinatura
+numa versão menor.
+
 | Marco | |
 |---|---|
 | Fundação, tipos e esquema | ✅ |
 | Memory engine columnar | ✅ |
 | Expression engine | ✅ |
-| Biblioteca instalável, tipo data | ✅ |
 | Execution engine coluna-a-coluna | ✅ |
 | Kernels SIMD e dictionary encoding | ✅ |
 | I/O tipado: scanner CSV, datahora, leitura em fatias | ✅ |
 | Parquet: leitura, escrita, column pruning, predicate pushdown, Snappy | ✅ |
+| Parquet: escrita em `DELTA_BINARY_PACKED` e dicionário numérico | ✅ |
+| Parquet: leitura de GZIP e do carimbo legado `INT96` | ✅ |
+| Escrita paralela — uma thread por coluna de row group | ✅ |
 | Agregação, junção, ordenação e verbos de análise | ✅ |
 | Otimizador: dobra, fusão, empurrão, poda de colunas | ✅ |
 | Execução em fluxo com memória limitada | ✅ |
 | SQL sobre o mesmo planner | ✅ |
 | Arrow IPC: leitura e escrita, interop verificada | ✅ |
 | Excel `.xlsx`: leitura e escrita, interop verificada | ✅ |
+| Pacote conda instalável | ✅ |
+| Paralelismo nos operadores de execução | ❌ **medido e recusado** — banda de memória |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-251 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
-[tucano/CONTRATO.md](tucano/CONTRATO.md).
+251 testes e oito passos de verificação. Roadmap completo em [ROADMAP.md](ROADMAP.md);
+contrato de API em [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
-Por muitos marcos o roadmap registrou paralelismo como bloqueado pela linguagem. **Estava
-errado** — a leitura passou a usar uma thread por coluna, e o erro de raciocínio está
-preservado no roadmap junto com o conserto. Falta paralelizar os operadores de execução.
+Duas coisas que este projeto registra e que valem mais que a tabela acima. Por muitos marcos
+o roadmap deu o paralelismo como bloqueado pela linguagem: **estava errado**, a leitura passou
+a usar uma thread por coluna, e o erro de raciocínio ficou preservado ao lado do conserto. E
+paralelizar os operadores de execução foi **medido e recusado** — compactar três colunas em
+três threads mediu 20 ms contra 13 de uma thread só; eles são limitados por banda de memória,
+não por CPU.
 
 A interoperabilidade de Parquet e Arrow é verificada **nos dois sentidos**: outra
 implementação lê o que o Tucano escreve, e o Tucano lê arquivos que ela escreveu.
@@ -656,7 +680,10 @@ pixi run bench-m6  # agregação, junção e ordenação
 pixi run bench-m8  # o que o otimizador poupa
 pixi run bench-m9  # execução em memória limitada
 pixi run bench-parquet  # Parquet e column pruning
+pixi run bench-escrita  # escrita de Parquet
 pixi run build     # precompilar o pacote
+pixi run -e fixtures interop   # o pyarrow lê o que o Tucano escreveu
+./tools/verificar_tudo.sh      # os oito passos, de uma vez
 ```
 
 > **Cuidado com `.mojoc` obsoleto.** Se houver um `tucano.mojoc` precompilado no diretório do
