@@ -3,6 +3,30 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [1.2.0] — Filtrar texto por trecho
+
+Segunda varredura de uso, agora nas operacoes de quem limpa dado. A API de
+expressao tinha comparacao, logica, aritmetica e extratores de data — e **nenhuma
+operacao de texto**. Achar as cidades que comecam com "São" exigia listar todas
+com `ou`, ou sair da biblioteca.
+
+### Adicionado
+
+- **`contem`** — `coluna("cidade").contem(lit_texto("São"))`. Numa coluna
+  dicionarizada a busca roda **uma vez por valor distinto**: vinte e quatro
+  buscas para um milhao de linhas, e as linhas viram consulta a uma tabela de
+  codigos. E o mesmo desenho do `==` dicionarizado.
+
+  A busca e sobre bytes, e por isso literal: `contem("São")` acha "São Paulo" e
+  **nao** acha "Sao Paulo". Byte a byte basta para UTF-8 — uma sequencia
+  multibyte so aparece inteira, e byte de continuacao nao se confunde com byte
+  inicial. Ausente continua Desconhecido, na afirmacao e na negacao.
+
+- **`em`** — `coluna("cidade").em([lit_texto("SP"), lit_texto("RJ")])`, o `IN` do
+  SQL. E acucar sobre `==` e `ou`, sem no novo na arvore: o otimizador, o
+  pushdown para o Parquet e o caminho dicionarizado valem sem uma linha a mais.
+  Lista vazia e Falso para toda linha, como o `IN ()` responderia.
+
 ## [1.1.0] — A primeira hora
 
 Cinco tropecos achados **usando** a biblioteca, nao lendo o codigo dela: um

@@ -3,7 +3,7 @@
 **Biblioteca tabular nativa em Mojo.** Análise de dados com uma API direta, sobre um engine
 columnar vetorizado — do buffer ao kernel, sem Python em lugar nenhum.
 
-**Versão 1.1.0** · Apache-2.0 · 253 testes
+**Versão 1.2.0** · Apache-2.0 · 255 testes
 
 ```bash
 pixi add tucano -c https://sombradev07.github.io/Tucano
@@ -51,6 +51,9 @@ o que for mais conveniente na hora.
   por categoria vira comparação de inteiros vetorizada.
 - **Avisos de caminho lento** — `avisos()` diz quando uma operação caiu fora do kernel
   vetorizado. Você não descobre por acaso, seis meses depois.
+- **Filtro de texto por trecho** — `coluna("cidade").contem(lit_texto("São"))`, e numa coluna
+  dicionarizada a busca roda uma vez por **valor distinto**, não por linha. `em([...])` é o
+  `IN` do SQL, açúcar sobre `==` e `ou`, então herda o dicionário e o pushdown.
 - **Erros que ensinam** — nome de coluna errado devolve a sugestão mais próxima, não um
   código de erro seco.
 - **Sem índice implícito** — nenhum alinhamento automático pelas costas. Tabelas se combinam
@@ -652,7 +655,7 @@ numa versão menor.
 | Paralelismo nos operadores de execução | ❌ **medido e recusado** — banda de memória |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-253 testes e oito passos de verificação. Roadmap completo em [ROADMAP.md](ROADMAP.md);
+255 testes e oito passos de verificação. Roadmap completo em [ROADMAP.md](ROADMAP.md);
 contrato de API em [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Duas coisas que este projeto registra e que valem mais que a tabela acima. Por muitos marcos

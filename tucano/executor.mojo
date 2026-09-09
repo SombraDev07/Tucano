@@ -382,6 +382,9 @@ def _tri_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> List[UInt8]:
             tri_ou(a, b, out, linhas)  # OU de Kleene = max
         return out^
 
+    if k == Kind.CONTEM:
+        return _contem_texto(expr, n, cols)
+
     if (
         k == Kind.GT
         or k == Kind.GE
@@ -493,6 +496,87 @@ def _cmp_escalar_real(
     else:
         var na = col.validity_bits.para_bytes()
         cmp_f64_escalar(_codigo_op(op), col.reals, escalar, na, out, linhas)
+    return out^
+
+
+def _acha_trecho(agulha: String, palheiro: String) -> Bool:
+    """Busca ingenua de subcadeia, sobre bytes.
+
+    Byte a byte serve para UTF-8 sem qualquer cuidado extra: uma sequencia
+    multibyte so aparece inteira, e nenhum byte de continuacao pode ser
+    confundido com um byte inicial. `contem("São")` acha "São Paulo" e nao acha
+    "Sao Paulo", que e o que se espera de comparacao literal.
+    """
+    var a = agulha.as_bytes()
+    var h = palheiro.as_bytes()
+    var na = len(a)
+    var nh = len(h)
+    if na == 0:
+        return True
+    if na > nh:
+        return False
+    for i in range(nh - na + 1):
+        var casou = True
+        for j in range(na):
+            if h[i + j] != a[j]:
+                casou = False
+                break
+        if casou:
+            return True
+    return False
+
+
+def _contem_texto(
+    expr: Expr, n: ExprNode, cols: List[Coluna]
+) raises -> List[UInt8]:
+    """`coluna.contem(lit_texto(trecho))`, com o dicionario como atalho.
+
+    Numa coluna dicionarizada a busca roda uma vez por **valor distinto** — vinte
+    e quatro buscas para um milhao de linhas — e as linhas viram consulta a uma
+    tabela de codigos. E o mesmo desenho do `==` dicionarizado, e o motivo de
+    ele existir.
+    """
+    var esq = expr.nodes[n.left].copy()
+    var dir = expr.nodes[n.right].copy()
+    if esq.kind != Kind.COLUNA or dir.kind != Kind.LIT_STR:
+        raise Error(
+            "contem espera coluna de texto e literal de texto: "
+            + expr.descrever()
+        )
+    var pos = posicao_no_lote(cols, esq.nome)
+    ref col = cols[pos]
+    if col.tipo != DType.TEXTO:
+        raise Error(
+            "contem so vale para coluna de texto: '" + esq.nome + "' e "
+            + col.dtype().nome()
+        )
+
+    var trecho = dir.texto
+    var linhas = col.tamanho()
+    var na = col.validity_bits.para_bytes()
+    var out = _zeros_u8(linhas)
+
+    if col.eh_dicionarizada():
+        var distintos = col.cardinalidade()
+        var casa = List[UInt8](capacity=distintos)
+        for c in range(distintos):
+            casa.append(UInt8(1) if _acha_trecho(trecho, col.textos.get(c)) else UInt8(0))
+        var pc = col.codigos.unsafe_ptr()
+        for i in range(linhas):
+            if na[i] != 0:
+                out[i] = UInt8(Tri.DESCONHECIDO)
+            else:
+                var c = Int(pc.unsafe_load(i))
+                out[i] = UInt8(Tri.VERDADEIRO) if casa[c] != 0 else UInt8(Tri.FALSO)
+        return out^
+
+    for i in range(linhas):
+        if na[i] != 0:
+            out[i] = UInt8(Tri.DESCONHECIDO)
+        elif _acha_trecho(trecho, col.texto_bruto(i)):
+            out[i] = UInt8(Tri.VERDADEIRO)
+        else:
+            out[i] = UInt8(Tri.FALSO)
     return out^
 
 

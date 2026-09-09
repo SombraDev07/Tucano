@@ -25,6 +25,7 @@ struct Kind:
     comptime LE = 13
     comptime EQ = 14
     comptime NE = 15
+    comptime CONTEM = 16
     comptime AND = 20
     comptime OR = 21
     comptime NOT = 22
@@ -101,6 +102,38 @@ struct Expr(Copyable, Movable):
 
     def ne(var self, var other: Expr) -> Expr:
         return _binario(Kind.NE, self^, other^)
+
+    def em(var self, valores: List[Expr]) raises -> Expr:
+        """Verdadeiro quando o valor e um dos da lista.
+
+        Acucar sobre `eq` e `ou`: `cidade.em([lit_texto("SP"), lit_texto("RJ")])`
+        vira `cidade == "SP" ou cidade == "RJ"`. Nao ha no novo na arvore, entao
+        o otimizador, o pushdown para o Parquet e o caminho dicionarizado valem
+        sem nenhuma linha a mais — cada `==` de coluna dicionarizada continua
+        resolvendo o texto para um codigo uma vez so.
+
+        Lista vazia e Falso para toda linha: "esta em nada" nao e verdade para
+        ninguem. E o mesmo que o `IN ()` do SQL responderia.
+        """
+        if len(valores) == 0:
+            return lit_bool(False)
+        var out = self.copy().eq(valores[0].copy())
+        for i in range(1, len(valores)):
+            out = out^.ou(self.copy().eq(valores[i].copy()))
+        return out^
+
+    def contem(var self, var other: Expr) -> Expr:
+        """Verdadeiro quando o texto da coluna contem o trecho.
+
+        Filtrar texto por pedaco e das coisas que mais se faz com dado sujo, e
+        era o que faltava para nao precisar sair da biblioteca: sem isto, achar
+        as cidades que comecam com "São" exigia listar todas com `ou`.
+
+        Ausente continua Desconhecido, como em qualquer comparacao. Trecho vazio
+        casa com toda linha presente — e o que "contem nada" quer dizer, e e o
+        que faz `contem` se comportar como as outras comparacoes na borda.
+        """
+        return _binario(Kind.CONTEM, self^, other^)
 
     def e(var self, var other: Expr) -> Expr:
         return _binario(Kind.AND, self^, other^)
@@ -290,6 +323,8 @@ def _descrever_no(expr: Expr, i: Int) raises -> String:
         op = "=="
     elif k == Kind.NE:
         op = "!="
+    elif k == Kind.CONTEM:
+        op = "contem"
     elif k == Kind.AND:
         op = "&"
     elif k == Kind.OR:

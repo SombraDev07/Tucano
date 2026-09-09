@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 1.1.0 — M0 → M33. A partir daqui vale versionamento semântico: o que esta página
+Versão 1.2.0 — M0 → M33. A partir daqui vale versionamento semântico: o que esta página
 chama de estável não muda de assinatura numa versão menor.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.

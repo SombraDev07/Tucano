@@ -13,6 +13,7 @@ from tucano import (
     para_csv,
     lazy,
     coluna,
+    Expr,
     lit,
     lit_int,
     lit_texto,
@@ -475,6 +476,96 @@ def test_leitor_levanta_em_vez_de_abortar() raises:
         var m = String(e)
         assert_true("Null" in m or "dicionarizada" in m)
     assert_true(pegou)
+
+
+def test_contem_texto() raises:
+    """Filtrar texto por trecho, nos dois caminhos e com ausente."""
+    var vals = List[String]()
+    vals.append("São Paulo")
+    vals.append("Sao Paulo")
+    vals.append("Rio de Janeiro")
+    vals.append("São Luís")
+    var aus = List[Bool]()
+    aus.append(False)
+    aus.append(False)
+    aus.append(True)
+    aus.append(False)
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("cidade", vals^, aus^))
+    cols.append(Coluna.de_inteiros("v", [Int64(1), Int64(2), Int64(3), Int64(4)]))
+    var t = Tabela(cols^)
+
+    # acento e literal: "São" nao casa com "Sao"
+    var r = t.onde(coluna("cidade").contem(lit_texto("São"))).coletar()
+    assert_equal(r.linhas(), 2)
+    assert_equal(r.pegar("cidade").texto_em(0), "São Paulo")
+    assert_equal(r.pegar("cidade").texto_em(1), "São Luís")
+
+    # ausente e Desconhecido: nao entra no predicado nem na negacao
+    assert_equal(t.onde(coluna("cidade").contem(lit_texto("o"))).coletar().linhas(), 3)
+    assert_equal(
+        t.onde(coluna("cidade").contem(lit_texto("o")).nao()).coletar().linhas(), 0
+    )
+
+    # trecho vazio casa com toda linha presente; trecho ausente do dado, com nenhuma
+    assert_equal(t.onde(coluna("cidade").contem(lit_texto(""))).coletar().linhas(), 3)
+    assert_equal(t.onde(coluna("cidade").contem(lit_texto("zzz"))).coletar().linhas(), 0)
+
+    # coluna dicionarizada e nao dicionarizada dao o mesmo resultado
+    var muitos = List[String](capacity=300)
+    for i in range(300):
+        muitos.append("registro-" + String(i))
+    var c2 = List[Coluna]()
+    c2.append(Coluna.de_textos("nota", muitos^))
+    var t2 = Tabela(c2^)
+    # "registro-7" so casa onde o numero COMECA com 7: 7 e 70..79, onze ao todo.
+    # "registro-170" tem "registro-1" no lugar, e nao casa — a busca e literal.
+    assert_equal(
+        t2.onde(coluna("nota").contem(lit_texto("registro-7"))).coletar().linhas(), 11
+    )
+
+    # tipo errado avisa dizendo o tipo que a coluna tem
+    var pegou = False
+    try:
+        _ = t.onde(coluna("v").contem(lit_texto("1"))).coletar()
+    except e:
+        pegou = True
+        assert_true("texto" in String(e))
+        assert_true("inteiro" in String(e))
+    assert_true(pegou)
+
+    # e o plano mostra a operacao
+    assert_true(
+        "contem" in t.onde(coluna("cidade").contem(lit_texto("S"))).descrever()
+    )
+
+
+def test_em_lista() raises:
+    """`em` e acucar sobre `eq` e `ou` — e e por isso que herda tudo."""
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("cidade", ["SP", "RJ", "BH", "SP"]))
+    cols.append(Coluna.de_inteiros("v", [Int64(1), Int64(2), Int64(3), Int64(4)]))
+    var t = Tabela(cols^)
+
+    var alvos = List[Expr]()
+    alvos.append(lit_texto("SP"))
+    alvos.append(lit_texto("BH"))
+    assert_equal(t.onde(coluna("cidade").em(alvos)).coletar().linhas(), 3)
+
+    # a arvore e de `==` e `ou`: nada de no novo, entao o plano fala a mesma lingua
+    var d = t.onde(coluna("cidade").em(alvos)).descrever()
+    assert_true("==" in d)
+    assert_true("|" in d)
+
+    # lista vazia: ninguem esta em nada
+    var nenhum = List[Expr]()
+    assert_equal(t.onde(coluna("cidade").em(nenhum)).coletar().linhas(), 0)
+
+    # vale para numero tambem
+    var ns = List[Expr]()
+    ns.append(lit_int(2))
+    ns.append(lit_int(4))
+    assert_equal(t.onde(coluna("v").em(ns)).coletar().linhas(), 2)
 
 
 def test_ergonomia_da_primeira_hora() raises:
