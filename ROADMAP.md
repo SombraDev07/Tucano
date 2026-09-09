@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13 e M15 → M24 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13 e M15 → M25 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -248,6 +248,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M22 | Medir a distância para o Polars | crítica | ✅ feito | Snappy é 23 dos 28 ms; duas tentativas recusadas |
 | M23 | As três técnicas dos maduros | crítica | ✅ feito | as três mais lentas; o alvo é o escritor |
 | M24 | Escritor com DELTA_BINARY_PACKED | crítica | ✅ feito | arquivo 43 → 25 MiB; coluna inteira 28 → 7 ms |
+| M25 | Dicionário em coluna numérica | crítica | ✅ feito | arquivo 25 → 12 MiB; leitura passa o pyarrow |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -2232,6 +2233,48 @@ perto de 64 estouraria o acumulador em silêncio.
 - [x] ida e volta coberta nos extremos: vazio, um valor, constante, bloco
       incompleto, e valores no teto do Int64
 - [x] 240 testes verdes
+
+---
+
+## M25 — Dicionário também para coluna numérica ✅
+
+Depois do M24 a leitura das cinco colunas era, quase inteira, uma coluna só:
+`valor` ocupava 22 dos 25 MiB e 27 dos 38 ms. São 9973 valores distintos em cinco
+milhões de linhas — caso de dicionário, que o escritor só fazia para texto.
+
+O leitor **sempre** soube ler dicionário de qualquer tipo. Faltava o escritor
+emitir.
+
+### O critério é o tamanho, calculado
+
+Coluna toda distinta — uma chave, um carimbo de tempo — não dicionariza: o
+dicionário seria a coluna inteira mais os códigos. A decisão compara os dois
+tamanhos com a conta exata (distintos × 8 + códigos empacotados contra valores em
+PLAIN), e é a mesma disciplina do delta no M24: medir, não supor.
+
+### Resultado
+
+| 5M linhas × 5 colunas | M23 | M24 (delta) | agora |
+|---|---|---|---|
+| arquivo | 43 MiB | 25 MiB | **12 MiB** |
+| ler as 5 colunas | 49 ms | 48 ms | **39 ms** |
+
+| ler 5 colunas, uma thread | Tucano | pandas | pyarrow | Polars |
+|---|---|---|---|---|
+| | **39 ms** | 76 ms | 43 ms | 31 ms |
+
+O arquivo encolheu **72%** desde o M23, e a leitura passou o pyarrow pela
+primeira vez. O que separa do Polars caiu de 18 ms para 8.
+
+`id` continua em delta e `valor`/`peso` passam a dicionário — cada coluna recebe
+o que a mede melhor. O pyarrow lê tudo, verificado valor a valor.
+
+### Critério de saída
+
+- [x] escritor emite dicionário para coluna numérica quando ele encolhe
+- [x] a escolha vem da conta dos dois tamanhos, não de um limiar chutado
+- [x] pyarrow lê as colunas novas — `RLE_DICTIONARY` em real e inteiro
+- [x] 240 testes verdes, interoperabilidade nos dois formatos
 
 ---
 

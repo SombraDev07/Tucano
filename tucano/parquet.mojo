@@ -2613,6 +2613,84 @@ def _acrescentar(mut dest: List[UInt8], src: List[UInt8]):
     )
 
 
+struct _DicNumerico(Movable):
+    """Uma coluna numerica reduzida a valores distintos + um codigo por linha."""
+
+    var distintos: List[Int64]
+    """Os bits dos valores distintos, na ordem de aparicao. Real vai como bits:
+    a pagina de dicionario e PLAIN dos oito bytes, e o padrao de bits E o valor."""
+
+    var codigos: List[Int32]
+    var vale: Bool
+
+    def __init__(out self, var distintos: List[Int64], var codigos: List[Int32], vale: Bool):
+        self.distintos = distintos^
+        self.codigos = codigos^
+        self.vale = vale
+
+
+def _dicionario_numerico(col: Coluna) raises -> _DicNumerico:
+    """Dicionariza uma coluna numerica, se isso encolher a pagina.
+
+    O escritor ja fazia isso com texto desde o M10.6, e o leitor sempre soube
+    ler dicionario de qualquer tipo — faltava o escritor emitir. Uma coluna de
+    cinco milhoes de linhas com dez mil valores distintos ocupa 40 MiB em PLAIN
+    e menos de 9 em codigos, e cada codigo cabe em quatorze bits.
+
+    O criterio e o tamanho, calculado nos dois formatos. Coluna toda distinta —
+    uma chave, um carimbo de tempo — nao dicionariza: o dicionario seria a
+    coluna inteira mais os codigos.
+    """
+    var vazio_i = List[Int64]()
+    var vazio_c = List[Int32]()
+    if col.tipo == DType.TEXTO or col.tipo == DType.LOGICO:
+        return _DicNumerico(vazio_i^, vazio_c^, False)
+
+    var n = col.tamanho()
+    var mapa = Dict[Int, Int]()
+    var distintos = List[Int64]()
+    var codigos = List[Int32]()
+    var presentes = 0
+    for i in range(n):
+        if col.eh_ausente(i):
+            continue
+        presentes += 1
+        var bruto: Int
+        if col.tipo == DType.REAL:
+            bruto = real64_para_bits(col.reals[i])
+        else:
+            bruto = Int(col.ints[i])
+        if bruto in mapa:
+            codigos.append(Int32(mapa[bruto]))
+        else:
+            var novo = len(distintos)
+            mapa[bruto] = novo
+            distintos.append(Int64(bruto))
+            codigos.append(Int32(novo))
+
+    if presentes == 0 or len(distintos) == 0:
+        return _DicNumerico(vazio_i^, vazio_c^, False)
+
+    var largura = 0
+    if len(distintos) > 1:
+        largura = largura_de_bits(len(distintos) - 1)
+    var com_dicionario = len(distintos) * 8 + (presentes * largura + 7) // 8
+    var em_plain = presentes * 8
+    if com_dicionario >= em_plain:
+        return _DicNumerico(vazio_i^, vazio_c^, False)
+    return _DicNumerico(distintos^, codigos^, True)
+
+
+def _valores_plain_dicionario_numerico(dic: _DicNumerico) -> List[UInt8]:
+    """PLAIN dos valores distintos: oito bytes little-endian cada."""
+    var out = List[UInt8](capacity=len(dic.distintos) * 8)
+    for v in dic.distintos:
+        var x = Int(v)
+        for k in range(8):
+            out.append(UInt8((x >> (8 * k)) & 0xFF))
+    return out^
+
+
 def _valores_plain_dicionario(col: Coluna) raises -> List[UInt8]:
     """PLAIN dos valores distintos — o corpo da pagina de dicionario."""
     var out = List[UInt8]()
@@ -2665,7 +2743,8 @@ def _inteiros_presentes(col: Coluna) raises -> List[Int64]:
 
 
 def _pagina_de_dados(
-    col: Coluna, dicionarizada: Bool, delta: Bool = False
+    col: Coluna, dicionarizada: Bool, delta: Bool = False,
+    codigos_de_fora: List[Int32] = List[Int32](), cardinalidade_de_fora: Int = 0,
 ) raises -> List[UInt8]:
     """Pagina de dados V1: [tamanho dos niveis][niveis RLE][valores]."""
     var n = col.tamanho()
@@ -2681,9 +2760,18 @@ def _pagina_de_dados(
     _por_le(pagina, len(niveis_rle), 4)
     _acrescentar(pagina, niveis_rle)
     if dicionarizada:
-        var idxs = _indices_presentes(col)
+        var idxs: List[Int32]
+        var card: Int
+        if cardinalidade_de_fora > 0:
+            # coluna numerica: o dicionario foi montado na hora de escrever, e
+            # nao vive dentro da `Coluna` como no texto — `col.codigos` esta
+            # vazio, e le-lo estouraria o limite
+            idxs = codigos_de_fora.copy()
+            card = cardinalidade_de_fora
+        else:
+            idxs = _indices_presentes(col)
+            card = col.cardinalidade()
         var largura = 0
-        var card = col.cardinalidade()
         if card > 1:
             largura = largura_de_bits(card - 1)
         pagina.append(UInt8(largura))
@@ -2884,27 +2972,43 @@ def para_parquet_lote(
             var fatia = _fatiar(colunas[c], inicios[g], fins[g])
             stats.append(_stats_de_coluna(fatia))
             var usa_dic = fatia.tipo == DType.TEXTO and fatia.eh_dicionarizada()
+            var dic_num = _DicNumerico(List[Int64](), List[Int32](), False)
+            if not usa_dic:
+                dic_num = _dicionario_numerico(fatia)
+            var usa_dic_num = dic_num.vale
             var inicio_chunk = len(arquivo)
             var uncomp = 0
             var dic_off = -1
-            if usa_dic:
-                var corpo_dic = _valores_plain_dicionario(fatia)
+            if usa_dic or usa_dic_num:
+                var corpo_dic: List[UInt8]
+                var card_dic: Int
+                if usa_dic:
+                    corpo_dic = _valores_plain_dicionario(fatia)
+                    card_dic = fatia.cardinalidade()
+                else:
+                    corpo_dic = _valores_plain_dicionario_numerico(dic_num)
+                    card_dic = len(dic_num.distintos)
                 var n_dic = len(corpo_dic)
                 var corpo_dic_c = _aplicar_codec(corpo_dic^, codec)
                 var cab_dic = _cabecalho_de_dicionario(
-                    fatia.cardinalidade(), n_dic, len(corpo_dic_c)
+                    card_dic, n_dic, len(corpo_dic_c)
                 )
                 dic_off = len(arquivo)
                 _acrescentar(arquivo, cab_dic)
                 _acrescentar(arquivo, corpo_dic_c)
                 uncomp += len(cab_dic) + n_dic
-            var usa_delta = not usa_dic and _vale_delta(fatia)
+            var usa_delta = (
+                not usa_dic and not usa_dic_num and _vale_delta(fatia)
+            )
             var encoding = PCodificacao.PLAIN
-            if usa_dic:
+            if usa_dic or usa_dic_num:
                 encoding = PCodificacao.RLE_DICTIONARY
             elif usa_delta:
                 encoding = PCodificacao.DELTA_BINARY_PACKED
-            var pagina = _pagina_de_dados(fatia, usa_dic, usa_delta)
+            var pagina = _pagina_de_dados(
+                fatia, usa_dic or usa_dic_num, usa_delta,
+                dic_num.codigos, len(dic_num.distintos),
+            )
             var n_pag = len(pagina)
             var pagina_c = _aplicar_codec(pagina^, codec)
             var cabecalho = _cabecalho_de_dados(

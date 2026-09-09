@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 0.32.0 — M0 → M24; leitura multithread; HTTP do painel fora do caminho crítico.
+Versão 0.33.0 — M0 → M25; leitura multithread; HTTP do painel fora do caminho crítico.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
 
@@ -484,10 +484,10 @@ O resultado não depende disso: paralelo e sequencial produzem a mesma tabela, v
 
 ### Parquet
 
-Coluna inteira e escrita em `DELTA_BINARY_PACKED` quando isso encolhe o arquivo, e
-em `PLAIN` quando não. A escolha é medida, não adivinhada: o escritor codifica dos
-dois jeitos e compara. Texto repetido vai em `RLE_DICTIONARY`. Na leitura, as três
-são entendidas.
+Cada coluna recebe a codificação que a mede menor, e a escolha é calculada, não
+adivinhada: `RLE_DICTIONARY` quando há repetição (texto **ou** número),
+`DELTA_BINARY_PACKED` em coluna inteira que cresce, `PLAIN` quando nenhuma das
+duas encolhe. Na leitura, as três são entendidas.
 
 | Entrada | Papel |
 |---|---|

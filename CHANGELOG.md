@@ -3,6 +3,31 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.33.0] — Dicionario tambem para coluna numerica
+
+Depois do [0.32.0] a leitura era, quase inteira, uma coluna so: `valor` ocupava 22
+dos 25 MiB e 27 dos 38 ms — 9973 valores distintos em cinco milhoes de linhas. O
+leitor sempre soube ler dicionario de qualquer tipo; faltava o escritor emitir.
+
+| 5M linhas x 5 colunas | [0.31.0] | [0.32.0] | agora |
+|---|---|---|---|
+| arquivo | 43 MiB | 25 MiB | **12 MiB** |
+| ler as 5 colunas | 49 ms | 48 ms | **39 ms** |
+
+Contra os outros, em uma thread: Tucano 39 ms, pyarrow 43, pandas 76, Polars 31.
+**A leitura passou o pyarrow pela primeira vez**, e o arquivo encolheu 72% desde
+o [0.31.0].
+
+### Adicionado
+
+- **`RLE_DICTIONARY` na escrita de coluna numerica** (real, inteiro, data,
+  datahora). O criterio e o tamanho, calculado nos dois formatos: distintos x 8
+  mais os codigos empacotados, contra os valores em PLAIN. Coluna toda distinta
+  — uma chave, um carimbo de tempo — nao dicionariza.
+
+Cada coluna recebe o que a mede melhor: `id` continua em delta, `valor` e `peso`
+passam a dicionario. O pyarrow le tudo, verificado valor a valor.
+
 ## [0.32.0] — Escritor com DELTA_BINARY_PACKED
 
 Coluna inteira passa a poder guardar a **diferenca**, nao o valor.

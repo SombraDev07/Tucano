@@ -465,11 +465,11 @@ pixi run -e comparativo referencia-1t   # pipeline, uma thread
 
 | | ler tudo | ler 2 de 5 colunas |
 |---|---|---|
-| Tucano | **48 ms** | 28 ms |
-| pandas 3.0.5 | 83 ms | 38 ms |
-| pyarrow | 42 ms | 23 ms |
-| Polars 1.44 | 31 ms | 13 ms |
-| DuckDB 1.5.5 | 3 ms | 2 ms |
+| Tucano | **39 ms** | 28 ms |
+| pandas 3.0.5 | 76 ms | 32 ms |
+| pyarrow | 43 ms | 20 ms |
+| Polars 1.44 | 31 ms | 12 ms |
+| DuckDB 1.5.5 | 2 ms | 1 ms |
 
 O arquivo é o que o próprio Tucano escreve com o padrão de hoje: texto repetido
 em `RLE_DICTIONARY`, páginas em Snappy. A leitura usa **uma thread por coluna**, e
