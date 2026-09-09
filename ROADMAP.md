@@ -281,6 +281,7 @@ de datas, com a leitura no mesmo tempo. A dívida sai da lista.
 | M29 | Escrita paralela por coluna | crítica | ✅ feito | 1227 → 594 ms; encosta no pyarrow |
 | M30 | A escrita, em ondas | crítica | ✅ feito | 594 → 430 ms; empata com o pyarrow |
 | M31 | A pergunta feita por linha | crítica | ✅ feito | 430 → 241 ms; 1,8× o pyarrow |
+| M31.1 | Recortar dentro da tarefa | crítica | ❌ **medido e recusado** | banda de memória; +8% com tudo num grupo |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | ✅ feito | `para_xlsx` — ZIP com método 0, sem compressor |
@@ -2732,6 +2733,9 @@ Nenhuma das duas entrou hoje: as duas trocam a invariante que faz o desenho
 paralelo ser simples ("a tarefa é dona de tudo que usa") por 20% da escrita, e
 essa troca merece ser feita de propósito, não de passagem. Fica medida.
 
+> **A saída 1 foi tentada no M31.1 e recusada** — os 144 ms eram de antes do M31,
+> que já tinha comido a maior parte deles. Ver abaixo.
+
 ### Critério de saída
 
 - [x] a montagem do arquivo deixou de ser quadrática, com o número medido
@@ -2805,6 +2809,68 @@ falhou**, e dizer explicitamente se a hipótese continua de pé.
 - [x] o arquivo sai byte a byte igual ao de antes
 - [x] o resultado negativo do M27 corrigido no lugar onde está escrito
 - [x] 246 testes verdes, oito passos de verificação verdes
+
+---
+
+## M31.1 — Recortar dentro da tarefa: medido e recusado ❌
+
+O M30 listou duas saídas para os 144 ms seriais do recorte. A primeira —
+recortar dentro da tarefa — foi implementada e **mediu pior**. Fica registrada
+com o número, porque uma ideia recusada sem número volta.
+
+### A implementação
+
+A tarefa deixou de carregar a fatia e passou a carregar `(endereço das colunas,
+índice, ini, fim)`, recortando lá dentro. O endereço viaja como `Int` porque
+campo de struct não pode expor origin apagada, e é reconstruído no trabalhador —
+a mesma forma que `_do_ambiente` usa com o `getenv`. Funcionou de primeira: o
+arquivo saiu **byte a byte igual** nas quatro formas testadas, inclusive com
+coluna cheia de ausentes.
+
+### O número
+
+`bench-escrita`, cinco execuções de cada, cada uma já sendo a menor de três:
+
+| 5M × 5 | recorte na tarefa | recorte serial (M31) |
+|---|---|---|
+| padrão (500k) | 257 ms | **251 ms** |
+| tudo num grupo | 599 ms | **557 ms** |
+
+Pior nos dois, e fora do ruído no segundo (+8%).
+
+### Por que — e a diferença importa
+
+Duas razões, e **nenhuma delas é incidental**:
+
+**O prêmio tinha encolhido.** Os 144 ms foram medidos antes do M31. Depois que
+`_fatiar` parou de montar um `List[Bool]` de n posições, recortar custa **35 ms**
+no padrão e 81 com tudo num grupo. Sobrava um décimo do que a estimativa dizia.
+
+**Copiar em paralelo não é copiar mais rápido.** Cronometrando o recorte dentro
+das threads, a soma deu **141 ms** onde o mesmo recorte em série custa 81 — cada
+`memcpy` roda a ~60% da velocidade quando cinco rodam juntos. É banda de memória,
+que é exatamente o que o M15 já tinha medido nos operadores. Paralelizar uma
+cópia não a torna barata; só a espalha.
+
+### O que isso deixa de pé
+
+A saída 2 — **não recortar** — não foi tocada por esta medida, e é de outra
+natureza: tira a cópia em vez de espalhá-la, e com ela ~200 MB de tráfego de
+memória por escrita. O teto dela é 35 ms no padrão (14%), mais o que o
+codificador ganhar lendo a coluna original em vez de uma cópia recém-alocada.
+
+Mas o mapa de onde o tempo está mudou o argumento: dos ~250 ms do padrão, **223
+são codificação** — dicionário, Snappy, delta — já em paralelo, e 35 são recorte.
+Quem quiser a próxima fatia grande da escrita tem de olhar para o custo de
+codificar, não para o de organizar quem codifica.
+
+### Critério de saída
+
+- [x] a saída 1 implementada de verdade, não estimada
+- [x] correção conferida antes do desempenho: arquivo byte a byte igual
+- [x] A/B com cinco execuções de cada lado, não uma
+- [x] a causa da piora medida em separado (141 ms somados contra 81 em série)
+- [x] dito explicitamente o que a medida mata e o que ela deixa de pé
 
 ---
 

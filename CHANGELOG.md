@@ -3,6 +3,32 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.40.1] — Recortar dentro da tarefa: medido e recusado
+
+Sem mudanca de codigo. A 0.39.0 deixou registrado que recortar as fatias era a
+maior parcela serial da escrita — 144 ms — e listou duas saidas. A primeira,
+recortar dentro da tarefa, foi implementada e **mediu pior**:
+
+| 5M x 5 | recorte na tarefa | recorte serial (0.40.0) |
+|---|---|---|
+| padrao (500k) | 257 ms | **251 ms** |
+| tudo num grupo | 599 ms | **557 ms** |
+
+Cinco execucoes de cada lado, cada uma ja sendo a menor de tres. O arquivo saia
+byte a byte igual — a implementacao estava certa, a ideia e que nao pagava.
+
+Duas razoes, nenhuma incidental. O premio tinha encolhido: depois que a 0.40.0
+tirou o `List[Bool]` de `_fatiar`, recortar custa 35 ms no padrao, nao 144. E
+copiar em paralelo nao e copiar mais rapido — cronometrado dentro das threads, o
+recorte somou 141 ms onde em serie custa 81, porque cinco `memcpy` juntos rodam
+a ~60% da velocidade. Banda de memoria, o mesmo que a 0.23.0 mediu nos
+operadores.
+
+A outra saida — **nao recortar**, passando `(coluna, ini, fim)` para as funcoes
+de codificacao — continua de pe: tira a copia em vez de espalha-la. Mas o mapa
+mudou o argumento: dos ~250 ms do padrao, **223 sao codificacao** e 35 sao
+recorte. A proxima fatia grande da escrita esta no custo de codificar.
+
 ## [0.40.0] — A pergunta que se fazia por linha
 
 A 0.36.0 tentou tirar o `eh_ausente` por linha do escritor e **mediu pior**:
