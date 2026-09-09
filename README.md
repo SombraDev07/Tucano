@@ -467,28 +467,29 @@ pixi run -e comparativo referencia-1t   # pipeline, uma thread
 
 | | ler tudo | ler 2 de 5 colunas |
 |---|---|---|
-| Tucano | **39 ms** | 28 ms |
-| pandas 3.0.5 | 76 ms | 32 ms |
-| pyarrow | 43 ms | 20 ms |
+| Tucano | **38 ms** | 23 ms |
+| pandas 3.0.5 | 74 ms | 32 ms |
+| pyarrow | 43 ms | 21 ms |
 | Polars 1.44 | 31 ms | 12 ms |
 | DuckDB 1.5.5 | 2 ms | 1 ms |
 
-O arquivo é o que o próprio Tucano escreve com o padrão de hoje: texto repetido
-em `RLE_DICTIONARY`, páginas em Snappy. A leitura usa **uma thread por coluna**, e
-divide a coluna em faixas de row group quando sobram núcleos — é o que faz o caso
-podado, com só duas colunas, ganhar tanto quanto o completo.
+O arquivo é o que o próprio Tucano escreve com o padrão de hoje, e cada coluna recebe a
+codificação que a mede menor: `id` em `DELTA_BINARY_PACKED`, `valor` e `peso` em dicionário
+numérico, os textos em `RLE_DICTIONARY`. São **12 MiB** onde o mesmo dado em PLAIN ocupa 43 —
+e escolher a codificação deixa até a **escrita** mais rápida, porque sobra menos byte para o
+Snappy comprimir.
 
 **Pipeline completo — Parquet → filtro → groupby → 3 agregações, 5M linhas:**
 
 | | tempo | vs Tucano |
 |---|---|---|
-| Tucano | **69 ms** | — |
-| Tucano **em fluxo** (pico de 1 row group) | 92 ms | era 900 ms |
-| pandas 3.0.5 (1 thread) | 222 ms | Tucano **3,2×** mais rápido |
-| Polars (1 thread) | 137 ms | Tucano **2,0×** mais rápido |
-| DuckDB (1 thread) | 91 ms | Tucano **1,3×** mais rápido |
-| Polars (16 threads) | 56 ms | 1,2× |
-| DuckDB (16 threads) | 15 ms | 4,6× |
+| Tucano | **63 ms** | — |
+| Tucano **em fluxo** (pico de 1 row group) | 90 ms | era 900 ms |
+| pandas 3.0.5 (1 thread) | 220 ms | Tucano **3,5×** mais rápido |
+| Polars (1 thread) | 163 ms | Tucano **2,6×** mais rápido |
+| DuckDB (1 thread) | 75 ms | Tucano **1,2×** mais rápido |
+| Polars (16 threads) | 53 ms | 1,2× |
+| DuckDB (16 threads) | 11 ms | 5,7× |
 
 Uma thread contra uma thread: o Tucano passa pandas, Polars e o DuckDB neste workload. O que resta para o DuckDB em 16 núcleos é paralelismo, e nos operadores ele foi
 **medido e recusado**: compactar três colunas em três threads mediu 20 ms contra 13 da versão
