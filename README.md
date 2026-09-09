@@ -79,7 +79,10 @@ o que for mais conveniente na hora.
 
 ## Instalação
 
-Mojo 1.0 ou superior é o único requisito.
+Mojo 1.0 ou superior é o único requisito. **Não há `pip` no mundo Mojo** — o gerenciador é o
+`pixi` (conda), e é por ele que a distribuição acontece.
+
+### Hoje: clonar
 
 ```bash
 git clone git@github.com:SombraDev07/Tucano.git
@@ -87,21 +90,47 @@ cd Tucano
 pixi run test
 ```
 
-Para usar em outro projeto, copie o diretório `tucano/` e compile com `-I .`:
+Para usar de **outro projeto**, aponte o `-I` para o clone:
 
 ```bash
-mojo -I . meu_script.mojo
+mojo -I /caminho/para/Tucano meu_script.mojo
 ```
 
-Precompilar acelera builds locais — o `.mojoc` é ligado à versão do compilador e não é
-formato de distribuição:
+### Instalar no ambiente (dispensa o `-I`)
+
+O Mojo procura pacotes em `$CONDA_PREFIX/lib/mojo/`, que é onde a própria `std` mora. Pôr o
+Tucano lá faz `from tucano import ...` funcionar de qualquer diretório:
 
 ```bash
-pixi run build
+# a fonte, portátil entre versões do compilador
+cp -r tucano "$CONDA_PREFIX/lib/mojo/tucano"
+
+# ou o pacote precompilado, muito mais rápido de carregar
+pixi run build && cp tucano.mojoc "$CONDA_PREFIX/lib/mojo/"
 ```
 
-O pacote ainda não está publicado num canal conda; `recipe.yaml` está pronto para quando
-houver um.
+A diferença é grande e vale saber antes de escolher — rodar um script de três linhas que
+importa o Tucano, menor de cinco execuções:
+
+| forma | primeira execução | depois |
+|---|---|---|
+| fonte (`-I` ou instalada) | ~12 s | 3,4 s |
+| pacote `.mojoc` instalado | ~12 s | **0,99 s** |
+
+A fonte é recompilada a cada execução; o `.mojoc` já vem compilado. Em troca, ele é **ligado
+à versão exata do compilador** — trocou de Mojo, roda `pixi run build` de novo. Se os dois
+estiverem instalados, a fonte ganha.
+
+### Quando houver canal conda
+
+`recipe.yaml` está pronto e instala a fonte em `lib/mojo/`. Com um canal publicado
+(prefix.dev ou equivalente), o uso vira o equivalente Mojo do `pip install pandas`:
+
+```bash
+pixi add tucano -c <canal>
+```
+
+Falta só o canal — é decisão de projeto, não código.
 
 ## Começando
 

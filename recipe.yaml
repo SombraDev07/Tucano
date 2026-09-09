@@ -1,9 +1,22 @@
 # Receita conda para publicar o Tucano num canal (rattler-build).
 #
-# Bibliotecas Mojo sao distribuidas como FONTE: o `.mojoc` do `mojo precompile`
-# e ligado a versao exata do compilador e nao serve como formato distribuivel.
-#
 #   rattler-build build --recipe recipe.yaml
+#
+# Instala a **fonte** em `$PREFIX/lib/mojo/tucano`, que e onde o Mojo procura
+# pacotes — a `std` mora ali. Verificado: com a fonte nesse lugar,
+# `from tucano import ...` funciona de qualquer diretorio, sem `-I`.
+#
+# Fonte e nao `.mojoc` porque o precompilado e ligado a versao exata do
+# compilador, e um pacote `noarch: generic` nao pode compilar na instalacao.
+# O preco esta medido, num script que so importa e le um CSV:
+#
+#     fonte instalada    3,4 s por execucao
+#     .mojoc instalado   0,99 s por execucao
+#
+# Se um dia o canal fixar a versao do Mojo, vale trocar: rodar
+# `mojo precompile` no script de build e pinar `mojo ==<versao>` em `run`
+# entrega 3,4x na partida. Nao foi feito porque exige rattler-build para
+# testar, e testar antes e a regra.
 #
 # Publicar exige um canal conda proprio (ou prefix.dev). Ainda nao feito.
 
@@ -28,7 +41,7 @@ requirements:
     - mojo >=1.0.0,<2
 
 about:
-  homepage: https://github.com/SEU-USUARIO/tucano
+  homepage: https://github.com/SombraDev07/Tucano
   license: Apache-2.0
   license_file: LICENSE
   summary: Biblioteca tabular nativa em Mojo — ergonomia de pandas, semantica de banco de dados
