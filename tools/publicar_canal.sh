@@ -35,7 +35,12 @@ echo "== publicando a versao $VERSAO"
 # versoes: quem fixou `tucano ==0.41.0` tem de continuar resolvendo. Por isso o
 # pacote novo e construido dentro do que ja esta publicado — o rattler-build
 # reindexa a pasta inteira, e o `repodata.json` sai com todas as versoes.
+# `rm -rf` no diretorio deixa o registro do worktree orfao, e a proxima execucao
+# morre com "missing but already registered". Tirar pelo git, e podar o que
+# tiver sobrado de execucao anterior.
+git worktree remove --force .publicacao 2>/dev/null || true
 rm -rf .publicacao
+git worktree prune
 if git show-ref --verify --quiet refs/heads/gh-pages; then
   git worktree add .publicacao gh-pages
 else
