@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M28 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M29 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -133,9 +133,9 @@ Falta para o 1.0, e nada disso é questão de escopo:
 | ~~**Escrita `.xlsx`**~~ | Feito no M14: `para_xlsx`, uma aba, verificado contra o openpyxl. |
 | ~~**Paralelismo por thread**~~ | Feito no M13: leitura usa uma thread por coluna, 105 → 69 ms. Os operadores de execução ainda são de uma thread — é o que separa o Tucano do DuckDB em 16 núcleos. |
 | **Publicação em canal conda** | `recipe.yaml` está pronto; falta um canal (prefix.dev ou equivalente). Decisão de projeto. |
-| **Slab de data em Int32** | Medida e quantificada: ~5% de memória em tabela típica, contra ~40 pontos de refatoração no código mais quente. Decisão do dono — ver abaixo. |
+| ~~**Slab de data em Int32**~~ | Feito no M28: o slab carrega a própria largura. 38 → 19 MiB por 5M datas, leitura no mesmo tempo. |
 
-GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Do que falta para o 1.0, **os dois itens restantes não são código**: um é decisão de projeto (o canal conda) e o outro espera a reescrita de storage que o roadmap já registra.
+GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Do que falta para o 1.0, **sobrou um item, e ele não é código**: o canal conda, que é decisão de projeto — `recipe.yaml` está pronto e esperando um canal.
 
 | Peça | Status |
 |------|--------|
@@ -189,7 +189,7 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Do q
 | SQL `HAVING` + `COUNT(DISTINCT)` | ✅ M10.11 |
 | Leitura `.xlsx` | ✅ M12 |
 | Escrita `.csv` | ✅ M5 — `para_csv` |
-| Escrita `.xlsx` | ❌ M14 — `para_xlsx`, próximo |
+| Escrita `.xlsx` | ✅ M14 — `para_xlsx`, verificada contra o openpyxl |
 | SQL `SELECT DISTINCT` / `SELECT ALL` | ✅ M10.13 |
 | Paralelismo na leitura (uma thread por coluna) | ✅ M13 |
 | Paralelismo nos operadores de execução | ❌ **medido e recusado** — banda de memória, não CPU (M15) |
@@ -278,6 +278,7 @@ de datas, com a leitura no mesmo tempo. A dívida sai da lista.
 | M26 | Remover a divisão em faixas | crítica | ✅ feito | 285 linhas a menos, e mais rápido |
 | M27 | A escrita, medida | crítica | ✅ feito | perfil por fase; as codificações pagam a si mesmas |
 | M28 | Slab de data em Int32 | crítica | ✅ feito | 38 → 19 MiB por 5M datas; leitura igual |
+| M29 | Escrita paralela por coluna | crítica | ✅ feito | 1227 → 594 ms; encosta no pyarrow |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | ✅ feito | `para_xlsx` — ZIP com método 0, sem compressor |
@@ -2542,6 +2543,73 @@ porque o CONTRATO prometia o contrário e foi corrigido.
 - [x] estreitar fora da faixa levanta erro, não trunca
 - [x] data sobrevive a ordenação, agrupamento, filtro e às duas idas e voltas
 - [x] o arquivo escrito com data dicionarizada é lido pelo pyarrow
+- [x] 246 testes verdes, oito passos de verificação verdes
+
+---
+
+## M29 — Escrita paralela por coluna ✅
+
+O M27 mediu a escrita e concluiu que o escritor **não tem gordura — tem
+trabalho**: montar o dicionário, montar a página, comprimir, calcular min/max.
+Nenhuma dessas fases é desperdício, e por isso nenhuma some. Mas todas elas são
+**por coluna**, e colunas não dependem umas das outras.
+
+É a mesma observação que destravou a leitura no M13, aplicada do outro lado.
+
+### O que mudou
+
+O corpo do laço `for g / for c` virou uma função — `_codificar_pedaco` — que
+recebe a fatia e devolve os bytes prontos, com os offsets **relativos ao próprio
+pedaço**. Foi isso que permitiu codificar fora de ordem: se cada tarefa
+precisasse saber onde vai cair no arquivo, teria de esperar a anterior terminar,
+que é exatamente o que se queria evitar.
+
+O row group volta a ser montado em série, na ordem certa, somando a base a cada
+offset relativo. Recortar a fatia também ficou em série de propósito: o recorte
+já é um `memcpy`, e mandar a thread recortar só mudaria quem paga a mesma cópia.
+
+### Medido
+
+5M × 5 colunas, menor de três, `bench-escrita`:
+
+| | serial | por coluna |
+|---|---|---|
+| um row group (5 tarefas grandes) | 1568 ms | **925 ms** |
+| grupos de 100k (50 × 5 tarefas) | 1227 ms | **594 ms** |
+
+E contra as outras implementações, com o tamanho do arquivo ao lado — que é o
+número que falta quando alguém publica só o tempo:
+
+| grupos de 100k | ms | MiB |
+|---|---|---|
+| Tucano | **594** | **12,0** |
+| pyarrow | 474 | 40,8 |
+| Polars | 81 | 43,8 |
+
+De 2,6× mais lento que o pyarrow para 1,25×, com um arquivo 3,4× menor. O Polars
+escreve em um sétimo do tempo e produz 3,6× mais bytes.
+
+### O pico de memória não subiu
+
+Era a objeção óbvia: cinco threads montando páginas ao mesmo tempo seguram cinco
+buffers em vez de um. Medido, o pico **caiu** — 1,29 GiB contra 1,35. O escritor
+serial acumulava tudo num `List` único que dobra de tamanho ao crescer; os
+pedaços por coluna são menores e o arquivo final recebe cada um por `memcpy`.
+
+### O que não entrou
+
+Uma tarefa por *row group* em vez de por coluna. Com 50 grupos daria mais
+paralelismo, mas cada tarefa precisaria do seu pedaço do arquivo em ordem, e a
+montagem voltaria a ser o gargalo. A forma por coluna já satura os núcleos que o
+workload justifica.
+
+### Critério de saída
+
+- [x] a codificação de uma coluna não olha para nada fora da fatia
+- [x] o caminho sequencial e o paralelo passam pela mesma função
+- [x] `bench-escrita` no repositório, dos dois lados — o número do M27 era de um
+      script solto
+- [x] o arquivo escrito em paralelo é byte a byte o mesmo do serial
 - [x] 246 testes verdes, oito passos de verificação verdes
 
 ---

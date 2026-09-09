@@ -1,6 +1,6 @@
 [workspace]
 name = "tucano"
-version = "0.37.0"
+version = "0.38.0"
 channels = ["https://conda.modular.com/max", "conda-forge"]
 platforms = ["linux-64"]
 
@@ -15,6 +15,7 @@ bench-m8 = "mojo -I . bench/bench_m8.mojo"
 bench-m9 = "mojo -I . bench/bench_m9.mojo"
 bench-comparativo = "mojo -I . bench/bench_comparativo.mojo"
 bench-leitura = "mojo -I . bench/bench_leitura.mojo"
+bench-escrita = "mojo -I . bench/bench_escrita.mojo"
 bench-parquet = "mojo -I . bench/bench_parquet.mojo"
 parquet-roundtrip = "mojo -I . tools/roundtrip_parquet.mojo"
 arrow-roundtrip = "mojo -I . tools/roundtrip_arrow.mojo"
@@ -57,6 +58,7 @@ pyarrow = "*"
 referencia = "python tools/bench_referencia.py"
 referencia-1t = "python tools/bench_referencia.py --uma-thread"
 leitura = "python tools/bench_leitura.py"
+escrita = "python tools/bench_escrita.py"
 
 [environments]
 fixtures = ["fixtures"]

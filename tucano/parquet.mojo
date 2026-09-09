@@ -18,7 +18,7 @@ from std.ffi import external_call
 from std.memory import UnsafePointer
 from .thrift import LeitorThrift, TTipo, CampoThrift, ListaThrift
 from .arquivo import LeitorArquivo
-from .paralelo import LINHAS_MINIMAS_POR_TAREFA
+from .paralelo import LINHAS_MINIMAS_POR_TAREFA, threads_para
 from .expr import Expr, ExprNode, Kind
 from .codecs import bits_para_real64, bits_para_real32
 
@@ -2731,6 +2731,173 @@ def _bytes_stats(tipo: Int, bits: Int) -> List[UInt8]:
     return out^
 
 
+struct _PedacoCodificado(Movable):
+    """Uma coluna de um row group ja em bytes, pronta para entrar no arquivo.
+
+    Os offsets sao **relativos ao proprio pedaco**: quem monta o arquivo sabe
+    onde ele caiu e soma a base. Foi isso que permitiu codificar fora de ordem —
+    a alternativa, cada tarefa saber a sua posicao final, obrigaria a codificar
+    em ordem, que e exatamente o que se queria evitar.
+    """
+
+    var bytes: List[UInt8]
+    var dic_rel: Int
+    """Onde comeca a pagina de dicionario dentro de `bytes`, ou -1 se nao ha."""
+    var dados_rel: Int
+    var uncomp: Int
+    var usa_delta: Bool
+    var stats: StatsFaixa
+
+    def __init__(
+        out self,
+        var bytes: List[UInt8],
+        dic_rel: Int,
+        dados_rel: Int,
+        uncomp: Int,
+        usa_delta: Bool,
+        stats: StatsFaixa,
+    ):
+        self.bytes = bytes^
+        self.dic_rel = dic_rel
+        self.dados_rel = dados_rel
+        self.uncomp = uncomp
+        self.usa_delta = usa_delta
+        self.stats = stats
+
+
+def _codificar_pedaco(
+    fatia: Coluna, codec: Int, linhas: Int
+) raises -> _PedacoCodificado:
+    """Todo o trabalho de uma coluna num row group: escolher a codificacao,
+    montar as paginas e comprimir.
+
+    Nada aqui olha para fora da fatia — nem para o arquivo, nem para as outras
+    colunas. E por isso que roda em thread sem um unico mutex.
+    """
+    var stats = _stats_de_coluna(fatia)
+    var usa_dic = fatia.tipo == DType.TEXTO and fatia.eh_dicionarizada()
+    var dic_num = _DicNumerico(List[Int64](), List[Int32](), False)
+    if not usa_dic:
+        dic_num = _dicionario_numerico(fatia)
+    var usa_dic_num = dic_num.vale
+
+    var bytes = List[UInt8]()
+    var uncomp = 0
+    var dic_rel = -1
+    if usa_dic or usa_dic_num:
+        var corpo_dic: List[UInt8]
+        var card_dic: Int
+        if usa_dic:
+            corpo_dic = _valores_plain_dicionario(fatia)
+            card_dic = fatia.cardinalidade()
+        else:
+            corpo_dic = _valores_plain_dicionario_numerico(dic_num)
+            card_dic = len(dic_num.distintos)
+        var n_dic = len(corpo_dic)
+        var corpo_dic_c = _aplicar_codec(corpo_dic^, codec)
+        var cab_dic = _cabecalho_de_dicionario(card_dic, n_dic, len(corpo_dic_c))
+        dic_rel = len(bytes)
+        _acrescentar(bytes, cab_dic)
+        _acrescentar(bytes, corpo_dic_c)
+        uncomp += len(cab_dic) + n_dic
+
+    var delta_bytes = List[UInt8]()
+    if not usa_dic and not usa_dic_num:
+        delta_bytes = _delta_se_valer(fatia)
+    var usa_delta = len(delta_bytes) > 0
+    var encoding = PCodificacao.PLAIN
+    if usa_dic or usa_dic_num:
+        encoding = PCodificacao.RLE_DICTIONARY
+    elif usa_delta:
+        encoding = PCodificacao.DELTA_BINARY_PACKED
+
+    var pagina = _pagina_de_dados(
+        fatia, usa_dic or usa_dic_num, delta_bytes^,
+        dic_num.codigos, len(dic_num.distintos),
+    )
+    var n_pag = len(pagina)
+    var pagina_c = _aplicar_codec(pagina^, codec)
+    var cabecalho = _cabecalho_de_dados(linhas, n_pag, len(pagina_c), encoding)
+    var dados_rel = len(bytes)
+    _acrescentar(bytes, cabecalho)
+    _acrescentar(bytes, pagina_c)
+    uncomp += len(cabecalho) + n_pag
+
+    return _PedacoCodificado(
+        bytes^, dic_rel, dados_rel, uncomp, usa_delta, stats
+    )
+
+
+struct _TarefaEscrita(Movable):
+    """Uma fatia de coluna para codificar, e o lugar onde os bytes voltam.
+
+    Mesma forma da tarefa de leitura: a tarefa e dona de tudo que usa, `saida`
+    tem zero ou um elemento — nao existe pedaco vazio que signifique "ainda
+    nao" — e `erro` guarda o que a thread nao pode lancar.
+    """
+
+    var fatia: Coluna
+    var codec: Int
+    var linhas: Int
+    var saida: List[_PedacoCodificado]
+    var erro: String
+
+    def __init__(out self, var fatia: Coluna, codec: Int, linhas: Int):
+        self.fatia = fatia^
+        self.codec = codec
+        self.linhas = linhas
+        self.saida = List[_PedacoCodificado]()
+        self.erro = ""
+
+
+def _executar_escrita(mut tarefa: _TarefaEscrita) raises:
+    """O trabalho de uma tarefa, identico dentro e fora de thread."""
+    tarefa.saida.append(
+        _codificar_pedaco(tarefa.fatia, tarefa.codec, tarefa.linhas)
+    )
+
+
+def _trabalhador_escrita(
+    p: UnsafePointer[_TarefaEscrita, origin=AnyOrigin[mut=True]]
+) -> Int:
+    """Rotina de entrada da thread. Nao propaga excecao: guarda e volta."""
+    try:
+        _executar_escrita(p[])
+    except e:
+        p[].erro = String(e)
+    return 0
+
+
+def _rodar_tarefas_de_escrita(
+    mut tarefas: List[_TarefaEscrita], linhas: Int
+) raises:
+    """Codifica as colunas de um row group, em thread quando vale a pena.
+
+    O criterio e o mesmo da leitura, e pela mesma razao: abaixo de umas dez mil
+    linhas a thread custa mais do que economiza. O que nao couber em thread —
+    porque `pthread_create` falhou — sai aqui, pela funcao que a thread teria
+    chamado.
+    """
+    var n = len(tarefas)
+    var quantas = threads_para(n, linhas)
+    var tids = List[Int]()
+    tids.resize(n, 0)
+    var criadas = 0
+    if quantas > 1:
+        for i in range(n):
+            var rc = external_call["pthread_create", Int32](
+                tids.unsafe_ptr().unsafe_offset(i), Int(0),
+                _trabalhador_escrita, tarefas.unsafe_ptr().unsafe_offset(i),
+            )
+            if rc != 0:
+                break
+            criadas += 1
+    for i in range(criadas):
+        _ = external_call["pthread_join", Int32](tids[i], Int(0))
+    for i in range(criadas, n):
+        _executar_escrita(tarefas[i])
+
+
 def para_parquet_lote(
     colunas: List[Coluna],
     nomes: List[String],
@@ -2782,63 +2949,42 @@ def para_parquet_lote(
     var deltas_usados = List[Bool]()
     var stats = List[StatsFaixa]()
     for g in range(len(inicios)):
+        var linhas_grupo = fins[g] - inicios[g]
+
+        # recortar e serial de proposito: e a fatia que a thread leva consigo,
+        # e o recorte ja e um `memcpy` — mandar a thread recortar so mudaria
+        # quem paga a mesma copia
+        var tarefas = List[_TarefaEscrita]()
         for c in range(len(colunas)):
-            var fatia = _fatiar(colunas[c], inicios[g], fins[g])
-            stats.append(_stats_de_coluna(fatia))
-            var usa_dic = fatia.tipo == DType.TEXTO and fatia.eh_dicionarizada()
-            var dic_num = _DicNumerico(List[Int64](), List[Int32](), False)
-            if not usa_dic:
-                dic_num = _dicionario_numerico(fatia)
-            var usa_dic_num = dic_num.vale
-            var inicio_chunk = len(arquivo)
-            var uncomp = 0
-            var dic_off = -1
-            if usa_dic or usa_dic_num:
-                var corpo_dic: List[UInt8]
-                var card_dic: Int
-                if usa_dic:
-                    corpo_dic = _valores_plain_dicionario(fatia)
-                    card_dic = fatia.cardinalidade()
-                else:
-                    corpo_dic = _valores_plain_dicionario_numerico(dic_num)
-                    card_dic = len(dic_num.distintos)
-                var n_dic = len(corpo_dic)
-                var corpo_dic_c = _aplicar_codec(corpo_dic^, codec)
-                var cab_dic = _cabecalho_de_dicionario(
-                    card_dic, n_dic, len(corpo_dic_c)
+            tarefas.append(
+                _TarefaEscrita(
+                    _fatiar(colunas[c], inicios[g], fins[g]), codec, linhas_grupo
                 )
-                dic_off = len(arquivo)
-                _acrescentar(arquivo, cab_dic)
-                _acrescentar(arquivo, corpo_dic_c)
-                uncomp += len(cab_dic) + n_dic
-            var delta_bytes = List[UInt8]()
-            if not usa_dic and not usa_dic_num:
-                delta_bytes = _delta_se_valer(fatia)
-            var usa_delta = len(delta_bytes) > 0
-            var encoding = PCodificacao.PLAIN
-            if usa_dic or usa_dic_num:
-                encoding = PCodificacao.RLE_DICTIONARY
-            elif usa_delta:
-                encoding = PCodificacao.DELTA_BINARY_PACKED
-            var pagina = _pagina_de_dados(
-                fatia, usa_dic or usa_dic_num, delta_bytes^,
-                dic_num.codigos, len(dic_num.distintos),
             )
-            var n_pag = len(pagina)
-            var pagina_c = _aplicar_codec(pagina^, codec)
-            var cabecalho = _cabecalho_de_dados(
-                fins[g] - inicios[g], n_pag, len(pagina_c), encoding
+
+        _rodar_tarefas_de_escrita(tarefas, linhas_grupo)
+
+        # a montagem volta a ser serial: o arquivo tem uma ordem, e as threads
+        # so produziram os pedacos que entram nela
+        for c in range(len(tarefas)):
+            if tarefas[c].erro != "":
+                raise Error(tarefas[c].erro)
+            if len(tarefas[c].saida) != 1:
+                raise Error(
+                    "parquet: a coluna '" + nomes[c] + "' nao voltou da codificacao"
+                )
+            var pedaco = tarefas[c].saida.pop()
+            var base = len(arquivo)
+            _acrescentar(arquivo, pedaco.bytes)
+            stats.append(pedaco.stats)
+            deltas_usados.append(pedaco.usa_delta)
+            offsets.append(base)
+            tamanhos.append(len(pedaco.bytes))
+            tamanhos_uncomp.append(pedaco.uncomp)
+            offset_dados.append(base + pedaco.dados_rel)
+            offset_dic.append(
+                -1 if pedaco.dic_rel < 0 else base + pedaco.dic_rel
             )
-            var dados_off = len(arquivo)
-            _acrescentar(arquivo, cabecalho)
-            _acrescentar(arquivo, pagina_c)
-            uncomp += len(cabecalho) + n_pag
-            deltas_usados.append(usa_delta)
-            offsets.append(inicio_chunk)
-            tamanhos.append(len(arquivo) - inicio_chunk)
-            tamanhos_uncomp.append(uncomp)
-            offset_dados.append(dados_off)
-            offset_dic.append(dic_off)
 
     # ---- FileMetaData
     var w = EscritorThrift()

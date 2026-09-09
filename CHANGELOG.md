@@ -3,6 +3,47 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.38.0] — Escrita paralela por coluna
+
+O M27 mediu a escrita e nao achou gordura: montar o dicionario, montar a pagina,
+comprimir e calcular min/max sao todos trabalho necessario. Mas sao todos
+trabalho **por coluna**, e colunas nao dependem umas das outras — a mesma
+observacao que destravou a leitura na 0.19.0, do outro lado.
+
+5M x 5 colunas, menor de tres:
+
+| | serial | por coluna |
+|---|---|---|
+| um row group | 1568 ms | **925 ms** |
+| grupos de 100k | 1227 ms | **594 ms** |
+
+Contra as outras implementacoes, com o tamanho do arquivo ao lado:
+
+| grupos de 100k | ms | MiB |
+|---|---|---|
+| Tucano | **594** | **12,0** |
+| pyarrow | 474 | 40,8 |
+| Polars | 81 | 43,8 |
+
+De 2,6x mais lento que o pyarrow para 1,25x, com um arquivo 3,4x menor.
+
+O pico de memoria **caiu**, contra a objecao obvia: 1,29 GiB contra 1,35. O
+escritor serial acumulava tudo num `List` unico que dobra ao crescer; os pedacos
+por coluna sao menores e o arquivo final recebe cada um por `memcpy`.
+
+### Adicionado
+
+- `bench/bench_escrita.mojo` e `tools/bench_escrita.py` — `pixi run bench-escrita`
+  e `pixi run -e comparativo escrita`. O numero da 0.36.0 vinha de um script
+  solto; agora se roda de novo.
+
+### Alterado
+
+- O corpo do laco de escrita virou `_codificar_pedaco`, que recebe a fatia e
+  devolve os bytes com os offsets **relativos ao proprio pedaco** — e o que
+  permite codificar fora de ordem. A montagem do row group continua em serie, na
+  ordem certa, somando a base.
+
 ## [0.37.0] — Slab de data em 32 bits
 
 Data cabe em 32 bits com folga; inteiro e datahora precisam de 64. Em vez de um

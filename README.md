@@ -459,6 +459,8 @@ contra os engines de referência, no mesmo arquivo e com a mesma pergunta:
 ```bash
 pixi run bench-leitura                  # leitura, lado do Tucano
 pixi run -e comparativo leitura         # leitura, todos os engines
+pixi run bench-escrita                  # escrita, lado do Tucano
+pixi run -e comparativo escrita         # escrita, todos os engines
 pixi run bench-comparativo              # pipeline completo
 pixi run -e comparativo referencia-1t   # pipeline, uma thread
 ```
@@ -490,6 +492,19 @@ Snappy comprimir.
 | DuckDB (1 thread) | 75 ms | Tucano **1,2×** mais rápido |
 | Polars (16 threads) | 53 ms | 1,2× |
 | DuckDB (16 threads) | 11 ms | 5,7× |
+
+**Escrever as mesmas 5M × 5 linhas em Parquet** — tempo e tamanho andam juntos aqui, porque
+escrever PLAIN é rápido e produz um arquivo que todo leitor paga para sempre:
+
+| | ms | MiB |
+|---|---|---|
+| Tucano | **594** | **12,0** |
+| pyarrow | 474 | 40,8 |
+| Polars | 81 | 43,8 |
+
+Somos 1,25× mais lentos que o pyarrow e o arquivo sai **3,4× menor**; o Polars escreve em um
+sétimo do tempo e produz 3,6× mais bytes. A escrita se paga uma vez; a leitura, sempre.
+A codificação de cada coluna roda em uma thread — ver `bench-escrita`.
 
 Uma thread contra uma thread: o Tucano passa pandas, Polars e o DuckDB neste workload. O que resta para o DuckDB em 16 núcleos é paralelismo, e nos operadores ele foi
 **medido e recusado**: compactar três colunas em três threads mediu 20 ms contra 13 da versão
