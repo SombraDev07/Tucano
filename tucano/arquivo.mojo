@@ -9,6 +9,7 @@ pedido, e o resto do arquivo nunca entra em memoria.
 """
 
 from std.ffi import external_call
+from std.pathlib import Path
 
 comptime _O_RDONLY = Int32(0)
 comptime _SEEK_END = Int32(2)
@@ -33,7 +34,10 @@ struct LeitorArquivo(Movable):
             bytes_caminho.unsafe_ptr(), _O_RDONLY
         )
         if self.fd < 0:
-            raise Error("arquivo: nao foi possivel abrir '" + caminho + "'")
+            raise Error(
+                "nao foi possivel abrir '" + caminho + "' para ler Parquet"
+                + " — o caminho existe e da para ler?"
+            )
 
         var fim = external_call["lseek64", Int64](self.fd, Int64(0), _SEEK_END)
         if fim < 0:
@@ -74,3 +78,20 @@ struct LeitorArquivo(Movable):
 
     def fechar(self):
         _ = external_call["close", Int32](self.fd)
+
+
+def ler_arquivo_inteiro(caminho: String, formato: String) raises -> List[UInt8]:
+    """Le o arquivo todo, e **falha dizendo o que era para ler**.
+
+    `Path.read_bytes()` de um caminho que nao existe levanta a mensagem da
+    stdlib — em ingles, sem dizer qual leitor pediu o arquivo. Caminho errado e
+    o erro mais comum de quem esta comecando, e era o unico do Tucano que nao
+    falava a mesma lingua que os outros.
+    """
+    try:
+        return Path(caminho).read_bytes()
+    except:
+        raise Error(
+            "nao foi possivel abrir '" + caminho + "' para ler " + formato
+            + " — o caminho existe e da para ler?"
+        )

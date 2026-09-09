@@ -9,6 +9,7 @@ quando o estilo da celula e data.
 """
 
 from std.pathlib import Path
+from .arquivo import ler_arquivo_inteiro
 from .coluna import Coluna
 from .tabela import Tabela
 from .tipos import Tipo
@@ -819,7 +820,7 @@ def ler_xlsx(
     caminho: String, planilha: String = "", tem_cabecalho: Bool = True
 ) raises -> Tabela:
     """Le a planilha como `Tabela`. Sem `planilha`, usa a primeira aba."""
-    var bruto = Path(caminho).read_bytes()
+    var bruto = ler_arquivo_inteiro(caminho, "a planilha .xlsx")
     if not _eh_zip(bruto):
         if _eh_ole(bruto):
             raise Error(

@@ -25,6 +25,7 @@ em que todo valor vira nulo.
 """
 
 from std.pathlib import Path
+from .arquivo import ler_arquivo_inteiro
 from .coluna import Coluna
 from .dtype import DType
 from .flatbuf import ConstrutorFlat
@@ -580,7 +581,7 @@ def _coluna_do_lote(
 
 def ler_arrow_lote(caminho: String) raises -> List[Coluna]:
     """Le um arquivo Arrow IPC. Lotes multiplos sao concatenados."""
-    var b = Path(caminho).read_bytes()
+    var b = ler_arquivo_inteiro(caminho, "Arrow IPC")
     var n = len(b)
     if n < 20:
         raise Error("arrow: arquivo curto demais: " + caminho)

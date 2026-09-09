@@ -477,6 +477,76 @@ def test_leitor_levanta_em_vez_de_abortar() raises:
     assert_true(pegou)
 
 
+def test_ergonomia_da_primeira_hora() raises:
+    """Os tropecos que aparecem usando a biblioteca, nao lendo o codigo dela.
+
+    Cada um destes foi encontrado escrevendo um script de analise como um
+    usuario novo escreveria, contra o pacote publicado.
+    """
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("cidade", ["SP", "RJ", "SP"]))
+    cols.append(Coluna.de_reais("valor", [1.5, 2.5, 3.5]))
+    var t = Tabela(cols^)
+
+    # `esquema()` existe: o resto da API fala portugues, e quem digitava
+    # `esquema()` recebia "value has no attribute", que nao sugere `schema()`
+    assert_equal(t.esquema().tamanho(), 2)
+    assert_equal(t.esquema().descrever(), "cidade: texto\nvalor: real")
+    assert_equal(t.onde(coluna("valor").gt(lit(1.0))).esquema().tamanho(), 2)
+
+    # `coletar()` numa Tabela ja materializada: `onde` devolve Consulta e
+    # `selecionar` devolve Tabela, e a diferenca aparecia como falha de atributo
+    var so_cidade = t.selecionar(["cidade"]).coletar()
+    assert_equal(so_cidade.colunas(), 1)
+
+    # arquivo que nao existe: a mensagem tem de dizer o caminho e o formato,
+    # nos quatro leitores — era a unica do Tucano em ingles
+    var formatos = List[String]()
+    formatos.append("CSV")
+    formatos.append("Parquet")
+    formatos.append("Arrow IPC")
+    formatos.append("a planilha .xlsx")
+    var vistos = 0
+    for i in range(4):
+        var m = String("")
+        try:
+            if i == 0:
+                _ = ler_csv("tests/fixtures/_nao_existe.csv")
+            elif i == 1:
+                _ = ler_parquet("tests/fixtures/_nao_existe.parquet")
+            elif i == 2:
+                _ = ler_arrow("tests/fixtures/_nao_existe.arrow")
+            else:
+                _ = ler_xlsx("tests/fixtures/_nao_existe.xlsx")
+        except e:
+            m = String(e)
+        assert_true("_nao_existe" in m)
+        assert_true(formatos[i] in m)
+        vistos += 1
+    assert_equal(vistos, 4)
+
+
+def test_mostrar_corta_o_meio() raises:
+    """`mostrar()` numa tabela grande imprimia todas as linhas.
+
+    Num CSV de duas mil linhas isso cuspia duas mil linhas; num arquivo de
+    verdade, tomava o terminal. Aqui so da para verificar a decisao — a
+    impressao vai para a saida — entao o teste segura o contrato do parametro.
+    """
+    var ids = List[Int64](capacity=100)
+    for i in range(100):
+        ids.append(Int64(i))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("id", ids^))
+    var t = Tabela(cols^)
+    # nao ha o que assertar na saida, mas as tres formas tem de rodar sem erro
+    t.mostrar()        # corta: 10 primeiras, 10 ultimas
+    t.mostrar(4)       # corta em 4
+    t.mostrar(0)       # imprime tudo
+    t.primeiras(3)
+    assert_equal(t.linhas(), 100)
+
+
 def test_parquet_recusa_decimal() raises:
     """DECIMAL guardado como inteiro sem escala: 123,45 chega como 12345.
 

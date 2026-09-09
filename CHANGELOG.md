@@ -3,6 +3,40 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [1.1.0] — A primeira hora
+
+Cinco tropecos achados **usando** a biblioteca, nao lendo o codigo dela: um
+script de analise escrito como um usuario novo escreveria — ler CSV, ver o
+esquema, filtrar, agrupar, juntar, ordenar, exportar — rodado contra o pacote
+publicado no canal.
+
+### Corrigido
+
+- **`mostrar()` imprimia a tabela inteira.** Num CSV de duas mil linhas cuspia
+  duas mil linhas; num arquivo de verdade, tomava o terminal. Agora corta o
+  meio: dez primeiras, dez ultimas e um `...` com quantas linhas ficaram de fora,
+  com o indice real de cada uma. `mostrar(0)` imprime tudo, `mostrar(n)` escolhe
+  quantas.
+- **`Tabela.coletar()` nao existia.** `onde` e `agrupar` devolvem `Consulta`, mas
+  `selecionar` e `adicionar` devolvem `Tabela` — entao
+  `t.selecionar([...]).coletar()` era erro de compilacao enquanto
+  `t.onde(...).coletar()` funcionava, e a diferenca aparecia como falha de
+  atributo. Agora devolve a si mesma, consumindo o receptor: no encadeamento nao
+  ha copia.
+- **Arquivo inexistente falava ingles.** Era a unica mensagem do Tucano vinda
+  crua da stdlib (`Failed to open file ...`), justamente no erro mais comum de
+  quem esta comecando. Os quatro leitores agora dizem o caminho, o formato que
+  se tentava ler e o que conferir.
+
+### Adicionado
+
+- **`esquema()`** em `Tabela` e `Consulta`, apelido de `schema()` — o resto da
+  API fala portugues (`linhas`, `colunas`, `nomes`, `pegar`), e quem digitava
+  `esquema()` recebia "value has no attribute", que nao sugere o nome certo.
+- **`Schema.descrever()`** — nome e tipo de cada coluna, uma por linha. Era um
+  laco sobre `campo_em(i)`. Vale tambem para o esquema que veio so do rodape
+  (`esquema_parquet`), onde `resumo()` nao serve porque nao ha dado lido.
+
 ## [1.0.0] — Tucano 1.0
 
 Biblioteca tabular nativa em Mojo: sem ponte, sem dependencia externa, sem Python

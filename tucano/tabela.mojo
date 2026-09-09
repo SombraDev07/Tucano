@@ -413,8 +413,8 @@ struct Consulta(Copyable, Movable):
                 s += plano.regras[i]
         return s
 
-    def mostrar(self) raises:
-        self.coletar().mostrar()
+    def mostrar(self, n: Int = 20) raises:
+        self.coletar().mostrar(n)
 
     def primeiras(self, n: Int = 5) raises:
         self.coletar().primeiras(n)
@@ -430,6 +430,10 @@ struct Consulta(Copyable, Movable):
 
     def schema(self) raises -> Schema:
         return self.coletar().schema()
+
+    def esquema(self) raises -> Schema:
+        """Apelido de `schema()`, no idioma do resto da API."""
+        return self.schema()
 
     def nomes(self) raises -> List[String]:
         return self.coletar().nomes()
@@ -543,6 +547,12 @@ struct Tabela(Copyable, Movable):
             campos.append(Campo(c.nome, c.dtype()))
         return Schema(campos^)
 
+
+    def esquema(self) raises -> Schema:
+        """Apelido de `schema()`, no idioma do resto da API — `linhas`,
+        `colunas`, `nomes`, `pegar`. Quem digita `esquema()` recebia
+        "value has no attribute", que nao sugere o nome certo."""
+        return self.schema()
     def nomes(self) raises -> List[String]:
         return self.schema().nomes()
 
@@ -573,6 +583,18 @@ struct Tabela(Copyable, Movable):
     def eh_ausente(self, nome: String, i: Int) raises -> Bool:
         """Consulta de validade sem copiar a coluna."""
         return self._colunas[self._posicao(nome)].eh_ausente(i)
+
+    def coletar(var self) raises -> Self:
+        """Ja esta materializada — devolve a si mesma.
+
+        Existe porque nem todo verbo da `Tabela` e adiado: `onde` e `agrupar`
+        devolvem `Consulta`, mas `selecionar` e `adicionar` devolvem `Tabela`.
+        Sem isto, `t.selecionar([...]).coletar()` era erro de compilacao e
+        `t.onde(...).coletar()` funcionava — a diferenca aparecia como falha de
+        atributo, que nao explica nada. Consome o receptor, entao no
+        encadeamento nao ha copia.
+        """
+        return self^
 
     def adicionar(self, coluna: Coluna) raises -> Self:
         if coluna.tamanho() != self.linhas():
@@ -771,21 +793,48 @@ struct Tabela(Copyable, Movable):
             cols.append(coletar_linhas(c, indices))
         return Self(cols^)
 
+    def _cabecalho(self) raises -> String:
+        var cabecalho = String("#")
+        for c in self._colunas:
+            cabecalho += "\t" + c.nome
+        return cabecalho
+
+    def _linha_de_texto(self, linha: Int) raises -> String:
+        var texto = String(linha)
+        for c in self._colunas:
+            texto += "\t" + c.texto_em(linha)
+        return texto
+
     def primeiras(self, n: Int = 5) raises:
         var limite = n
         if limite > self.linhas():
             limite = self.linhas()
-        var cabecalho = String("#")
-        for c in self._colunas:
-            cabecalho += "\t" + c.nome
-        print(cabecalho)
+        print(self._cabecalho())
         for linha in range(limite):
-            var texto = String(linha)
-            for c in self._colunas:
-                texto += "\t" + c.texto_em(linha)
-            print(texto)
+            print(self._linha_de_texto(linha))
 
-    def mostrar(self) raises:
+    def mostrar(self, n: Int = 20) raises:
+        """Imprime a tabela, **cortando o meio** quando ela e grande.
+
+        Por padrao mostra as dez primeiras linhas, as dez ultimas e um `...`
+        entre elas, com o indice real de cada uma — quem olha quer ver o comeco,
+        o fim e o tamanho, nao rolar o terminal. `mostrar(0)` imprime tudo.
+
+        A primeira versao imprimia a tabela inteira sempre: `mostrar()` num CSV
+        de duas mil linhas cuspia duas mil linhas, e num arquivo de verdade
+        tomava o terminal.
+        """
         var s = self.shape()
         print("Tabela", s.linhas, "x", s.colunas)
-        self.primeiras(self.linhas())
+        print(self._cabecalho())
+        if n <= 0 or s.linhas <= n:
+            for linha in range(s.linhas):
+                print(self._linha_de_texto(linha))
+            return
+        var cima = n // 2
+        var baixo = n - cima
+        for linha in range(cima):
+            print(self._linha_de_texto(linha))
+        print("...\t(" + String(s.linhas - n) + " linhas)")
+        for linha in range(s.linhas - baixo, s.linhas):
+            print(self._linha_de_texto(linha))

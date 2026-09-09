@@ -11,6 +11,7 @@ Tres entradas:
 """
 
 from std.pathlib import Path
+from .arquivo import ler_arquivo_inteiro
 from .coluna import Coluna
 from .tabela import Tabela
 from .tipos import Tipo
@@ -244,7 +245,7 @@ struct FonteCSV(Movable):
 def _ler_campos(
     caminho: String, delimitador: String, tem_cabecalho: Bool, nrows: Int, pular: Int
 ) raises -> FonteCSV:
-    var bytes = Path(caminho).read_bytes()
+    var bytes = ler_arquivo_inteiro(caminho, "CSV")
     var limite = nrows
     if limite >= 0 and tem_cabecalho:
         limite += 1

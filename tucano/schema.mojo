@@ -44,6 +44,23 @@ struct Schema(Copyable, Movable):
             saida.append(c.nome)
         return saida^
 
+    def descrever(self) raises -> String:
+        """Nome e tipo de cada coluna, uma por linha.
+
+        Existe porque "quais colunas tem aqui, e de que tipo" e a primeira
+        pergunta de quem abre um arquivo, e a resposta era um laco sobre
+        `campo_em(i)`. `Tabela.resumo()` responde isso e mais — contagem de
+        ausentes, minimo, maximo — quando os dados ja estao em memoria; este
+        aqui serve tambem para o esquema que veio so do rodape, sem ler dado
+        nenhum (`esquema_parquet`), e para o esquema previsto de um plano.
+        """
+        var saida = String("")
+        for i in range(len(self.campos)):
+            if i > 0:
+                saida += "\n"
+            saida += self.campos[i].nome + ": " + self.campos[i].dtype.nome()
+        return saida^
+
     def contem(self, nome: String) -> Bool:
         for c in self.campos:
             if c.nome == nome:
