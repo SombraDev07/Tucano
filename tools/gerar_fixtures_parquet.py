@@ -201,6 +201,52 @@ def main():
         "u64_grande.parquet", grande_demais, compression="none", use_dictionary=False
     )
 
+    # 4f. zstd: o codec que o Polars grava por padrao. E vetores crus do codec,
+    # para testar o descompressor sem passar pelo Parquet — cada um exercita um
+    # caminho: bloco cru, RLE, literais em Huffman, quadro com varios blocos.
+    _escrever("zstd.parquet", temporal_grande(), compression="zstd")
+
+    import random as _r
+    _r.seed(99)
+    vetores = [
+        ("um byte", b"x"),
+        ("tudo igual", b"a" * 1000),
+        ("aleatorio (bloco cru)", bytes(_r.getrandbits(8) for _ in range(1000))),
+        ("repetido curto", b"abcabcabc" * 200),
+        ("texto tabular", b"".join(
+            ("registro %d;valor %d\n" % (i, i * 7)).encode() for i in range(2000))),
+        ("json-ish", b"".join(
+            ('{"id":%d,"nome":"item %d","ok":true}\n' % (i, i)).encode()
+            for i in range(3000))),
+        ("varios blocos", b"".join(
+            ("linha %d com conteudo variado %s\n" % (i, "xyz"[i % 3] * (i % 40))).encode()
+            for i in range(9000))),
+        ("zeros", bytes(200000)),
+        ("vazio", b""),
+    ]
+    def _fnv(dados):
+        """FNV-1a de 64 bits: o vetor guarda o resumo do original, nao o
+        original. Guardar os bytes crus faria a fixture ter megabytes para
+        provar o que um numero de oito bytes ja prova."""
+        h = 0xCBF29CE484222325
+        for x in dados:
+            h = ((h ^ x) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+        return h
+
+    caminho = DESTINO / "zstd_vetores.bin"
+    with open(caminho, "wb") as f:
+        for _, cru in vetores:
+            comp = bytes(pa.compress(cru, codec="zstd"))
+            f.write(len(comp).to_bytes(4, "little"))
+            f.write(len(cru).to_bytes(4, "little"))
+            f.write(_fnv(cru).to_bytes(8, "little"))
+            f.write(comp)
+        f.write(b"\x00" * 16)
+    print(
+        f"  {'zstd_vetores.bin':<28} {len(vetores):>6} vetores"
+        f"           {caminho.stat().st_size:>6} bytes"
+    )
+
     # 5. snappy, a compressao padrao na pratica
     _escrever("snappy.parquet", simples, compression="snappy", use_dictionary=False)
 

@@ -80,6 +80,8 @@ from tucano.codecs import (
 )
 from tucano.deflate import inflar
 from tucano.codecs import codificar_delta_i64, decodificar_delta_i64
+from tucano.zstd import descomprimir_zstd
+from std.pathlib import Path
 from tucano.parquet import PCodificacao
 from tucano.thrift import LeitorThrift
 from tucano.arquivo import LeitorArquivo
@@ -636,6 +638,65 @@ def test_mostrar_corta_o_meio() raises:
     t.mostrar(0)       # imprime tudo
     t.primeiras(3)
     assert_equal(t.linhas(), 100)
+
+
+def _u32_le(b: List[UInt8], i: Int) -> Int:
+    return (
+        Int(b[i]) | (Int(b[i + 1]) << 8) | (Int(b[i + 2]) << 16)
+        | (Int(b[i + 3]) << 24)
+    )
+
+
+def _u64_le(b: List[UInt8], i: Int) -> Int:
+    var v = 0
+    for k in range(8):
+        v |= Int(b[i + k]) << (8 * k)
+    return v
+
+
+def test_zstd_vetores() raises:
+    """O descompressor zstd contra quadros escritos por outra implementacao.
+
+    Nove vetores, cada um exercitando um caminho: bloco cru, literais em RLE,
+    literais em Huffman com um fluxo e com quatro, sequencias com tabela
+    predefinida e com tabela descrita, e um quadro de quatro blocos — que e onde
+    o estado que atravessa bloco (deslocamentos repetidos, tabelas em modo
+    repetir) aparece.
+
+    A fixture guarda o **resumo** do original, nao o original: provar byte a
+    byte com um FNV de 64 bits custa oito bytes por vetor em vez de megabytes.
+    """
+    var b = Path("tests/fixtures/zstd_vetores.bin").read_bytes()
+    var pos = 0
+    var conferidos = 0
+    while True:
+        var lc = _u32_le(b, pos)
+        var lr = _u32_le(b, pos + 4)
+        pos += 16
+        if lc == 0 and lr == 0:
+            break
+        var esperado = _u64_le(b, pos - 8)
+        var saida = descomprimir_zstd(b, pos, pos + lc)
+        assert_equal(len(saida), lr)
+        var h = 0xCBF29CE484222325
+        for x in saida:
+            h = ((h ^ Int(x)) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+        assert_equal(h, esperado)
+        pos += lc
+        conferidos += 1
+    assert_equal(conferidos, 9)
+
+
+def test_parquet_zstd() raises:
+    """O Polars grava zstd por padrao; sem isto, um Parquet dele nao abria."""
+    var z = ler_parquet("tests/fixtures/zstd.parquet")
+    var g = ler_parquet("tests/fixtures/gzip.parquet")
+    assert_equal(z.linhas(), 400)
+    # os dois tem o mesmo conteudo logico, entao a conferencia e coluna a coluna
+    for c in range(g.colunas()):
+        var nome = g.nomes()[c]
+        for i in range(g.linhas()):
+            assert_equal(z.pegar(nome).texto_em(i), g.pegar(nome).texto_em(i))
 
 
 def test_parquet_recusa_decimal() raises:

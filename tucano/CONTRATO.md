@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 1.2.0 — M0 → M33. A partir daqui vale versionamento semântico: o que esta página
+Versão 1.3.0 — M0 → M33. A partir daqui vale versionamento semântico: o que esta página
 chama de estável não muda de assinatura numa versão menor.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
@@ -513,7 +513,7 @@ duas encolhe. Na leitura, as três são entendidas.
 | `metadados_parquet(caminho)` | linhas, row groups, codificações, compressão |
 
 **Leitura cobre:** esquema plano; `PLAIN`, `RLE_DICTIONARY` e `DELTA_BINARY_PACKED`; níveis
-de definição RLE/bit-packed; páginas V1 e V2; sem compressão, **Snappy e GZIP**; `INT96`
+de definição RLE/bit-packed; páginas V1 e V2; sem compressão, **Snappy, GZIP e Zstd**; `INT96`
 (carimbo legado do Impala/Hive, convertido para microssegundos); **inteiros sem sinal** de 8,
 16, 32 e 64 bits; múltiplos row groups; tipos lógicos por `ConvertedType` e `LogicalType`.
 
@@ -522,15 +522,23 @@ Inteiro sem sinal vira `INTEIRO` com o valor certo: `UINT32` mora nos mesmos 32 
 cabe** no inteiro com sinal do Tucano e é recusado, com o nome da coluna no erro. O leitor
 de Arrow IPC segue a mesma regra.
 
-GZIP existe para o arquivo **abrir**, não para ser rápido: 5M × 3 colunas custam 52 ms em
-Snappy e 348 em GZIP, porque o inflate é o do `.xlsx` e não o do zlib. Quem vai ler o mesmo
-arquivo muitas vezes ganha regravando em Snappy.
+GZIP e Zstd existem para o arquivo **abrir**, não para ser rápidos. Ler 5M × 3 colunas:
+
+| codec | Tucano | arquivo |
+|---|---|---|
+| Snappy | 49 ms | 30 MiB |
+| GZIP | 328 ms | 17 MiB |
+| Zstd | 498 ms | 15 MiB |
+
+Os decodificadores são de referência, escritos aqui; o zlib e o libzstd têm vinte anos de
+otimização e caminhos em assembly. Quem vai ler o mesmo arquivo muitas vezes ganha regravando
+em Snappy — que é o que o Tucano escreve.
 
 **Leitura recusa, com erro explícito:**
 
 | o que | por quê |
 |---|---|
-| Zstd, Brotli, LZO, LZ4 | não há decodificador; e não se entra dependência externa por isso |
+| Brotli, LZO, LZ4 | não há decodificador; e não se entra dependência externa por isso |
 | `DECIMAL` | não há tipo decimal, e o valor no arquivo é o inteiro **sem escala** |
 | `FIXED_LEN_BYTE_ARRAY` | valor sem prefixo de tamanho; o leitor de `BYTE_ARRAY` não serve |
 | coluna aninhada (lista, mapa, struct) | o esquema lido é plano |

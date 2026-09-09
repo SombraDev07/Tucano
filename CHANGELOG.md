@@ -3,6 +3,54 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [1.3.0] — Zstd na leitura
+
+O Polars grava zstd **por padrao** — medido, nao suposto: `df.write_parquet(...)`
+sem argumento nenhum produz ZSTD. Sem este codec, um Parquet que saiu do Polars
+simplesmente nao abria.
+
+Sao 970 linhas de descompressor, escritas aqui, sem linkar nada. O formato tem
+tres camadas: quadro e blocos; literais e sequencias; e a entropia — Huffman para
+os literais, FSE (o tANS) para as sequencias, as duas lendo o fluxo de bits **de
+tras para a frente**.
+
+### Adicionado
+
+- `tucano/zstd.mojo` — descompressao Zstandard (RFC 8878). So leitura: o Tucano
+  escreve Snappy, que todo leitor abre.
+- Fixtures `zstd.parquet` e `zstd_vetores.bin` — nove quadros escritos pelo
+  pyarrow, cada um exercitando um caminho: bloco cru, literais em RLE, Huffman
+  com um fluxo e com quatro, sequencias com tabela predefinida e descrita, e um
+  quadro de quatro blocos. O vetor guarda o **resumo** do original (FNV de 64
+  bits), nao o original: oito bytes provam o mesmo que megabytes.
+
+### Onde ele fica
+
+Ler 5M x 3 colunas:
+
+| codec | Tucano | arquivo |
+|---|---|---|
+| Snappy | 49 ms | 30 MiB |
+| GZIP | 328 ms | 17 MiB |
+| Zstd | 498 ms | 15 MiB |
+
+O pyarrow le os tres em ~30 ms, com o libzstd e o zlib atras. Zstd existe para o
+arquivo **abrir**; quem vai reler muito regrava em Snappy.
+
+### Tres erros que so apareceram medindo
+
+Nenhum dos tres da erro — dao **bytes errados**, e so a comparacao com um quadro
+escrito por outra implementacao os encontra:
+
+- a distribuicao FSE predefinida do comprimento de casamento, escrita de memoria,
+  tinha dois `1` a mais e dois `-1` a menos. Somava 64 do mesmo jeito, e
+  decodificava comprimento 7963 onde o certo era 998;
+- a tabela de Huffman estava sendo montada do peso maior para o menor, e e do
+  menor para o maior — a ordem inversa e o que alinha cada bloco de entradas;
+- o laco que le os pesos parava um simbolo cedo. O peso que faltava virava o do
+  simbolo seguinte, e o efeito era **um byte errado por linha, sempre o mesmo**:
+  `l` saindo como `k`.
+
 ## [1.2.0] — Filtrar texto por trecho
 
 Segunda varredura de uso, agora nas operacoes de quem limpa dado. A API de

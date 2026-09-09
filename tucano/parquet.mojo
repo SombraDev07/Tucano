@@ -937,6 +937,7 @@ from std.collections import Dict
 from .coluna import Coluna
 from .buffer import StringStore, espalhar_chave
 from .deflate import desgzipar
+from .zstd import descomprimir_zstd
 from .executor import coletar_linhas
 from .dtype import DType
 from .schema import Campo, Schema
@@ -1081,10 +1082,13 @@ def _descomprimir(
                 comprimido,
             )
         return desgzipar(membro^)
+    if codec == PCompressao.ZSTD:
+        return descomprimir_zstd(bytes, ini, ini + comprimido)
     raise Error(
         "parquet: compressao "
         + PCompressao.nome(codec)
-        + " ainda nao suportada (ha suporte a sem compressao, Snappy e GZIP)"
+        + " ainda nao suportada (ha suporte a sem compressao, Snappy, GZIP e"
+        + " Zstd)"
     )
 
 

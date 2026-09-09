@@ -3,7 +3,7 @@
 **Biblioteca tabular nativa em Mojo.** Análise de dados com uma API direta, sobre um engine
 columnar vetorizado — do buffer ao kernel, sem Python em lugar nenhum.
 
-**Versão 1.2.0** · Apache-2.0 · 255 testes
+**Versão 1.3.0** · Apache-2.0 · 257 testes
 
 ```bash
 pixi add tucano -c https://sombradev07.github.io/Tucano
@@ -63,8 +63,9 @@ o que for mais conveniente na hora.
 - **Parquet nativo, leitura e escrita** — sem ponte, sem dependência externa. Column pruning,
   predicate pushdown e Snappy de verdade: coluna não pedida e row group impossível não saem
   do disco; o que sai vai comprimido. Lê `PLAIN`, `RLE_DICTIONARY` e `DELTA_BINARY_PACKED`,
-  sem compressão, Snappy e GZIP, e o carimbo legado `INT96`; **recusa com erro explícito**
-  Zstd, Brotli, LZ4, `DECIMAL` e `FIXED_LEN_BYTE_ARRAY` — ver [o contrato](tucano/CONTRATO.md).
+  sem compressão, **Snappy, GZIP e Zstd**, e o carimbo legado `INT96` — os três
+  descompressores escritos aqui, sem linkar nada; **recusa com erro explícito** Brotli, LZ4,
+  `DECIMAL` e `FIXED_LEN_BYTE_ARRAY` — ver [o contrato](tucano/CONTRATO.md).
 - **Escrita que escolhe a codificação medindo** — cada coluna sai em `DELTA_BINARY_PACKED`,
   dicionário numérico, `RLE_DICTIONARY` ou `PLAIN`, o que der menor **para ela**. Cada coluna
   de cada row group é codificada numa thread. 5M × 5 saem em 128 ms e 10,1 MiB, contra 440 ms
@@ -643,7 +644,7 @@ numa versão menor.
 | I/O tipado: scanner CSV, datahora, leitura em fatias | ✅ |
 | Parquet: leitura, escrita, column pruning, predicate pushdown, Snappy | ✅ |
 | Parquet: escrita em `DELTA_BINARY_PACKED` e dicionário numérico | ✅ |
-| Parquet: leitura de GZIP e do carimbo legado `INT96` | ✅ |
+| Parquet: leitura de GZIP, Zstd e do carimbo legado `INT96` | ✅ |
 | Escrita paralela — uma thread por coluna de row group | ✅ |
 | Agregação, junção, ordenação e verbos de análise | ✅ |
 | Otimizador: dobra, fusão, empurrão, poda de colunas | ✅ |
@@ -655,7 +656,7 @@ numa versão menor.
 | Paralelismo nos operadores de execução | ❌ **medido e recusado** — banda de memória |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-255 testes e oito passos de verificação. Roadmap completo em [ROADMAP.md](ROADMAP.md);
+257 testes e oito passos de verificação. Roadmap completo em [ROADMAP.md](ROADMAP.md);
 contrato de API em [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Duas coisas que este projeto registra e que valem mais que a tabela acima. Por muitos marcos
