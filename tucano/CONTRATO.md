@@ -509,8 +509,13 @@ duas encolhe. Na leitura, as três são entendidas.
 
 **Leitura cobre:** esquema plano; `PLAIN`, `RLE_DICTIONARY` e `DELTA_BINARY_PACKED`; níveis
 de definição RLE/bit-packed; páginas V1 e V2; sem compressão, **Snappy e GZIP**; `INT96`
-(carimbo legado do Impala/Hive, convertido para microssegundos); múltiplos row groups; tipos
-lógicos por `ConvertedType` e `LogicalType`.
+(carimbo legado do Impala/Hive, convertido para microssegundos); **inteiros sem sinal** de 8,
+16, 32 e 64 bits; múltiplos row groups; tipos lógicos por `ConvertedType` e `LogicalType`.
+
+Inteiro sem sinal vira `INTEIRO` com o valor certo: `UINT32` mora nos mesmos 32 bits de um
+`INT32`, e lê-lo com sinal transformaria `4294967295` em `-1`. `UINT64` acima de 2⁶³ **não
+cabe** no inteiro com sinal do Tucano e é recusado, com o nome da coluna no erro. O leitor
+de Arrow IPC segue a mesma regra.
 
 GZIP existe para o arquivo **abrir**, não para ser rápido: 5M × 3 colunas custam 52 ms em
 Snappy e 348 em GZIP, porque o inflate é o do `.xlsx` e não o do zlib. Quem vai ler o mesmo

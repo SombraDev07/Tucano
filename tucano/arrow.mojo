@@ -350,6 +350,9 @@ struct CampoArrow(Copyable, Movable):
     var tipo: Int
     var largura: Int
     var unidade: Int
+    var com_sinal: Bool
+    """`is_signed` do `Int` do Arrow. Sem isto, um `uint32` volta como `int32` e
+    4294967295 vira -1 — numero errado, sem aviso."""
 
 
 def _ler_campo_arrow(b: List[UInt8], pos_campo: Int) raises -> CampoArrow:
@@ -365,12 +368,17 @@ def _ler_campo_arrow(b: List[UInt8], pos_campo: Int) raises -> CampoArrow:
 
     var largura = 0
     var unidade = -1
+    var com_sinal = True
     var pt = campo_flat(b, pos_campo, 3)
     if pt >= 0:
         var t = referencia_flat(b, pt)
         if tipo == TipoArrow.INT:
             var pw = campo_flat(b, t, 0)
             largura = ler_i32(b, pw) if pw >= 0 else 32
+            # `is_signed` e booleano do flatbuffer: campo ausente quer dizer
+            # falso, e o Arrow escreve o campo sempre que ele e verdadeiro
+            var ps = campo_flat(b, t, 1)
+            com_sinal = ler_u8(b, ps) != 0 if ps >= 0 else False
         elif tipo == TipoArrow.PONTO_FLUTUANTE:
             var pp = campo_flat(b, t, 0)
             largura = ler_i16(b, pp) if pp >= 0 else 0
@@ -382,7 +390,7 @@ def _ler_campo_arrow(b: List[UInt8], pos_campo: Int) raises -> CampoArrow:
             var pu = campo_flat(b, t, 0)
             unidade = ler_i16(b, pu) if pu >= 0 else 0
 
-    return CampoArrow(nome, tipo, largura, unidade)
+    return CampoArrow(nome, tipo, largura, unidade, com_sinal)
 
 
 def _ler_esquema_arrow(b: List[UInt8], pos_esquema: Int) raises -> List[CampoArrow]:
@@ -512,6 +520,22 @@ def _coluna_do_lote(
             vals.append(Int64(ler_i16(corpo, valores.deslocamento + i * 2)))
         else:
             vals.append(Int64(ler_u8(corpo, valores.deslocamento + i)))
+
+    if not campo.com_sinal and campo.largura > 0:
+        # os leitores de 8, 16 e 32 bits estendem o sinal; sem sinal, o que
+        # ficou negativo recebe a potencia de dois de volta e volta a caber com
+        # folga. Em 64 bits nao ha correcao: acima de 2^63 o valor nao existe no
+        # inteiro com sinal do Tucano, e recusar e o que nao mente.
+        var volta = 1 << campo.largura
+        for i in range(len(vals)):
+            if vals[i] < 0:
+                if campo.largura >= 64:
+                    raise Error(
+                        "arrow: coluna '" + campo.nome + "' e inteiro sem sinal"
+                        + " de 64 bits com valor acima de 2^63, que nao cabe no"
+                        + " inteiro com sinal do Tucano"
+                    )
+                vals[i] = vals[i] + Int64(volta)
     return Coluna.de_inteiros(campo.nome, vals^, ausentes^)
 
 

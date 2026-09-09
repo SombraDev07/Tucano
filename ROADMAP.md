@@ -3050,13 +3050,36 @@ inteiro de 96 bits, e lê-lo como tal daria um número sem significado. A fixtur
 tem carimbos dos **dois lados da epoch** de propósito — a conta de quem só testou
 com data futura passa despercebida.
 
+### O mesmo defeito, de novo, em quatro tipos
+
+Achado o `DECIMAL`, a pergunta certa era: *o que mais o leitor aceita e interpreta
+errado?* Inteiros sem sinal.
+
+| coluna | arquivo diz | Tucano dizia |
+|---|---|---|
+| `UINT32` | 4294967295 | **-1** |
+| `UINT32` | 2147483655 | **-2147483641** |
+| `UINT64` | 18446744073709551615 | **-1** |
+
+Nos **dois** leitores, Parquet e Arrow IPC. `UINT32` mora nos mesmos 32 bits de um
+`INT32`, e os dois liam com sinal. Até 32 bits a correção é exata — o que ficou
+negativo recebe a potência de dois de volta e cabe com folga no `Int64`. Em 64
+bits não há correção possível, e acima de 2⁶³ a coluna é recusada com o nome no
+erro.
+
+No caminho, dois defeitos menores de leitura de metadados: o `LogicalType`
+`IntType` não era lido (então `isSigned` nunca chegava), e `bitWidth` é `i8` — no
+Thrift compact, um byte cru, não um varint zigzag. Lido com o leitor errado, a
+coluna de 64 bits passava por uma de 32.
+
 ### Critério de saída
 
 - [x] os oito arquivos do levantamento testados um a um, antes e depois
-- [x] o valor errado silencioso virou recusa, com o nome da coluna no erro
-- [x] fixtures commitadas para GZIP, INT96 e DECIMAL
+- [x] o valor errado silencioso virou recusa ou valor certo, com o nome da coluna
+      no erro quando é recusa
+- [x] fixtures commitadas para GZIP, INT96, DECIMAL e sem sinal (Parquet e Arrow)
 - [x] GZIP conferido contra o mesmo dado sem compressão, coluna a coluna
-- [x] 249 testes verdes, oito passos de verificação verdes
+- [x] 250 testes verdes, oito passos de verificação verdes
 
 ---
 

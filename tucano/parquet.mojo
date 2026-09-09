@@ -51,6 +51,10 @@ struct PConvertido:
     comptime TIME_MICROS = 8
     comptime TIMESTAMP_MILLIS = 9
     comptime TIMESTAMP_MICROS = 10
+    comptime UINT_8 = 11
+    comptime UINT_16 = 12
+    comptime UINT_32 = 13
+    comptime UINT_64 = 14
     comptime INT_8 = 15
     comptime INT_16 = 16
     comptime INT_32 = 17
@@ -522,6 +526,42 @@ def _ler_tipo_logico(mut l: LeitorThrift, bytes: List[UInt8]) raises -> Int:
         elif c.id == 6:
             resultado = PConvertido.DATE
             l.pular_valor(bytes, c.tipo)
+        elif c.id == 10:
+            # IntType: largura em bits + tem sinal. Sem isto, um UINT32 volta
+            # como INT32 e 4294967295 vira -1.
+            var largura = 32
+            var com_sinal = True
+            l.entrar()
+            while True:
+                var d = l.campo(bytes)
+                if d.tipo == TTipo.STOP:
+                    break
+                if d.id == 1:
+                    # `bitWidth` e i8, e no Thrift compact i8 e um byte cru —
+                    # nao um varint zigzag. Ler com o leitor errado devolvia
+                    # largura errada, e a coluna de 64 bits era tratada como de
+                    # 32.
+                    if d.tipo == TTipo.BYTE:
+                        largura = Int(l.byte(bytes))
+                    else:
+                        largura = l.zigzag(bytes)
+                elif d.id == 2:
+                    # no Thrift compact o booleano vem no proprio tipo do campo
+                    com_sinal = d.tipo == TTipo.BOOL_TRUE
+                    if d.tipo != TTipo.BOOL_TRUE and d.tipo != TTipo.BOOL_FALSE:
+                        l.pular_valor(bytes, d.tipo)
+                else:
+                    l.pular_valor(bytes, d.tipo)
+            l.sair()
+            if not com_sinal:
+                if largura == 64:
+                    resultado = PConvertido.UINT_64
+                elif largura == 32:
+                    resultado = PConvertido.UINT_32
+                elif largura == 16:
+                    resultado = PConvertido.UINT_16
+                else:
+                    resultado = PConvertido.UINT_8
         elif c.id == 8:
             # TimestampType: isAdjustedToUTC (ignorado, nao ha tipo com fuso) + unit
             l.entrar()
@@ -866,7 +906,12 @@ struct VarreduraParquet(Movable):
                     bytes, local, def_max, tipo_tucano, escala,
                     grupo.num_linhas, acc, dic, usou,
                 )
-            saida.append(_montar_coluna(e.nome, tipo_tucano, acc^, dic^, usou))
+            saida.append(
+                _montar_coluna(
+                    e.nome, tipo_tucano, acc^, dic^, usou,
+                    _largura_sem_sinal(e),
+                )
+            )
         return saida^
 
     def fechar(self):
@@ -2009,9 +2054,51 @@ def _ler_pedaco_coluna(
         )
 
 
+def _largura_sem_sinal(e: ElementoEsquema) -> Int:
+    """0 quando a coluna tem sinal; 32 ou 64 quando nao tem.
+
+    O Parquet guarda `UINT32` nos mesmos 32 bits de um `INT32`, e quem le com
+    sinal transforma 4294967295 em -1 — numero errado, sem aviso, que e a mesma
+    familia do DECIMAL lido como inteiro.
+    """
+    if (
+        e.convertido == PConvertido.UINT_8
+        or e.convertido == PConvertido.UINT_16
+        or e.convertido == PConvertido.UINT_32
+    ):
+        return 32
+    if e.convertido == PConvertido.UINT_64:
+        return 64
+    return 0
+
+
+def _corrigir_sem_sinal(
+    nome: String, mut inteiros: List[Int64], largura: Int
+) raises:
+    """Desfaz a extensao de sinal de uma coluna sem sinal.
+
+    Em 32 bits a correcao e exata: o que virou negativo recebe 2^32 de volta e
+    volta a caber com folga no Int64. Em 64 bits nao ha correcao possivel —
+    valores acima de 2^63 nao existem no inteiro com sinal do Tucano, e a saida
+    honesta e recusar em vez de devolver o numero que deu a volta.
+    """
+    if largura == 0:
+        return
+    var p = inteiros.unsafe_ptr()
+    for i in range(len(inteiros)):
+        var v = p.unsafe_load(i)
+        if v < 0:
+            if largura == 64:
+                raise Error(
+                    "parquet: coluna '" + nome + "' e UINT64 com valor acima de"
+                    + " 2^63, que nao cabe no inteiro com sinal do Tucano"
+                )
+            p.unsafe_store(i, v + 4294967296)
+
+
 def _montar_coluna(
     nome: String, tipo_tucano: Int, var acc: _Acumulador, var dic: DicionarioBytes,
-    usou_dicionario: Bool,
+    usou_dicionario: Bool, sem_sinal: Int = 0,
 ) raises -> Coluna:
     if usou_dicionario:
         return Coluna.de_dicionario(
@@ -2023,6 +2110,7 @@ def _montar_coluna(
         return Coluna.de_textos(nome, acc.textos^, acc.ausentes^)
     if tipo_tucano == DType.REAL:
         return Coluna.de_reais(nome, acc.tomar_reais(), acc.tomar_ausentes())
+    _corrigir_sem_sinal(nome, acc.inteiros, sem_sinal)
     if tipo_tucano == DType.DATA:
         return Coluna.de_datas(nome, acc.tomar_inteiros(), acc.tomar_ausentes())
     if tipo_tucano == DType.DATAHORA:
@@ -2090,7 +2178,9 @@ def _decodificar_coluna(
             + " linhas, arquivo declara " + String(esperado)
             + " apos poda de row group"
         )
-    return _montar_coluna(e.nome, tipo_tucano, acc^, dic^, usou)
+    return _montar_coluna(
+        e.nome, tipo_tucano, acc^, dic^, usou, _largura_sem_sinal(e)
+    )
 
 
 struct _TarefaColuna(Movable):
@@ -2267,7 +2357,12 @@ def _ler_faixa(
                 "parquet: coluna '" + e.nome + "' com " + String(acc.linhas())
                 + " linhas, esperado " + String(esperado)
             )
-        saida.append(_montar_coluna(e.nome, tipo_tucano, acc^, dic^, usou))
+        saida.append(
+                _montar_coluna(
+                    e.nome, tipo_tucano, acc^, dic^, usou,
+                    _largura_sem_sinal(e),
+                )
+            )
     return saida^
 
 

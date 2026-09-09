@@ -180,6 +180,27 @@ def main():
         use_deprecated_int96_timestamps=True,
     )
 
+    # 4e. inteiros sem sinal: o Parquet e o Arrow guardam UINT32 nos mesmos 32
+    # bits de um INT32, e quem le com sinal transforma 4294967295 em -1. Duas
+    # fixtures: uma que cabe no Int64 e tem de ser lida certa, e uma acima de
+    # 2^63 que tem de ser recusada.
+    sem_sinal = pa.table(
+        {
+            "u8": pa.array([0, 200, 255], type=pa.uint8()),
+            "u16": pa.array([0, 40000, 65535], type=pa.uint16()),
+            "u32": pa.array([0, 2**31 + 7, 2**32 - 1], type=pa.uint32()),
+            "u64": pa.array([0, 5, 2**62], type=pa.uint64()),
+            "i64": pa.array([-3, 0, 2**62], type=pa.int64()),
+        }
+    )
+    _escrever("sem_sinal.parquet", sem_sinal, compression="none", use_dictionary=False)
+    grande_demais = pa.table(
+        {"u64": pa.array([0, 2**64 - 1], type=pa.uint64())}
+    )
+    _escrever(
+        "u64_grande.parquet", grande_demais, compression="none", use_dictionary=False
+    )
+
     # 5. snappy, a compressao padrao na pratica
     _escrever("snappy.parquet", simples, compression="snappy", use_dictionary=False)
 
@@ -206,6 +227,7 @@ def main():
         ("simples", simples),
         ("com_na", com_na),
         ("temporal", temporal),
+        ("sem_sinal", sem_sinal),
     ]:
         caminho = DESTINO / f"{nome}.arrow"
         feather.write_feather(tabela, caminho, compression="uncompressed")

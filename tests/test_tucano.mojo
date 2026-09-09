@@ -410,6 +410,55 @@ def test_parquet_gzip_e_int96() raises:
         )
 
 
+def test_inteiro_sem_sinal_parquet_e_arrow() raises:
+    """UINT32 mora nos mesmos 32 bits de um INT32.
+
+    Ler com sinal transforma 4294967295 em -1 — numero errado, sem aviso, que e
+    a mesma familia do DECIMAL lido como inteiro. Os dois leitores tem de dar o
+    mesmo resultado, e o que nao cabe tem de ser recusado.
+    """
+    var esperado = List[String]()
+    esperado.append("0")
+    esperado.append("200")
+    esperado.append("255")
+    esperado.append("0")
+    esperado.append("40000")
+    esperado.append("65535")
+    esperado.append("0")
+    esperado.append("2147483655")
+    esperado.append("4294967295")
+    esperado.append("0")
+    esperado.append("5")
+    esperado.append("4611686018427387904")
+
+    var nomes = List[String]()
+    nomes.append("u8")
+    nomes.append("u16")
+    nomes.append("u32")
+    nomes.append("u64")
+
+    var pq = ler_parquet("tests/fixtures/sem_sinal.parquet")
+    var ar = ler_arrow("tests/fixtures/sem_sinal.arrow")
+    var k = 0
+    for c in range(len(nomes)):
+        for i in range(3):
+            assert_equal(pq.pegar(nomes[c]).texto_em(i), esperado[k])
+            assert_equal(ar.pegar(nomes[c]).texto_em(i), esperado[k])
+            k += 1
+    # coluna com sinal continua com sinal
+    assert_equal(pq.pegar("i64").texto_em(0), "-3")
+    assert_equal(ar.pegar("i64").texto_em(0), "-3")
+
+    # acima de 2^63 nao cabe, e recusar e o que nao mente
+    var pegou = False
+    try:
+        _ = ler_parquet("tests/fixtures/u64_grande.parquet")
+    except e:
+        pegou = True
+        assert_true("2^63" in String(e))
+    assert_true(pegou)
+
+
 def test_parquet_recusa_decimal() raises:
     """DECIMAL guardado como inteiro sem escala: 123,45 chega como 12345.
 

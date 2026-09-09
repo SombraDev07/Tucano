@@ -27,6 +27,17 @@ pyarrow, um por codec, mais `DECIMAL` e `INT96`.
 - Fixtures `gzip.parquet` e `int96.parquet`, conferidas coluna a coluna contra o
   mesmo dado sem compressao.
 
+### Corrigido
+
+- **Inteiro sem sinal voltava negativo, nos dois leitores.** `UINT32` mora nos
+  mesmos 32 bits de um `INT32`, e Parquet e Arrow liam com sinal: 4294967295
+  virava -1. Ate 32 bits a correcao e exata; `UINT64` acima de 2^63 nao cabe no
+  inteiro com sinal do Tucano e passou a ser recusado, com o nome da coluna no
+  erro.
+- Dois defeitos de leitura de metadados no caminho: o `LogicalType` `IntType` nao
+  era lido (entao `isSigned` nunca chegava) e `bitWidth` e `i8` — no Thrift
+  compact, um byte cru, nao um varint zigzag.
+
 ### Alterado
 
 - **O inflate ficou 2,5x mais rapido** — ler 5M x 3 em GZIP caiu de 866 para
