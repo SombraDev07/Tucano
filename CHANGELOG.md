@@ -3,6 +3,44 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.32.0] — Escritor com DELTA_BINARY_PACKED
+
+Coluna inteira passa a poder guardar a **diferenca**, nao o valor.
+
+| 5M linhas x 5 colunas | antes | depois |
+|---|---|---|
+| arquivo | 43 MiB | **25 MiB** |
+| ler a coluna `id` sozinha | 28 ms | **7 ms** |
+
+### Adicionado
+
+- **`DELTA_BINARY_PACKED` na escrita e na leitura** de colunas inteiras (inteiro,
+  data, datahora). Nao entra por regra, entra por medida: o escritor codifica dos
+  dois jeitos e usa o delta so quando ele encolhe.
+- Mil inteiros crescentes ocupam 46 bytes contra 8000 em PLAIN; 128 iguais, 11.
+- O pyarrow le os arquivos novos, verificado — a fixture `grupos` ja os exercita
+  em `verificar_tudo.sh`.
+
+### Corrigido
+
+- **`_varint_para` escrevia bytes ate a memoria acabar** quando recebia um valor
+  negativo. `v >>= 7` e deslocamento aritmetico: um negativo converge para -1 e
+  **fica la**, entao `v != 0` nunca falha. Existia desde o [0.6.0] e so recebia
+  valores nao negativos; o zigzag foi o primeiro a lhe entregar um negativo, ao
+  estourar perto do teto do Int64. O processo morria com SIGKILL, sem dizer por
+  que.
+- **`_dezigzag` tinha o mesmo defeito na volta** — valores perto do teto do Int64
+  voltavam errados.
+- `thrift.mojo` tem os dois na mesma forma. Nao ha caso alcancavel hoje (as
+  estatisticas do Parquet vao em binario, e os campos que usam zigzag sao
+  deslocamentos e contagens), mas a armadilha foi fechada.
+
+### Recusado pelo codec
+
+Diferenca que nao cabe em 64 bits com sinal, e largura acima de 56 bits: nos dois
+casos a coluna vai em PLAIN. O empacotador junta bits num inteiro de 64 antes de
+despejar bytes, e uma largura perto de 64 estouraria o acumulador em silencio.
+
 ## [0.31.0] — As tres tecnicas dos maduros, medidas
 
 Sem mudanca de codigo. O [0.30.0] nomeou o que faltava no decodificador Snappy:

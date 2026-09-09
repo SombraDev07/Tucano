@@ -439,10 +439,21 @@ def rle_valor_unico(
 
 
 def _varint_para(mut out: List[UInt8], valor: Int):
+    """Varint sem sinal, com o inteiro tratado como 64 bits sem sinal.
+
+    O deslocamento tem de ser **logico**, nao aritmetico. Com `>>= 7` puro, um
+    valor negativo converge para -1 e fica la: `v != 0` nunca falha e o laco
+    escreve bytes ate a memoria acabar. Como so recebia valores nao negativos,
+    o defeito ficou latente ate a chegada do zigzag, que pode estourar para
+    negativo — e ai o processo morria sem dizer por que.
+
+    Limpar os sete bits do topo depois do deslocamento e o que transforma um em
+    outro, e de quebra faz o valor grande ser escrito certo em vez de truncado.
+    """
     var v = valor
     while True:
         var b = v & 0x7F
-        v >>= 7
+        v = (v >> 7) & 0x01FFFFFFFFFFFFFF
         if v != 0:
             out.append(UInt8(b | 0x80))
         else:
@@ -666,6 +677,199 @@ def codificar_rle(valores: List[UInt8], largura: Int) -> List[UInt8]:
             out.append(UInt8((Int(valor) >> (8 * k)) & 0xFF))
         i = fim
     return out^
+
+
+# Parametros do DELTA_BINARY_PACKED. O bloco tem de ser multiplo de 128 e
+# `bloco / miniblocos` multiplo de 32 — 128 e 4 sao os valores que a maioria das
+# implementacoes escreve, e o que mais reduz o risco de interoperabilidade.
+comptime DELTA_BLOCO = 128
+comptime DELTA_MINIBLOCOS = 4
+comptime DELTA_POR_MINIBLOCO = DELTA_BLOCO // DELTA_MINIBLOCOS
+
+# O empacotador junta os bits num inteiro de 64 antes de despejar bytes, entao
+# uma largura perto de 64 estouraria o acumulador. Acima disso o delta nao
+# encolhe nada de todo jeito — diferenca que precisa de 57 bits e ruido puro —,
+# e a coluna vai em PLAIN.
+comptime DELTA_LARGURA_MAXIMA = 56
+
+
+def _zigzag(v: Int) -> Int:
+    """Inteiro com sinal -> nao negativo, mantendo os pequenos pequenos."""
+    return (v << 1) ^ (v >> 63)
+
+
+def _dezigzag(v: Int) -> Int:
+    """O inverso do zigzag. O deslocamento e **logico**: o valor codificado e
+    lido como sem sinal, e com `>> 1` aritmetico um valor com o bit 63 aceso —
+    o que acontece perto do teto do Int64 — voltaria errado."""
+    return ((v >> 1) & 0x7FFFFFFFFFFFFFFF) ^ (-(v & 1))
+
+
+def _largura_de(valor: Int) -> Int:
+    """Bits necessarios para representar `valor`, lido como sem sinal.
+
+    Negativo aqui quer dizer bit 63 aceso: precisa dos 64. Sem esse caso o laco
+    tambem nao terminaria, pelo mesmo motivo do `_varint_para`.
+    """
+    if valor < 0:
+        return 64
+    var w = 0
+    var v = valor
+    while v != 0:
+        w += 1
+        v = v >> 1
+    return w
+
+
+def _empacotar(mut out: List[UInt8], valores: List[Int], ini: Int, quantos: Int, largura: Int):
+    """Empacota `quantos` valores de `largura` bits, do menos ao mais significativo."""
+    if largura == 0:
+        return
+    var buffer = 0
+    var bits = 0
+    for k in range(quantos):
+        buffer |= (valores[ini + k] & ((1 << largura) - 1)) << bits
+        bits += largura
+        while bits >= 8:
+            out.append(UInt8(buffer & 0xFF))
+            buffer = buffer >> 8
+            bits -= 8
+    if bits > 0:
+        out.append(UInt8(buffer & 0xFF))
+
+
+def codificar_delta_i64(valores: List[Int64]) raises -> List[UInt8]:
+    """DELTA_BINARY_PACKED: guarda a diferenca, nao o valor.
+
+    Uma coluna de inteiros que cresce de um em um ocupa oito bytes por valor em
+    PLAIN e, depois do Snappy, vira milhoes de copias curtas — o decodificador
+    passa o tempo refazendo um trabalho que nao precisava existir. Guardando a
+    diferenca, a mesma coluna cabe em poucos bits por valor, e nao sobra
+    elemento nenhum para o Snappy decodificar.
+
+    O formato: cabecalho com o tamanho do bloco, quantos miniblocos ele tem,
+    quantos valores ao todo e o primeiro valor. Depois, por bloco, a **menor**
+    diferenca do bloco e a largura de cada minibloco — subtraindo a menor, o que
+    sobra e nao negativo e costuma caber em pouquissimos bits.
+    """
+    var out = List[UInt8]()
+    var n = len(valores)
+    _varint_para(out, DELTA_BLOCO)
+    _varint_para(out, DELTA_MINIBLOCOS)
+    _varint_para(out, n)
+    if n == 0:
+        _varint_para(out, _zigzag(0))
+        return out^
+    _varint_para(out, _zigzag(Int(valores[0])))
+
+    var deltas = List[Int](capacity=n)
+    for i in range(1, n):
+        deltas.append(Int(valores[i]) - Int(valores[i - 1]))
+
+    var i = 0
+    while i < len(deltas):
+        var neste = len(deltas) - i
+        if neste > DELTA_BLOCO:
+            neste = DELTA_BLOCO
+        var menor = deltas[i]
+        for k in range(1, neste):
+            if deltas[i + k] < menor:
+                menor = deltas[i + k]
+        _varint_para(out, _zigzag(menor))
+
+        # o bloco e sempre completado: com `menor` no lugar do que falta, a
+        # diferenca vira zero e o enchimento nao custa bits
+        var ajustados = List[Int](capacity=DELTA_BLOCO)
+        for k in range(neste):
+            var aj = deltas[i + k] - menor
+            if aj < 0:
+                # a faixa de diferencas nao cabe em 64 bits com sinal: o ajuste
+                # deu a volta. Recusar e mais barato que fingir que coube.
+                raise Error("delta: faixa de diferencas nao cabe; use PLAIN")
+            ajustados.append(aj)
+        for _ in range(neste, DELTA_BLOCO):
+            ajustados.append(0)
+
+        var larguras = List[Int](capacity=DELTA_MINIBLOCOS)
+        for mb in range(DELTA_MINIBLOCOS):
+            var maior = 0
+            for k in range(DELTA_POR_MINIBLOCO):
+                var v = ajustados[mb * DELTA_POR_MINIBLOCO + k]
+                if v > maior:
+                    maior = v
+            var w = _largura_de(maior)
+            if w > DELTA_LARGURA_MAXIMA:
+                raise Error(
+                    "delta: diferenca precisa de " + String(w)
+                    + " bits; use PLAIN"
+                )
+            larguras.append(w)
+        for mb in range(DELTA_MINIBLOCOS):
+            out.append(UInt8(larguras[mb]))
+        for mb in range(DELTA_MINIBLOCOS):
+            _empacotar(
+                out, ajustados, mb * DELTA_POR_MINIBLOCO,
+                DELTA_POR_MINIBLOCO, larguras[mb],
+            )
+        i += neste
+    return out^
+
+
+def decodificar_delta_i64(
+    bytes: List[UInt8], ini: Int, fim: Int, quantidade: Int
+) raises -> List[Int64]:
+    """Le o que `codificar_delta_i64` escreveu, e o que outros escritores escrevem."""
+    var saida = List[Int64](capacity=quantidade)
+    if quantidade <= 0:
+        return saida^
+    var cursor = Cursor(ini)
+    var bloco = _varint(bytes, cursor, fim)
+    var miniblocos = _varint(bytes, cursor, fim)
+    var total = _varint(bytes, cursor, fim)
+    var atual = _dezigzag(_varint(bytes, cursor, fim))
+    if miniblocos <= 0 or bloco <= 0 or bloco % miniblocos != 0:
+        raise Error("delta: cabecalho invalido")
+    var por_mini = bloco // miniblocos
+    if total < quantidade:
+        raise Error(
+            "delta: fluxo tem " + String(total) + " valores, pedidos "
+            + String(quantidade)
+        )
+
+    saida.append(Int64(atual))
+    var p = bytes.unsafe_ptr()
+    while len(saida) < quantidade:
+        var menor = _dezigzag(_varint(bytes, cursor, fim))
+        var larguras = List[Int](capacity=miniblocos)
+        for _ in range(miniblocos):
+            if cursor.pos >= fim:
+                raise Error("delta: fim inesperado nas larguras")
+            larguras.append(Int(p.unsafe_load(cursor.pos)))
+            cursor.pos += 1
+        for mb in range(miniblocos):
+            var largura = larguras[mb]
+            if largura > 64:
+                raise Error("delta: largura invalida")
+            var buffer = 0
+            var bits = 0
+            for _ in range(por_mini):
+                var d = 0
+                if largura > 0:
+                    while bits < largura:
+                        if cursor.pos >= fim:
+                            raise Error("delta: fim inesperado no minibloco")
+                        buffer |= Int(p.unsafe_load(cursor.pos)) << bits
+                        cursor.pos += 1
+                        bits += 8
+                    d = buffer & ((1 << largura) - 1)
+                    buffer = buffer >> largura
+                    bits -= largura
+                # os valores de enchimento sao lidos e descartados: o fluxo
+                # guarda o minibloco inteiro, e so a contagem diz onde parar
+                if len(saida) < quantidade:
+                    atual += menor + d
+                    saida.append(Int64(atual))
+    return saida^
 
 
 def real64_para_bits(valor: Float64) -> Int:

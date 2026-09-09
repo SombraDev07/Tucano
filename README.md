@@ -465,11 +465,11 @@ pixi run -e comparativo referencia-1t   # pipeline, uma thread
 
 | | ler tudo | ler 2 de 5 colunas |
 |---|---|---|
-| Tucano | **49 ms** | 30 ms |
-| pandas 3.0.5 | 93 ms | 35 ms |
-| pyarrow | 49 ms | 23 ms |
+| Tucano | **48 ms** | 28 ms |
+| pandas 3.0.5 | 83 ms | 38 ms |
+| pyarrow | 42 ms | 23 ms |
 | Polars 1.44 | 31 ms | 13 ms |
-| DuckDB 1.5.5 | 5 ms | 2 ms |
+| DuckDB 1.5.5 | 3 ms | 2 ms |
 
 O arquivo é o que o próprio Tucano escreve com o padrão de hoje: texto repetido
 em `RLE_DICTIONARY`, páginas em Snappy. A leitura usa **uma thread por coluna**, e
@@ -534,7 +534,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Excel `.xlsx`: leitura | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-237 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+240 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Por muitos marcos o roadmap registrou paralelismo como bloqueado pela linguagem. **Estava

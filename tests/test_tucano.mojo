@@ -77,6 +77,8 @@ from tucano.codecs import (
     largura_de_bits,
 )
 from tucano.deflate import inflar
+from tucano.codecs import codificar_delta_i64, decodificar_delta_i64
+from tucano.parquet import PCodificacao
 from tucano.thrift import LeitorThrift
 from tucano.arquivo import LeitorArquivo
 from tucano.flatbuf import ConstrutorFlat, raiz_flat, campo_flat, ler_i32, texto_flat
@@ -1248,6 +1250,112 @@ def _snappy_esperado(distancia: Int, comprimento: Int) raises -> List[UInt8]:
     for _ in range(comprimento):
         esperado.append(esperado[len(esperado) - distancia])
     return esperado^
+
+
+def test_delta_ida_e_volta() raises:
+    """O codec de delta, nos casos que o formato tem de aguentar.
+
+    Vazio e um valor so exercitam o cabecalho sem bloco nenhum; a coluna
+    constante zera todas as larguras; a de 333 valores nao fecha o bloco de 128,
+    e o enchimento nao pode virar valor.
+    """
+    var casos = List[List[Int64]]()
+    casos.append(List[Int64]())
+    var um = List[Int64]()
+    um.append(Int64(-42))
+    casos.append(um^)
+    var crescente = List[Int64]()
+    for i in range(1000):
+        crescente.append(Int64(i))
+    casos.append(crescente^)
+    var descendo = List[Int64]()
+    for i in range(333):
+        descendo.append(Int64(-i * 7 + 5))
+    casos.append(descendo^)
+    var constante = List[Int64]()
+    for _ in range(128):
+        constante.append(Int64(9))
+    casos.append(constante^)
+    var ruidoso = List[Int64]()
+    for i in range(200):
+        ruidoso.append(Int64((i * 2654435761) % 1000003) - 500000)
+    casos.append(ruidoso^)
+
+    for src in casos:
+        var enc = codificar_delta_i64(src)
+        var dec = decodificar_delta_i64(enc, 0, len(enc), len(src))
+        assert_equal(len(dec), len(src))
+        for i in range(len(src)):
+            assert_equal(Int(dec[i]), Int(src[i]))
+
+    # e o ponto de existir: coluna que cresce ocupa pouquissimo
+    var mil = List[Int64]()
+    for i in range(1000):
+        mil.append(Int64(i))
+    assert_true(len(codificar_delta_i64(mil)) < 200)  # contra 8000 em PLAIN
+
+
+def test_pq_escreve_delta_e_le_de_volta() raises:
+    """Coluna inteira que cresce sai em DELTA_BINARY_PACKED, com ausentes.
+
+    O valor de guardar diferenca em vez de valor nao e so o arquivo menor: em
+    PLAIN, o Snappy recebe oito bytes por valor dos quais so os baixos mudam, e
+    responde com milhoes de copias de sete bytes que o leitor tem de refazer uma
+    a uma. Em delta nao sobra elemento nenhum para ele.
+    """
+    var n = 3000
+    var v = List[Int64](capacity=n)
+    var aus = List[Bool](capacity=n)
+    for i in range(n):
+        v.append(Int64(i * 3 - 1000))
+        aus.append(i % 97 == 0)
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("k", v^, aus^))
+    var caminho = String("tests/fixtures/_saida_delta.parquet")
+    para_parquet(Tabela(cols^), caminho, 1000)
+
+    var m = metadados_parquet(caminho)
+    var achou_delta = False
+    for e in m.grupos[0].colunas[0].codificacoes:
+        if e == PCodificacao.DELTA_BINARY_PACKED:
+            achou_delta = True
+    assert_true(achou_delta)
+
+    var t = ler_parquet(caminho)
+    assert_equal(t.linhas(), n)
+    for i in range(n):
+        if i % 97 == 0:
+            assert_true(t.pegar("k").eh_ausente(i))
+        else:
+            assert_equal(t.pegar("k").texto_em(i), String(i * 3 - 1000))
+
+
+def test_pq_delta_so_quando_encolhe() raises:
+    """Delta nao entra por regra, entra por medida.
+
+    Valores espalhados por toda a faixa de 64 bits tem diferencas que precisam
+    dos 64 bits inteiros, e a codificacao fica MAIOR que o PLAIN. Ali a coluna
+    continua em PLAIN.
+    """
+    var v = List[Int64]()
+    for i in range(200):
+        if i % 2 == 0:
+            v.append(Int64(4000000000000000000) + Int64(i))
+        else:
+            v.append(Int64(-4000000000000000000) - Int64(i))
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("k", v.copy()))
+    var caminho = String("tests/fixtures/_saida_sem_delta.parquet")
+    para_parquet(Tabela(cols^), caminho, 1000)
+
+    var m = metadados_parquet(caminho)
+    for e in m.grupos[0].colunas[0].codificacoes:
+        assert_true(e != PCodificacao.DELTA_BINARY_PACKED)
+
+    var t = ler_parquet(caminho)
+    assert_equal(t.linhas(), len(v))
+    for i in range(len(v)):
+        assert_equal(t.pegar("k").texto_em(i), String(v[i]))
 
 
 def test_pq_snappy_copia_larga() raises:

@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M13 e M15 → M23 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M13 e M15 → M24 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -194,7 +194,7 @@ GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. **Sa
 | Paralelismo na leitura (uma thread por coluna) | ✅ M13 |
 | Paralelismo nos operadores de execução | ❌ **medido e recusado** — banda de memória, não CPU (M15) |
 | Junção e ordenação mais baratas | ✅ M16 — 74 e 100 ns/linha |
-| Escritor com `DELTA_BINARY_PACKED` | ⏳ próximo — encurta o fluxo em vez de acelerar o Snappy |
+| Escritor com `DELTA_BINARY_PACKED` | ✅ M24 — arquivo 42% menor |
 | Chave de grupo composta | ✅ M17 — 34 ns/linha |
 | Slab de data em Int32 | ⏸ dívida rastreada — ver abaixo |
 | Publicação em canal conda | ❌ exige canal próprio |
@@ -247,6 +247,7 @@ Adicionar agora um sexto `List` paralelo à `Coluna` piora a estrutura em vez de
 | M21 | Leitura de poucas colunas | crítica | ✅ feito | uma coluna 33 → 16 ms |
 | M22 | Medir a distância para o Polars | crítica | ✅ feito | Snappy é 23 dos 28 ms; duas tentativas recusadas |
 | M23 | As três técnicas dos maduros | crítica | ✅ feito | as três mais lentas; o alvo é o escritor |
+| M24 | Escritor com DELTA_BINARY_PACKED | crítica | ✅ feito | arquivo 43 → 25 MiB; coluna inteira 28 → 7 ms |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | não iniciado | `para_xlsx` — planilha final |
@@ -2147,6 +2148,90 @@ leitor.
 - [x] a metade cara isolada — é a carga larga, não a tabela
 - [x] nenhuma linha mais lenta entrou; 237 testes verdes
 - [x] o próximo passo nomeado com o motivo, e ele é no escritor
+
+---
+
+## M24 — Escritor com DELTA_BINARY_PACKED ✅
+
+O M23 mediu e concluiu: o erro é anterior ao Snappy. Uma coluna de inteiros
+sequenciais em PLAIN entrega 40 MiB nos quais só os bytes baixos mudam, e o
+Snappy responde com seis milhões de cópias de sete bytes que o leitor tem de
+refazer uma a uma. **O caminho não é um Snappy mais rápido, é um fluxo mais
+curto.**
+
+### O que muda
+
+Coluna inteira passa a poder ser escrita em `DELTA_BINARY_PACKED`: guarda a
+diferença, não o valor. Cabeçalho com tamanho do bloco, miniblocos, contagem e
+primeiro valor; depois, por bloco, a **menor** diferença e a largura de cada
+minibloco — subtraindo a menor, o que sobra é não negativo e costuma caber em
+pouquíssimos bits.
+
+| | PLAIN | delta |
+|---|---|---|
+| 1000 inteiros crescentes | 8000 bytes | **46** |
+| 333 em progressão | 2664 bytes | **21** |
+| 128 iguais | 1024 bytes | **11** |
+| 200 ruidosos | 1600 bytes | 582 |
+
+Não entra por regra, entra por medida: o escritor codifica dos dois jeitos e usa
+o delta só quando ele encolhe. Escrita se paga uma vez; leitura, sempre.
+
+### Resultado
+
+| 5M linhas × 5 colunas | antes | depois |
+|---|---|---|
+| arquivo | 43 MiB | **25 MiB** |
+| ler a coluna `id` sozinha | 28 ms | **7 ms** |
+| ler as 5 colunas | 49 ms | 48 ms |
+
+A leitura de uma coluna inteira ficou **4× mais rápida**, e o arquivo encolheu
+42% para qualquer leitor — o pyarrow lê os arquivos novos, verificado, inclusive
+com ausentes. As cinco colunas juntas não mudaram: ali o gargalo passou a ser as
+duas colunas reais, que o delta não cobre.
+
+### O laço que comia a memória
+
+Escrever o codificador derrubou o processo — e o culpado não era o código novo.
+
+```mojo
+while True:
+    var b = v & 0x7F
+    v >>= 7          # deslocamento ARITMETICO
+    if v != 0: ...
+```
+
+`_varint_para` existia desde o M5 e só recebia valores não negativos. Com um
+negativo, `>>= 7` converge para `-1` **e fica lá**: `v != 0` nunca falha, e o
+laço escreve bytes até a memória acabar. O processo morre com SIGKILL, sem dizer
+por quê — foi assim que a suíte inteira passou a cair.
+
+O zigzag foi o primeiro a lhe entregar um negativo: `valor << 1` estoura perto
+do teto do Int64. Limpar os sete bits do topo depois do deslocamento é o que
+transforma o aritmético em lógico — e de quebra faz o valor grande ser escrito
+certo em vez de truncado.
+
+`_dezigzag` tinha o mesmo defeito na volta, e valores perto do teto voltavam
+errados. `thrift.mojo` tem os dois na mesma forma; não consegui construir um
+caso que os alcance hoje — as estatísticas do Parquet vão em binário, e os
+campos que usam zigzag são deslocamentos e contagens, sempre pequenos — mas a
+armadilha está a um campo de distância, e foi fechada.
+
+### O que o codec recusa
+
+Diferença que não cabe em 64 bits com sinal, e largura acima de 56 bits. Nos
+dois casos a coluna vai em PLAIN. Recusar é mais barato que fingir que coube: o
+empacotador junta bits num inteiro de 64 antes de despejar bytes, e uma largura
+perto de 64 estouraria o acumulador em silêncio.
+
+### Critério de saída
+
+- [x] escritor emite delta quando ele encolhe, medindo em vez de supor
+- [x] leitor entende `DELTA_BINARY_PACKED`, com e sem ausentes
+- [x] pyarrow lê os arquivos novos — a fixture `grupos` já os exercita
+- [x] ida e volta coberta nos extremos: vazio, um valor, constante, bloco
+      incompleto, e valores no teto do Int64
+- [x] 240 testes verdes
 
 ---
 

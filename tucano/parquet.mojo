@@ -866,6 +866,8 @@ struct VarreduraParquet(Movable):
 
 from .codecs import (
     descomprimir_snappy,
+    decodificar_delta_i64,
+    codificar_delta_i64,
     comprimir_snappy,
     decodificar_rle,
     decodificar_rle_i32,
@@ -1816,6 +1818,39 @@ def _ler_pedaco_coluna(
             pos = corpo + cab.tamanho_comprimido
             continue
 
+        # delta: a coluna guarda diferencas, nao valores
+        if cab.codificacao == PCodificacao.DELTA_BINARY_PACKED:
+            if tipo_tucano == DType.REAL:
+                raise Error(
+                    "parquet: DELTA_BINARY_PACKED nao vale para coluna real"
+                )
+            var brutos = decodificar_delta_i64(
+                dados, inicio_valores, len(dados), presentes
+            )
+            if todos and escala == 0:
+                var antes = len(acc.inteiros)
+                acc.inteiros.resize(unsafe_uninit_length=antes + n)
+                if n > 0:
+                    _ = external_call["memcpy", Int](
+                        acc.inteiros.unsafe_ptr().unsafe_offset(antes).unsafe_bitcast[UInt8](),
+                        brutos.unsafe_ptr().unsafe_bitcast[UInt8](),
+                        n * 8,
+                    )
+                _marcar_presentes(acc, n)
+            else:
+                var vd = ValoresPagina()
+                for x in brutos:
+                    vd.inteiros.append(x)
+                var proximo = 0
+                for i in range(n):
+                    var presente = todos or niveis[i] == def_max
+                    _emitir(acc, tipo_tucano, presente, vd, proximo, escala)
+                    if presente:
+                        proximo += 1
+            lidas += n
+            pos = corpo + cab.tamanho_comprimido
+            continue
+
         # sem ausentes e sem dicionario: escreve direto no acumulador
         if (
             todos
@@ -1869,7 +1904,7 @@ def _ler_pedaco_coluna(
             raise Error(
                 "parquet: codificacao "
                 + PCodificacao.nome(cab.codificacao)
-                + " ainda nao suportada (ha suporte a PLAIN e dicionario)"
+                + " ainda nao suportada (ha suporte a PLAIN, dicionario e delta)"
             )
 
         if todos:
@@ -2599,7 +2634,39 @@ def _indices_presentes(col: Coluna) raises -> List[Int32]:
     return out^
 
 
-def _pagina_de_dados(col: Coluna, dicionarizada: Bool) raises -> List[UInt8]:
+def _vale_delta(col: Coluna) raises -> Bool:
+    """Decide entre DELTA_BINARY_PACKED e PLAIN medindo os dois.
+
+    Nao ha heuristica melhor que codificar e comparar: o delta ganha muito em
+    coluna que cresce, empata em ruido e perde em coluna aleatoria de 64 bits.
+    Codificar duas vezes custa escrita, e a escrita e o lado que se paga uma vez
+    para uma leitura que se paga sempre.
+    """
+    if col.tipo == DType.REAL or col.tipo == DType.TEXTO:
+        return False
+    if col.tipo == DType.LOGICO:
+        return False
+    var presentes = _inteiros_presentes(col)
+    if len(presentes) < 8:
+        return False
+    # o codec recusa faixas que nao cabem; recusa dele e resposta aqui
+    try:
+        return len(codificar_delta_i64(presentes)) < len(presentes) * 8
+    except:
+        return False
+
+
+def _inteiros_presentes(col: Coluna) raises -> List[Int64]:
+    var out = List[Int64](capacity=col.tamanho())
+    for i in range(col.tamanho()):
+        if not col.eh_ausente(i):
+            out.append(col.ints[i])
+    return out^
+
+
+def _pagina_de_dados(
+    col: Coluna, dicionarizada: Bool, delta: Bool = False
+) raises -> List[UInt8]:
     """Pagina de dados V1: [tamanho dos niveis][niveis RLE][valores]."""
     var n = col.tamanho()
     var niveis = List[UInt8](capacity=n)
@@ -2621,6 +2688,8 @@ def _pagina_de_dados(col: Coluna, dicionarizada: Bool) raises -> List[UInt8]:
             largura = largura_de_bits(card - 1)
         pagina.append(UInt8(largura))
         _acrescentar(pagina, codificar_rle_i32(idxs, largura))
+    elif delta:
+        _acrescentar(pagina, codificar_delta_i64(_inteiros_presentes(col)))
     else:
         _acrescentar(pagina, _valores_plain(col))
     return pagina^
@@ -2808,6 +2877,7 @@ def para_parquet_lote(
     var tamanhos_uncomp = List[Int]()
     var offset_dados = List[Int]()
     var offset_dic = List[Int]()
+    var deltas_usados = List[Bool]()
     var stats = List[StatsFaixa]()
     for g in range(len(inicios)):
         for c in range(len(colunas)):
@@ -2828,10 +2898,13 @@ def para_parquet_lote(
                 _acrescentar(arquivo, cab_dic)
                 _acrescentar(arquivo, corpo_dic_c)
                 uncomp += len(cab_dic) + n_dic
+            var usa_delta = not usa_dic and _vale_delta(fatia)
             var encoding = PCodificacao.PLAIN
             if usa_dic:
                 encoding = PCodificacao.RLE_DICTIONARY
-            var pagina = _pagina_de_dados(fatia, usa_dic)
+            elif usa_delta:
+                encoding = PCodificacao.DELTA_BINARY_PACKED
+            var pagina = _pagina_de_dados(fatia, usa_dic, usa_delta)
             var n_pag = len(pagina)
             var pagina_c = _aplicar_codec(pagina^, codec)
             var cabecalho = _cabecalho_de_dados(
@@ -2841,6 +2914,7 @@ def para_parquet_lote(
             _acrescentar(arquivo, cabecalho)
             _acrescentar(arquivo, pagina_c)
             uncomp += len(cabecalho) + n_pag
+            deltas_usados.append(usa_delta)
             offsets.append(inicio_chunk)
             tamanhos.append(len(arquivo) - inicio_chunk)
             tamanhos_uncomp.append(uncomp)
@@ -2896,11 +2970,17 @@ def para_parquet_lote(
             w.campo_i64(2, offsets[k])
             w.campo_struct(3)  # ColumnMetaData
             w.campo_i32(1, _tipo_parquet(colunas[c].tipo))
+            # o rodape declara o que a coluna usou: quem le por aqui decide se
+            # sabe abrir o arquivo antes de tocar nos dados
             if offset_dic[k] >= 0:
                 w.campo_lista(2, TTipo.I32, 3)
                 w.zigzag(PCodificacao.PLAIN)
                 w.zigzag(PCodificacao.RLE)
                 w.zigzag(PCodificacao.RLE_DICTIONARY)
+            elif deltas_usados[k]:
+                w.campo_lista(2, TTipo.I32, 2)
+                w.zigzag(PCodificacao.RLE)
+                w.zigzag(PCodificacao.DELTA_BINARY_PACKED)
             else:
                 w.campo_lista(2, TTipo.I32, 2)
                 w.zigzag(PCodificacao.PLAIN)

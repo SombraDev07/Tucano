@@ -89,8 +89,10 @@ struct LeitorThrift(Copyable, Movable):
         return resultado
 
     def zigzag(mut self, bytes: List[UInt8]) raises -> Int:
+        # deslocamento **logico**: o codificado e lido como sem sinal, e com
+        # `>> 1` aritmetico um valor com o bit 63 aceso voltaria errado
         var n = self.varint(bytes)
-        return (n >> 1) ^ -(n & 1)
+        return ((n >> 1) & 0x7FFFFFFFFFFFFFFF) ^ -(n & 1)
 
     def duplo(mut self, bytes: List[UInt8]) raises -> Float64:
         """DOUBLE vai em 8 bytes little-endian, sem varint."""
@@ -221,10 +223,18 @@ struct EscritorThrift(Copyable, Movable):
         self.bytes.append(b)
 
     def varint(mut self, valor: Int):
+        """Varint sem sinal, com o inteiro tratado como 64 bits sem sinal.
+
+        O deslocamento tem de ser **logico**. Com `>>= 7` aritmetico, um valor
+        negativo converge para -1 e fica la: `v != 0` nunca falha e o laco
+        escreve bytes ate a memoria acabar. Chega negativo aqui via `zigzag`,
+        que estoura para negativo perto do teto do Int64 — e min/max de coluna
+        inteira passa por ele.
+        """
         var v = valor
         while True:
             var b = v & 0x7F
-            v >>= 7
+            v = (v >> 7) & 0x01FFFFFFFFFFFFFF
             if v != 0:
                 self.bytes.append(UInt8(b | 0x80))
             else:
