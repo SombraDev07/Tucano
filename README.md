@@ -82,35 +82,55 @@ o que for mais conveniente na hora.
 Mojo 1.0 ou superior é o único requisito. **Não há `pip` no mundo Mojo** — o gerenciador é o
 `pixi` (conda), e é por ele que a distribuição acontece.
 
-### Hoje: clonar
+### Instalar: duas linhas
+
+Quem já tem Mojo instalado não precisa de mais nada:
 
 ```bash
-git clone git@github.com:SombraDev07/Tucano.git
-cd Tucano
-pixi run test
+git clone https://github.com/SombraDev07/Tucano.git
+mojo precompile Tucano/tucano -o "$(dirname "$(which mojo)")/../lib/mojo/tucano.mojoc"
 ```
 
-Para usar de **outro projeto**, aponte o `-I` para o clone:
+Pronto. `from tucano import ...` passa a funcionar em **qualquer diretório**, sem `-I` e sem
+copiar arquivo para dentro do projeto:
+
+```python
+from tucano import ler_csv, coluna, lit
+
+def main() raises:
+    var t = ler_csv("vendas.csv")
+    t.onde(coluna("valor").gt(lit(100.0))).coletar().mostrar()
+```
+
+```bash
+mojo analise.mojo
+```
+
+O que a segunda linha faz: o Mojo procura pacotes na pasta onde a própria `std` mora —
+`lib/mojo/`, ao lado do binário — e `mojo precompile` escreve o Tucano direto lá.
+
+Para **desinstalar**, apague o arquivo:
+
+```bash
+rm "$(dirname "$(which mojo)")/../lib/mojo/tucano.mojoc"
+```
+
+### As outras formas
+
+Sem instalar, apontando o `-I` para o clone — é o modo de quem vai mexer no Tucano:
 
 ```bash
 mojo -I /caminho/para/Tucano meu_script.mojo
 ```
 
-### Instalar no ambiente (dispensa o `-I`)
-
-O Mojo procura pacotes em `$CONDA_PREFIX/lib/mojo/`, que é onde a própria `std` mora. Pôr o
-Tucano lá faz `from tucano import ...` funcionar de qualquer diretório:
+Ou instalando a **fonte** em vez do pacote, que é portátil entre versões do compilador:
 
 ```bash
-# a fonte, portátil entre versões do compilador
-cp -r tucano "$CONDA_PREFIX/lib/mojo/tucano"
-
-# ou o pacote precompilado, muito mais rápido de carregar
-pixi run build && cp tucano.mojoc "$CONDA_PREFIX/lib/mojo/"
+cp -r tucano "$(dirname "$(which mojo)")/../lib/mojo/tucano"
 ```
 
-A diferença é grande e vale saber antes de escolher — rodar um script de três linhas que
-importa o Tucano, menor de cinco execuções:
+A diferença entre as duas últimas e o pacote precompilado é grande — rodar um script de três
+linhas que importa o Tucano, menor de cinco execuções:
 
 | forma | primeira execução | depois |
 |---|---|---|
