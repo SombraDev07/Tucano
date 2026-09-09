@@ -499,13 +499,13 @@ escrever PLAIN é rápido e produz um arquivo que todo leitor paga para sempre:
 
 | | ms | MiB |
 |---|---|---|
-| Tucano | **241** | **10,1** |
-| pyarrow | 436 | 31,9 |
-| Polars | 96 | 43,6 |
+| Tucano | **128** | **10,1** |
+| pyarrow | 440 | 31,9 |
+| Polars | 95 | 43,6 |
 
-**1,8× mais rápido que o pyarrow, com um arquivo 3,2× menor.** O Polars escreve em 40% do
-nosso tempo e produz 4,3× mais bytes. A escrita se paga uma vez; a leitura, sempre. Cada
-coluna de cada row group é codificada numa thread — ver `bench-escrita`.
+**3,4× mais rápido que o pyarrow, com um arquivo 3,2× menor.** O Polars escreve em 3/4 do
+nosso tempo e produz um arquivo **4,3× maior**. A escrita se paga uma vez; a leitura, sempre.
+Cada coluna de cada row group é codificada numa thread — ver `bench-escrita`.
 
 Uma thread contra uma thread: o Tucano passa pandas, Polars e o DuckDB neste workload. O que resta para o DuckDB em 16 núcleos é paralelismo, e nos operadores ele foi
 **medido e recusado**: compactar três colunas em três threads mediu 20 ms contra 13 da versão
@@ -553,7 +553,7 @@ A camada física não depende do tipo que o usuário vê. O planejador raciocina
 | Excel `.xlsx`: leitura e escrita, interop verificada | ✅ |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-246 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
+247 testes. Roadmap completo em [ROADMAP.md](ROADMAP.md); contrato de API em
 [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Por muitos marcos o roadmap registrou paralelismo como bloqueado pela linguagem. **Estava

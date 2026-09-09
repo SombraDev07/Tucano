@@ -335,6 +335,49 @@ def test_data_atravessa_os_operadores() raises:
         )
 
 
+def test_dicionario_numerico_faixa_e_extremos() raises:
+    """O dicionario numerico tem dois caminhos — indexacao direta quando a faixa
+    cabe na fatia, tabela hash quando nao cabe. Os dois tem de dar o mesmo
+    arquivo, inclusive com negativos e com a faixa que estoura Int64."""
+    var n = 600
+    var estreita = List[Int64](capacity=n)
+    var larga = List[Int64](capacity=n)
+    var extrema = List[Int64](capacity=n)
+    var reais = List[Float64](capacity=n)
+    for i in range(n):
+        # faixa estreita com negativos: indexacao direta
+        estreita.append(Int64(-50 + (i % 37)))
+        # faixa mais larga que a fatia: cai na tabela hash
+        larga.append(Int64((i % 29) * 1_000_000))
+        # min e max de Int64 na mesma coluna: `maior - menor` da a volta, e a
+        # guarda tem de mandar para o hash em vez de calcular uma faixa negativa
+        if i == 0:
+            extrema.append(Int64(-9223372036854775808))
+        elif i == 1:
+            extrema.append(Int64(9223372036854775807))
+        else:
+            extrema.append(Int64(i % 13))
+        # bits de Float64 com zeros no fim — o caso que quebrou a primeira
+        # tabela hash
+        reais.append(Float64(i % 47) * 1.5)
+
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_inteiros("estreita", estreita^))
+    cols.append(Coluna.de_inteiros("larga", larga^))
+    cols.append(Coluna.de_inteiros("extrema", extrema^))
+    cols.append(Coluna.de_reais("reais", reais^))
+    var t = Tabela(cols^)
+
+    var caminho = String("tests/fixtures/_saida_dicnum.parquet")
+    para_parquet(t, caminho, 256)
+    var volta = ler_parquet(caminho)
+    assert_equal(volta.linhas(), n)
+    for c in range(t.colunas()):
+        var nome = t.nomes()[c]
+        for i in range(n):
+            assert_equal(volta.pegar(nome).texto_em(i), t.pegar(nome).texto_em(i))
+
+
 def test_ler_csv_infere_tipos_e_na() raises:
     var tab = ler_csv("tests/fixtures/pessoas.csv")
     assert_equal(tab.linhas(), 4)

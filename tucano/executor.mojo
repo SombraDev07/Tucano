@@ -18,6 +18,7 @@ from .dtype import DType
 from .vetor import Vetor, Unidade
 from .plano import Etapa, TipoEtapa
 from .codecs import real64_para_bits
+from .buffer import espalhar_chave
 from .kernels import (
     contar_marcados,
     add_f64,
@@ -1270,8 +1271,7 @@ def calcular_grupos(cols: List[Coluna], chaves: List[String]) raises -> Grupos:
                     pids.unsafe_store(i, ausente_id)
                     continue
                 var chave = pval.unsafe_load(i)
-                var h = (chave * -7046029254386353131) & 0x7FFFFFFFFFFFFFFF
-                var idx = h & mascara
+                var idx = espalhar_chave(chave) & mascara
                 while True:
                     var g = pgt.unsafe_load(idx)
                     if g < 0:

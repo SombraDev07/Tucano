@@ -124,7 +124,7 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M31 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M32 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
 
 Falta para o 1.0, e nada disso é questão de escopo:
 
@@ -282,6 +282,7 @@ de datas, com a leitura no mesmo tempo. A dívida sai da lista.
 | M30 | A escrita, em ondas | crítica | ✅ feito | 594 → 430 ms; empata com o pyarrow |
 | M31 | A pergunta feita por linha | crítica | ✅ feito | 430 → 241 ms; 1,8× o pyarrow |
 | M31.1 | Recortar dentro da tarefa | crítica | ❌ **medido e recusado** | banda de memória; +8% com tudo num grupo |
+| M32 | O custo de codificar | crítica | ✅ feito | 251 → 128 ms; 3,4× o pyarrow |
 | M10.12 | Snappy sem cópia byte a byte | crítica | ✅ feito | leitura 259 → 102 ms |
 | M10.13 | SQL SELECT DISTINCT / ALL | crítica | ✅ feito | o mesmo `agrupar`, sem operador novo |
 | M14 | Excel (escrita) | crítica | ✅ feito | `para_xlsx` — ZIP com método 0, sem compressor |
@@ -2871,6 +2872,119 @@ codificar, não para o de organizar quem codifica.
 - [x] A/B com cinco execuções de cada lado, não uma
 - [x] a causa da piora medida em separado (141 ms somados contra 81 em série)
 - [x] dito explicitamente o que a medida mata e o que ela deixa de pé
+
+---
+
+## M32 — O custo de codificar ✅
+
+O M31.1 fechou a discussão sobre *quem* codifica e apontou para o que sobrava:
+dos ~250 ms da escrita no padrão, 223 eram codificação. Perfilando por coluna e
+por fase — somando o tempo de CPU das threads, não o relógio:
+
+| coluna | stats | dic | pág. dic | delta | página | snappy |
+|---|---|---|---|---|---|---|
+| id | 14 | **703** | 0 | 37 | 0 | 1 |
+| valor | 23 | 116 | 13 | 0 | 28 | 94 |
+| peso | 19 | 87 | 0 | 0 | 37 | 56 |
+| grupo | 12 | 0 | 0 | 0 | 58 | 59 |
+| nota | 13 | 0 | 9 | 0 | 63 | 81 |
+
+Metade do trabalho da escrita estava em montar o dicionário numérico da coluna
+`id` — que é **jogado fora**, porque coluna toda distinta não dicionariza.
+
+### 1. O `Dict` era o instrumento errado
+
+`Dict[Int, Int]`, duas buscas por linha (`in` e depois `[]`). Trocado por uma
+tabela de endereçamento aberto com a chave guardada e conferida — a mesma forma
+que `calcular_grupos` já usa no agrupamento por inteiro. Micro-benchmark, meio
+milhão de linhas:
+
+| | tudo distinto | 9973 distintos | 41 distintos |
+|---|---|---|---|
+| `Dict` | 51 ms | 3 ms | 2 ms |
+| tabela | **15 ms** | **0 ms** | **0 ms** |
+
+### 2. E aí mediu 15× pior
+
+A escrita foi de 251 para **3897 ms**. O perfil apontou a coluna: `valor`,
+sozinha, custava 11 320 ms.
+
+O hash era `chave * constante_ímpar`, e a posição saía dos bits **baixos** do
+produto. Multiplicação concentra entropia nos bits **altos**; os baixos ela
+quase não mexe. Com inteiro corrido isso passa despercebido. Com o padrão de
+bits de um `Float64` pequeno — `2,5`, `1250,0` — não: a mantissa termina em
+dezenas de zeros, o produto herda os zeros, e todas as chaves caem nos mesmos
+slots.
+
+| `valor`, 9973 distintos em 500 mil linhas | sondagens por linha | ms |
+|---|---|---|
+| só multiplicar | **4975** | 1088 |
+| com mistura de bits | **1** | 2 |
+
+`espalhar_chave()` faz o passo que faltava — dois `^ (z >> k)` que trazem os bits
+altos para baixo, com deslocamento **lógico** (a mesma armadilha do varint e do
+zigzag). Com ela: 251 → **198 ms**.
+
+### 3. Faixa estreita não precisa de hash nenhum
+
+`_stats_de_coluna` já calcula min e max da fatia, logo antes. Quando
+`max - min + 1` cabe na fatia, o código é o próprio valor deslocado — sem hash,
+sem sondagem, sem comparar chave. É a saída que `calcular_grupos` já toma, e a
+tabela direta nunca fica maior que a fatia que a gerou, então a memória continua
+limitada com vinte tarefas em voo.
+
+É exatamente o caso da coluna-chave: `id` de 0 a n-1 tem faixa igual ao número de
+linhas. 198 → **128 ms**.
+
+### O caminho todo
+
+| 5M × 5 | padrão (500k) | tudo num grupo |
+|---|---|---|
+| M31 | 251 ms | 557 ms |
+| tabela, hash ingênuo | 3897 | 12274 |
+| com `espalhar_chave` | 198 | 508 |
+| **com indexação direta** | **128** | **167** |
+
+E o dicionário por coluna, em tempo de CPU: `id` 703 → 99, `valor` 116 → 86,
+`peso` 87 → 40.
+
+### Onde a escrita chegou
+
+| 5M × 5, row groups de 500k | ms | MiB |
+|---|---|---|
+| **Tucano** | **128** | **10,1** |
+| pyarrow | 440 | 31,9 |
+| Polars | 95 | 43,6 |
+
+**3,4× mais rápido que o pyarrow.** O Polars ainda escreve em 3/4 do tempo — e
+produz um arquivo **4,3× maior**. No M27 a escrita era 2,7× mais lenta que a do
+pyarrow; são 20× em cinco marcos, todos por trabalho que deixou de acontecer.
+
+### O mesmo defeito estava no agrupamento
+
+`calcular_grupos` usava a mesma multiplicação sem mistura. Ali as chaves são
+inteiros, então nunca foi catastrófico — mas carimbo de tempo em microssegundos
+gravado em segundos inteiros é múltiplo de um milhão, e um milhão termina em seis
+zeros binários. Medido, 1M de linhas e 200 mil grupos:
+
+| chave | antes | depois |
+|---|---|---|
+| datahora em segundos inteiros | 21 ms | **19** |
+| datahora em milissegundos | 21 | **19** |
+| inteiro múltiplo de 1.000.000 | 23 | **20** |
+| inteiro sem zeros no fim | 19 | **18** |
+
+Dez por cento onde a chave tem zeros no fim, nada onde não tem. `espalhar_chave`
+mora em `buffer.mojo` e serve aos dois.
+
+### Critério de saída
+
+- [x] o perfil por coluna e por fase, antes de mexer
+- [x] o arquivo sai byte a byte igual em quatro formas, uma delas toda com NA
+- [x] a piora de 15× diagnosticada até a causa, e a causa medida em sondagens
+- [x] teste cobrindo os dois caminhos: faixa estreita com negativos, faixa larga,
+      `Int64` mínimo e máximo na mesma coluna, e bits de `Float64`
+- [x] 247 testes verdes, oito passos de verificação verdes
 
 ---
 

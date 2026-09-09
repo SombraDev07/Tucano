@@ -883,7 +883,7 @@ from .codecs import (
 )
 from std.collections import Dict
 from .coluna import Coluna
-from .buffer import StringStore
+from .buffer import StringStore, espalhar_chave
 from .executor import coletar_linhas
 from .dtype import DType
 from .schema import Campo, Schema
@@ -2438,7 +2438,7 @@ struct _DicNumerico(Movable):
         self.largura = largura
 
 
-def _dicionario_numerico(col: Coluna) raises -> _DicNumerico:
+def _dicionario_numerico(col: Coluna, stats: StatsFaixa) raises -> _DicNumerico:
     """Dicionariza uma coluna numerica, se isso encolher a pagina.
 
     O escritor ja fazia isso com texto desde o M10.6, e o leitor sempre soube
@@ -2456,30 +2456,134 @@ def _dicionario_numerico(col: Coluna) raises -> _DicNumerico:
         return _DicNumerico(vazio_i^, vazio_c^, False)
 
     var n = col.tamanho()
-    var mapa = Dict[Int, Int]()
     var distintos = List[Int64]()
-    var codigos = List[Int32]()
+    var codigos = List[Int32](capacity=n)
     var presentes = 0
     # `contar_ausentes` e O(1); `eh_ausente` e uma chamada que pode levantar,
     # por linha. Perguntar uma vez fora do laco e a mesma resposta mais barata.
     var com_ausentes = col.contar_ausentes() > 0
+
+    # Tabela de enderecamento aberto com a chave guardada e conferida — a mesma
+    # forma que `calcular_grupos` usa no agrupamento por inteiro, e pela mesma
+    # razao: o hash diz **onde procurar**, nunca a resposta. Era um
+    # `Dict[Int, Int]`, e o `Dict` custava tres vezes mais numa coluna toda
+    # distinta (51 ms contra 15 em meio milhao de linhas), que e justamente a
+    # coluna em que o dicionario e montado para ser jogado fora no fim.
+    #
+    # Cresce em vez de nascer com `2 * linhas`: sao ate vinte destas vivas ao
+    # mesmo tempo nas ondas de escrita, e uma coluna de quarenta valores
+    # distintos nao tem por que reservar dezesseis megabytes.
+    var cap = 1024
+    var chaves = List[Int64]()
+    chaves.resize(cap, Int64(0))
+    var onde = List[Int32]()
+    onde.resize(cap, Int32(-1))
+    var mascara = cap - 1
+    var limite = (cap * 7) // 10
+
+    # o tipo e a largura decidem fora do laco, como nos kernels
+    var eh_real = col.tipo == DType.REAL
+    var estreito = col.ints.largura == 4
+    var preal = col.reals.unsafe_ptr()
+    var pint = col.ints.bytes.unsafe_ptr().unsafe_bitcast[Int64]()
+    var pint32 = col.ints.bytes.unsafe_ptr().unsafe_bitcast[Int32]()
+
+    # Faixa estreita: o codigo e o proprio valor deslocado, e nao ha hash
+    # nenhum — a mesma saida que `calcular_grupos` toma no agrupamento por
+    # inteiro. A tabela direta nunca fica maior que a fatia que a gerou, entao
+    # a memoria continua limitada mesmo com vinte tarefas em voo.
+    #
+    # E o caminho da coluna-chave: `id` de 0 a n-1 tem faixa igual ao numero de
+    # linhas, e montar o dicionario dela — para joga-lo fora no fim, porque
+    # coluna toda distinta nao dicionariza — era o item mais caro da escrita.
+    var faixa = 0
+    if not eh_real and stats.tem:
+        var largura_faixa = stats.max_bits - stats.min_bits
+        if largura_faixa >= 0 and largura_faixa + 1 <= n:
+            faixa = largura_faixa + 1
+    if faixa > 0:
+        var menor = stats.min_bits
+        var direto = List[Int32]()
+        direto.resize(faixa, Int32(-1))
+        var pd = direto.unsafe_ptr()
+        for i in range(n):
+            if com_ausentes and col.eh_ausente(i):
+                continue
+            presentes += 1
+            var bruto = (
+                Int64(pint32.unsafe_load(i)) if estreito else pint.unsafe_load(i)
+            )
+            var s = Int(bruto) - menor
+            var g = pd.unsafe_load(s)
+            if g < 0:
+                var novo = Int32(len(distintos))
+                pd.unsafe_store(s, novo)
+                distintos.append(bruto)
+                codigos.append(novo)
+            else:
+                codigos.append(g)
+        return _fechar_dicionario(col, distintos^, codigos^, presentes)
+
     for i in range(n):
         if com_ausentes and col.eh_ausente(i):
             continue
         presentes += 1
-        var bruto: Int
-        if col.tipo == DType.REAL:
-            bruto = real64_para_bits(col.reals[i])
+        var bruto: Int64
+        if eh_real:
+            bruto = Int64(real64_para_bits(preal.unsafe_load(i)))
+        elif estreito:
+            bruto = Int64(pint32.unsafe_load(i))
         else:
-            bruto = Int(col.ints[i])
-        if bruto in mapa:
-            codigos.append(Int32(mapa[bruto]))
-        else:
-            var novo = len(distintos)
-            mapa[bruto] = novo
-            distintos.append(Int64(bruto))
-            codigos.append(Int32(novo))
+            bruto = pint.unsafe_load(i)
 
+        var j = espalhar_chave(Int(bruto)) & mascara
+        var pk = chaves.unsafe_ptr()
+        var po = onde.unsafe_ptr()
+        while True:
+            var g = po.unsafe_load(j)
+            if g < 0:
+                var novo = Int32(len(distintos))
+                po.unsafe_store(j, novo)
+                pk.unsafe_store(j, bruto)
+                distintos.append(bruto)
+                codigos.append(novo)
+                if len(distintos) > limite:
+                    cap *= 2
+                    mascara = cap - 1
+                    limite = (cap * 7) // 10
+                    var nk = List[Int64]()
+                    nk.resize(cap, Int64(0))
+                    var no = List[Int32]()
+                    no.resize(cap, Int32(-1))
+                    var pnk = nk.unsafe_ptr()
+                    var pno = no.unsafe_ptr()
+                    for d in range(len(distintos)):
+                        var c2 = distintos[d]
+                        var j2 = espalhar_chave(Int(c2)) & mascara
+                        while pno.unsafe_load(j2) >= 0:
+                            j2 = (j2 + 1) & mascara
+                        pno.unsafe_store(j2, Int32(d))
+                        pnk.unsafe_store(j2, c2)
+                    chaves = nk^
+                    onde = no^
+                break
+            if pk.unsafe_load(j) == bruto:
+                codigos.append(g)
+                break
+            j = (j + 1) & mascara
+
+    return _fechar_dicionario(col, distintos^, codigos^, presentes)
+
+
+def _fechar_dicionario(
+    col: Coluna,
+    var distintos: List[Int64],
+    var codigos: List[Int32],
+    presentes: Int,
+) raises -> _DicNumerico:
+    """O criterio de tamanho, no fim dos dois caminhos de montagem."""
+    var vazio_i = List[Int64]()
+    var vazio_c = List[Int32]()
     if presentes == 0 or len(distintos) == 0:
         return _DicNumerico(vazio_i^, vazio_c^, False)
 
@@ -2837,7 +2941,7 @@ def _codificar_pedaco(
     var usa_dic = fatia.tipo == DType.TEXTO and fatia.eh_dicionarizada()
     var dic_num = _DicNumerico(List[Int64](), List[Int32](), False)
     if not usa_dic:
-        dic_num = _dicionario_numerico(fatia)
+        dic_num = _dicionario_numerico(fatia, stats)
     var usa_dic_num = dic_num.vale
 
     var bytes = List[UInt8]()

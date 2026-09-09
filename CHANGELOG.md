@@ -3,6 +3,57 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [0.41.0] — O custo de codificar
+
+Metade do trabalho da escrita estava em montar o dicionario numerico da coluna
+`id` — 703 dos ~1500 ms de CPU — e esse dicionario e **jogado fora**, porque
+coluna toda distinta nao dicionariza.
+
+| 5M x 5 | padrao (500k) | tudo num grupo |
+|---|---|---|
+| 0.40.1 | 251 ms | 557 ms |
+| tabela em vez de `Dict`, hash ingenuo | 3897 | 12274 |
+| com mistura de bits | 198 | 508 |
+| **com indexacao direta** | **128** | **167** |
+
+| 5M x 5, row groups de 500k | ms | MiB |
+|---|---|---|
+| **Tucano** | **128** | **10,1** |
+| pyarrow | 440 | 31,9 |
+| Polars | 95 | 43,6 |
+
+**3,4x mais rapido que o pyarrow**, com arquivo 3,2x menor. O Polars escreve em
+3/4 do tempo e produz um arquivo 4,3x maior.
+
+### Corrigido
+
+- **A tabela hash lia os bits errados.** `chave * constante_impar` concentra a
+  entropia nos bits **altos**, e uma tabela de potencia de dois le os **baixos**.
+  Com o padrao de bits de um `Float64` pequeno — que termina em dezenas de zeros
+  — todas as chaves caiam nos mesmos slots: **4975 sondagens por linha**, 1088 ms
+  onde a versao correta leva 2. `espalhar_chave()` faz a mistura que faltava.
+- **O mesmo defeito estava no agrupamento por inteiro.** Ali as chaves nunca sao
+  `Float64`, mas carimbo de tempo em microssegundos gravado em segundos inteiros
+  e multiplo de um milhao, que termina em seis zeros binarios. 21 -> 19 ms em 1M
+  de linhas e 200 mil grupos, e nada onde a chave nao tem zeros no fim.
+
+### Alterado
+
+- O dicionario numerico deixou de usar `Dict[Int, Int]` (duas buscas por linha) e
+  passou a usar endereçamento aberto com a chave conferida — a mesma forma que
+  `calcular_grupos` ja usava. A tabela cresce em vez de nascer com `2 x linhas`:
+  sao ate vinte delas vivas ao mesmo tempo nas ondas de escrita.
+- **Faixa estreita nao usa hash nenhum.** Quando `max - min + 1` cabe na fatia —
+  e as estatisticas ja calcularam os dois — o codigo e o proprio valor deslocado.
+  E o caso da coluna-chave, que era o item mais caro da escrita.
+
+### Adicionado
+
+- `espalhar_chave()` em `buffer.mojo`, com o numero das sondagens no docstring.
+- Teste cobrindo os dois caminhos do dicionario: faixa estreita com negativos,
+  faixa larga, `Int64` minimo e maximo na mesma coluna (a faixa da a volta, e a
+  guarda tem de mandar para o hash) e bits de `Float64`.
+
 ## [0.40.1] — Recortar dentro da tarefa: medido e recusado
 
 Sem mudanca de codigo. A 0.39.0 deixou registrado que recortar as fatias era a
