@@ -82,7 +82,18 @@ o que for mais conveniente na hora.
 Mojo 1.0 ou superior é o único requisito. **Não há `pip` no mundo Mojo** — o gerenciador é o
 `pixi` (conda), e é por ele que a distribuição acontece.
 
-### Instalar: duas linhas
+### Pelo canal conda
+
+```bash
+pixi add tucano -c https://sombradev07.github.io/Tucano
+```
+
+O `-c` some pondo o canal no `pixi.toml` do seu projeto, ou uma vez por máquina com
+`pixi config append default-channels https://sombradev07.github.io/Tucano`. Sem `-c` **nenhum**
+só quando o Mojo estiver no conda-forge — hoje ele não está, e o conda-forge exige que as
+dependências estejam lá.
+
+### Sem canal: duas linhas
 
 Quem já tem Mojo instalado não precisa de mais nada:
 

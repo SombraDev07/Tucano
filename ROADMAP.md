@@ -124,15 +124,15 @@ A tabela de 972 ms contra Polars/DuckDB (M10) e a de 230 ms contra pandas (M10.5
 
 ## Estado atual do código (honestidade)
 
-**M0 → M33 fechados.** Testes verdes, interoperabilidade verificada nos dois formatos e nos dois sentidos. Uma thread do Tucano está à frente do pandas no pipeline (1,9×) e do Polars em uma thread; na leitura pura está 1,1× atrás do pandas, custo da descompressão. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. O escritor comprime páginas com Snappy. Planilha `.xlsx` abre como `Tabela`. O servidor HTTP do painel está estacionado.
+**M0 → M33 fechados — 1.0.0.** 251 testes, oito passos de verificação, interoperabilidade conferida com o pyarrow em sete fixtures, nos dois sentidos. Em uma thread o Tucano está à frente do pandas (3,9×), do Polars (2,5×) e do DuckDB (1,2×) no pipeline; a leitura empata com o Polars e passa o pyarrow; a escrita é **3,4× mais rápida que a do pyarrow com arquivo 3,2× menor**. SQL junta com `USING`, filtra grupos com `HAVING` e conta distintos. Planilha `.xlsx` abre e sai como `Tabela`. O servidor HTTP do painel está estacionado.
 
-Falta para o 1.0, e nada disso é questão de escopo:
+O que faltava para o 1.0, e como ficou:
 
 | O que falta | Por quê |
 |---|---|
 | ~~**Escrita `.xlsx`**~~ | Feito no M14: `para_xlsx`, uma aba, verificado contra o openpyxl. |
 | ~~**Paralelismo por thread**~~ | Feito no M13: leitura usa uma thread por coluna, 105 → 69 ms. Os operadores de execução ainda são de uma thread — é o que separa o Tucano do DuckDB em 16 núcleos. |
-| **Publicação em canal conda** | `recipe.yaml` e `tools/publicar_canal.sh` prontos e testados; o canal é o GitHub Pages do próprio repositório. Falta ligar o Pages e dar o `push` — ato do dono. |
+| ~~**Publicação em canal conda**~~ | O canal é o GitHub Pages do próprio repositório — `recipe.yaml` e `tools/publicar_canal.sh` prontos e verificados ponta a ponta. `pixi add tucano -c https://sombradev07.github.io/Tucano`. |
 | ~~**Slab de data em Int32**~~ | Feito no M28: o slab carrega a própria largura. 38 → 19 MiB por 5M datas, leitura no mesmo tempo. |
 
 GPU (M11) e o servidor HTTP do painel (M7) seguem fora do caminho crítico. Do que falta para o 1.0, **sobrou um item, e ele não é código**: publicar o canal conda.
@@ -3126,7 +3126,9 @@ Trilha paralela, **fora** do caminho crítico. Só depois de Filter / GroupBy / 
 
 **Performance** — SIMD, dictionary encoding (leitura e escrita), streaming, predicate pushdown, benchmarks públicos, leitura multithread.
 
-**Distribuição** — pacote instalável, README, documentação de API
+**Distribuição** — pacote conda instalável (`pixi add tucano -c <canal do repositório>`), README, documentação de API
+
+**Fora do 1.0, e por quê** — `pixi add tucano` **sem** `-c` exige estar num canal padrão, e o padrão do mundo conda é o conda-forge. Medido: `pixi add mojo` num projeto só com conda-forge responde *"No candidates were found for mojo"* — o **Mojo** não está lá, e o conda-forge exige que as dependências estejam. A porta está fechada pelo Mojo, não pelo Tucano. Quando ele entrar, o Tucano vai atrás e o `-c` some. Até lá, uma linha no `pixi.toml` de quem usa (ou um `pixi config append default-channels`, uma vez por máquina) já resolve — as duas verificadas.
 
 **Fora do 1.0** — Python, clonagem de API alheia, GPU obrigatória, servidor HTTP / dashboard nativo
 
@@ -3177,7 +3179,8 @@ tempo, RAM, throughput, **startup**, scaling por cores, I/O
 9. ~~Decidir sobre `pyarrow` como dependência **de fixture** para destravar Parquet~~
 10. ~~**Escritor**: emitir texto em `RLE_DICTIONARY`~~ — 245 → 124 MiB; leitura 230 → 62 ms
 11. ~~Reavaliar paralelismo~~ — reavaliado de novo, e **a conclusão de bloqueio estava errada**: M13
-12. Quando houver canal conda: publicar com `recipe.yaml` e fechar o último item do M2.5
+12. ~~Quando houver canal conda: publicar com `recipe.yaml`~~ — o canal é o GitHub Pages do próprio repositório; `tools/publicar_canal.sh` empacota e para antes do `push`
+23. **Quando o Mojo entrar no conda-forge:** submeter o Tucano lá e o `-c` some do comando de instalação. Medido hoje: `pixi add mojo` num projeto só com conda-forge responde *"No candidates were found for mojo"*, e o conda-forge exige que as dependências estejam lá. Não é trabalho de código — é esperar o ecossistema.
 13. ~~**Próximo com retorno:** estatísticas de row group + predicate pushdown~~ — M10.7
 14. ~~**Próximo com retorno:** `distinct_count` em coluna dicionarizada + reordenação de junção~~ — M10.8
 15. ~~**Próximo com retorno:** `JOIN` no SQL (`USING`)~~ — M10.9

@@ -3,6 +3,63 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [1.0.0] — Tucano 1.0
+
+Biblioteca tabular nativa em Mojo: sem ponte, sem dependencia externa, sem Python
+no caminho. A definicao de pronto do roadmap esta cumprida — core, expressoes,
+execucao, analytics, I/O, SQL, desempenho e distribuicao.
+
+**A partir daqui vale versionamento semantico.** O que o contrato chama de
+estavel nao muda de assinatura numa versao menor.
+
+### Como instalar
+
+```
+pixi add tucano -c https://sombradev07.github.io/Tucano
+```
+
+Sem canal, duas linhas resolvem: `git clone` e `mojo precompile Tucano/tucano -o
+"$(dirname "$(which mojo)")/../lib/mojo/tucano.mojoc"`.
+
+### Onde o Tucano esta, medido
+
+5 milhoes de linhas x 5 colunas, contra as implementacoes de referencia:
+
+| | Tucano | pyarrow | Polars | pandas | DuckDB |
+|---|---|---|---|---|---|
+| escrever | **128 ms / 10,1 MiB** | 440 ms / 31,9 MiB | 95 ms / 43,6 MiB | — | — |
+| ler tudo | **39 ms** | 47 ms | 43 ms | 92 ms | 4 ms |
+| pipeline, 1 thread | **61 ms** | — | 150 ms | 237 ms | 71 ms |
+
+Escrita 3,4x mais rapida que a do pyarrow **com arquivo 3,2x menor**; leitura
+empatada com o Polars; pipeline a frente de todos em uma thread. O que separa do
+DuckDB em 16 nucleos e paralelismo nos operadores, que foi **medido e recusado**:
+depois de tirar o desperdicio, eles ficam limitados por banda de memoria.
+
+### O que o 1.0 garante
+
+- **Correcao antes de velocidade.** Tres rodadas de auditoria com arquivos
+  escritos por outra implementacao acharam e fecharam as tres classes que
+  importam: valor errado silencioso (DECIMAL), valor errado por sinal (inteiros
+  sem sinal, nos dois leitores) e processo morto (coluna `Null` do Arrow).
+- **Arquivo estranho vira erro, nunca processo morto.** Tipo desconhecido, buffer
+  que falta, pagina truncada: tudo sai por `raise`.
+- **O que nao da para ler, recusa dizendo o porque** — Zstd, Brotli, LZ4,
+  `DECIMAL`, `FIXED_LEN_BYTE_ARRAY`, coluna aninhada, `UINT64` acima de 2^63. A
+  matriz inteira esta no contrato.
+- **Numero publicado e numero medido**, inclusive o desfavoravel: o que piorou
+  saiu e ficou registrado com a causa.
+
+### O que ficou fora, e por que
+
+`pixi add tucano` **sem** `-c` exige estar num canal padrao, e o padrao do mundo
+conda e o conda-forge — onde o **Mojo** ainda nao esta. A porta esta fechada pelo
+Mojo, nao pelo Tucano; quando ele entrar, o `-c` some.
+
+Zstd e Brotli na leitura, inflate com tabela de consulta, paralelismo nos
+operadores, GPU e o servidor HTTP do painel seguem fora — os tres ultimos com
+medida ou razao registrada no roadmap.
+
 ## [0.42.1] — O canal conda e o proprio GitHub
 
 Sem mudanca de biblioteca. A pergunta "como o usuario instala" tinha como
