@@ -11,6 +11,10 @@
 # gh-pages, nao para a main
 /canal
 
+# worktree da branch gh-pages, criado por tools/publicar_canal.sh. Um `git add -A`
+# distraido o comita como submodulo — e o que aconteceu uma vez.
+/.publicacao
+
 # fixtures Parquet SAO commitadas (geradas por `pixi run -e fixtures fixtures`)
 
 # saidas de teste
