@@ -19,6 +19,7 @@ from .vetor import Vetor, Unidade
 from .plano import Etapa, TipoEtapa
 from .codecs import real64_para_bits
 from .buffer import espalhar_chave
+from .texto import minusculas, maiusculas, aparar, sem_acento, normalizar
 from .kernels import (
     contar_marcados,
     add_f64,
@@ -267,6 +268,35 @@ def _avaliar_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> Vetor:
         return Vetor.constante_numerica(linhas, 0.0)
     if k == Kind.LIT_STR:
         return Vetor.constante_textual(linhas, n.texto)
+
+    if (
+        k == Kind.MINUSCULAS
+        or k == Kind.MAIUSCULAS
+        or k == Kind.APARAR
+        or k == Kind.SEM_ACENTO
+        or k == Kind.NORMALIZAR
+    ):
+        var filho = _avaliar_no(expr, n.left, cols)
+        if not filho.eh_texto:
+            raise Error(
+                "transformacao de texto exige coluna de texto: "
+                + expr.descrever()
+            )
+        var v = Vetor.textual(linhas)
+        v.na = filho.na.copy()
+        for i in range(linhas):
+            ref t = filho.textos[i]
+            if k == Kind.MINUSCULAS:
+                v.textos[i] = minusculas(t)
+            elif k == Kind.MAIUSCULAS:
+                v.textos[i] = maiusculas(t)
+            elif k == Kind.APARAR:
+                v.textos[i] = aparar(t)
+            elif k == Kind.SEM_ACENTO:
+                v.textos[i] = sem_acento(t)
+            else:
+                v.textos[i] = normalizar(t)
+        return v^
 
     if k == Kind.ANO or k == Kind.MES or k == Kind.DIA:
         var filho = _avaliar_no(expr, n.left, cols)
@@ -719,6 +749,14 @@ def tipo_resultado(expr: Expr, idx: Int, esq: List[Campo]) raises -> Int:
         or k == Kind.SEGUNDO
     ):
         return DType.INTEIRO
+    if (
+        k == Kind.MINUSCULAS
+        or k == Kind.MAIUSCULAS
+        or k == Kind.APARAR
+        or k == Kind.SEM_ACENTO
+        or k == Kind.NORMALIZAR
+    ):
+        return DType.TEXTO
     if k == Kind.DIV:
         return DType.REAL
     if k == Kind.ADD or k == Kind.SUB or k == Kind.MUL:

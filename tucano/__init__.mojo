@@ -49,6 +49,11 @@ from .expr import (
     hora,
     minuto,
     segundo,
+    minusculas,
+    maiusculas,
+    aparar,
+    sem_acento,
+    normalizar,
 )
 from .vetor import Vetor, Unidade
 from .plano import Etapa, TipoEtapa

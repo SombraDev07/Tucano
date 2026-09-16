@@ -14,6 +14,7 @@ from tucano import (
     lazy,
     coluna,
     Expr,
+    normalizar,
     lit,
     lit_int,
     lit_texto,
@@ -81,6 +82,13 @@ from tucano.codecs import (
 from tucano.deflate import inflar
 from tucano.codecs import codificar_delta_i64, decodificar_delta_i64
 from tucano.zstd import descomprimir_zstd
+from tucano.texto import (
+    minusculas as minusculas_txt,
+    maiusculas as maiusculas_txt,
+    aparar as aparar_txt,
+    sem_acento as sem_acento_txt,
+    normalizar as normalizar_txt,
+)
 from std.pathlib import Path
 from tucano.parquet import PCodificacao
 from tucano.thrift import LeitorThrift
@@ -697,6 +705,66 @@ def test_parquet_zstd() raises:
         var nome = g.nomes()[c]
         for i in range(g.linhas()):
             assert_equal(z.pegar(nome).texto_em(i), g.pegar(nome).texto_em(i))
+
+
+def test_padronizar_texto() raises:
+    """Planilha de gente escreve a mesma cidade de quatro jeitos."""
+    assert_equal(minusculas_txt("São PAULO"), "são paulo")
+    assert_equal(maiusculas_txt("são paulo"), "SÃO PAULO")
+    assert_equal(aparar_txt("  São   Paulo  "), "São Paulo")
+    assert_equal(sem_acento_txt("Açaí e coração"), "Acai e coracao")
+    assert_equal(normalizar_txt("  São   PAULO "), "sao paulo")
+    assert_equal(normalizar_txt("Sao Paulo"), "sao paulo")
+    assert_equal(normalizar_txt("são paulo"), "sao paulo")
+
+    # o que nao esta na tabela passa intacto: perder o caractere seria pior
+    assert_equal(sem_acento_txt("日本語"), "日本語")
+    assert_equal(normalizar_txt("S. Paulo"), "s. paulo")  # pontuacao fica
+
+    # e como expressao, que e onde isso serve para alguma coisa
+    var vals = List[String]()
+    vals.append(" São  PAULO ")
+    vals.append("Sao Paulo")
+    vals.append("são paulo")
+    vals.append("Curitiba")
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("cidade", vals^))
+    cols.append(Coluna.de_inteiros("v", [Int64(1), Int64(2), Int64(3), Int64(4)]))
+    var t = Tabela(cols^)
+
+    # sem padronizar, quatro grafias viram quatro grupos
+    var cru = t.agrupar(["cidade"]).agregar([soma("v")]).coletar()
+    assert_equal(cru.linhas(), 4)
+
+    # com, as tres de São Paulo viram uma
+    var limpo = (
+        t.com_coluna("c", normalizar(coluna("cidade")))
+         .agrupar(["c"])
+         .agregar([soma("v")])
+         .coletar()
+    )
+    assert_equal(limpo.linhas(), 2)
+
+    # filtrar pelo texto padronizado acha as tres grafias
+    assert_equal(
+        t.onde(normalizar(coluna("cidade")).eq(lit_texto("sao paulo")))
+         .coletar().linhas(),
+        3,
+    )
+
+    # o plano diz o que faz
+    assert_true(
+        "normalizar" in t.com_coluna("c", normalizar(coluna("cidade"))).descrever()
+    )
+
+    # coluna que nao e texto avisa em vez de inventar
+    var pegou = False
+    try:
+        _ = t.com_coluna("x", normalizar(coluna("v"))).coletar()
+    except e:
+        pegou = True
+        assert_true("texto" in String(e))
+    assert_true(pegou)
 
 
 def test_parquet_recusa_decimal() raises:

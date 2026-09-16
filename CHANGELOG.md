@@ -3,6 +3,36 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [1.4.0] — Padronizar texto
+
+Faltava o verbo que mais se usa limpando planilha. A API de expressao tinha
+comparacao, logica, aritmetica, data e busca de trecho — e **nenhuma
+transformacao**: `" São  PAULO "`, `"Sao Paulo"` e `"são paulo"` viravam tres
+grupos no `agrupar`, e nao havia como juntar sem sair da biblioteca.
+
+### Adicionado
+
+- **`normalizar(coluna(nome))`** — aparar + minusculas + sem acento, a
+  padronizacao que se faz antes de agrupar ou juntar. As partes tambem existem
+  soltas: `minusculas`, `maiusculas`, `aparar` e `sem_acento`.
+- `tucano/texto.mojo` com as funcoes puras, usaveis fora de expressao.
+
+Medido no caso que motivou: cinco linhas com quatro grafias de duas cidades
+davam cinco grupos; com a coluna padronizada dao dois, com as somas certas.
+
+O que `normalizar` **nao** faz: tirar pontuacao. `"S. Paulo"` continua com o
+ponto, porque decidir que pontuacao e ruido depende do dado — num nome de cidade
+o ponto sobra, num codigo de produto ele significa. E o que nao esta na tabela de
+acentos passa intacto: `日本語` sai como entrou, porque perder o caractere seria
+pior que nao transformar.
+
+### Corrigido
+
+- **`descrever()` matava o processo** num no de expressao que ele nao conhecesse:
+  caia no caminho binario e indexava `nodes[-1]`, e em Mojo isso nao levanta —
+  aborta, e o `try` de quem chamou nao pega. Foi assim que os verbos novos
+  apareceram, como crash em vez de erro. Agora levanta dizendo o tipo do no.
+
 ## [1.3.1] — Compilar calado
 
 Quem instalava o Tucano via canal via **quarenta linhas de aviso do meu codigo**

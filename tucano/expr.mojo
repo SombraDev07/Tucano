@@ -39,6 +39,12 @@ struct Kind:
     comptime HORA = 43
     comptime MINUTO = 44
     comptime SEGUNDO = 45
+    # transformacoes de texto: entram texto e saem texto
+    comptime MINUSCULAS = 50
+    comptime MAIUSCULAS = 51
+    comptime APARAR = 52
+    comptime SEM_ACENTO = 53
+    comptime NORMALIZAR = 54
 
 
 struct ExprNode(Copyable, Movable):
@@ -262,6 +268,36 @@ def segundo(var alvo: Expr) -> Expr:
     return _unario(Kind.SEGUNDO, alvo^)
 
 
+def minusculas(var alvo: Expr) -> Expr:
+    """Tudo em minuscula, inclusive vogal acentuada."""
+    return _unario(Kind.MINUSCULAS, alvo^)
+
+
+def maiusculas(var alvo: Expr) -> Expr:
+    """Tudo em maiuscula, inclusive vogal acentuada."""
+    return _unario(Kind.MAIUSCULAS, alvo^)
+
+
+def aparar(var alvo: Expr) -> Expr:
+    """Tira espaco das pontas e junta os do meio."""
+    return _unario(Kind.APARAR, alvo^)
+
+
+def sem_acento(var alvo: Expr) -> Expr:
+    """Troca vogal acentuada pela sem acento, e cedilha por `c`."""
+    return _unario(Kind.SEM_ACENTO, alvo^)
+
+
+def normalizar(var alvo: Expr) -> Expr:
+    """Aparar + minusculas + sem acento.
+
+    E a padronizacao que se faz antes de agrupar ou juntar: `" São  PAULO "`,
+    `"Sao Paulo"` e `"são paulo"` viram todos `"sao paulo"`, e o `agrupar` para
+    de devolver tres grupos para a mesma cidade.
+    """
+    return _unario(Kind.NORMALIZAR, alvo^)
+
+
 def ano(var alvo: Expr) -> Expr:
     """Extrai o ano de uma expressao de data."""
     return _unario(Kind.ANO, alvo^)
@@ -298,6 +334,16 @@ def _descrever_no(expr: Expr, i: Int) raises -> String:
         return 'lit_datahora("' + datahora_para_texto(Int(n.i64)) + '")'
     if k == Kind.NOT:
         return "nao(" + _descrever_no(expr, n.left) + ")"
+    if k == Kind.MINUSCULAS:
+        return "minusculas(" + _descrever_no(expr, n.left) + ")"
+    if k == Kind.MAIUSCULAS:
+        return "maiusculas(" + _descrever_no(expr, n.left) + ")"
+    if k == Kind.APARAR:
+        return "aparar(" + _descrever_no(expr, n.left) + ")"
+    if k == Kind.SEM_ACENTO:
+        return "sem_acento(" + _descrever_no(expr, n.left) + ")"
+    if k == Kind.NORMALIZAR:
+        return "normalizar(" + _descrever_no(expr, n.left) + ")"
     if k == Kind.ANO:
         return "ano(" + _descrever_no(expr, n.left) + ")"
     if k == Kind.MES:
@@ -310,6 +356,17 @@ def _descrever_no(expr: Expr, i: Int) raises -> String:
         return "minuto(" + _descrever_no(expr, n.left) + ")"
     if k == Kind.SEGUNDO:
         return "segundo(" + _descrever_no(expr, n.left) + ")"
+
+    if n.left < 0 or n.right < 0:
+        # chegou aqui um no que nao e binario, e ninguem acima o tratou.
+        # Indexar `nodes[-1]` nao levanta em Mojo: **mata o processo**, e o
+        # `try` de quem chamou nao pega. Foi assim que os verbos de texto novos
+        # apareceram — como crash no `descrever`, nao como erro.
+        raise Error(
+            "expressao com no de tipo " + String(k)
+            + " que `descrever` nao conhece"
+        )
+
     var op = String("?")
     if k == Kind.GT:
         op = ">"
@@ -325,6 +382,7 @@ def _descrever_no(expr: Expr, i: Int) raises -> String:
         op = "!="
     elif k == Kind.CONTEM:
         op = "contem"
+
     elif k == Kind.AND:
         op = "&"
     elif k == Kind.OR:
