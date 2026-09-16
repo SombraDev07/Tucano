@@ -5,6 +5,10 @@
 #
 # A suite de testes nao cobre as ferramentas de interop — foi assim que um
 # rename as quebrou em silencio uma vez. Este script cobre.
+#
+# Nem cobria os benchmarks: o `bench-m4` ficou sem compilar por varios marcos,
+# e so apareceu quando alguem foi citar um numero dele. Compilar todos custa
+# pouco e fecha esse buraco.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -21,6 +25,7 @@ passo() {
 }
 
 passo "testes"            ./pixi run test
+passo "benchmarks compilam" ./tools/compilar_benches.sh
 passo "exemplo"           ./pixi run exemplo
 passo "round-trip parquet" ./pixi run parquet-roundtrip
 passo "round-trip arrow"   ./pixi run arrow-roundtrip

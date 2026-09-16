@@ -3,6 +3,30 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [1.6.1] — Os benchmarks voltaram a compilar
+
+`bench-m4` — o que mede SIMD contra o laco escalar — **nao compilava**.
+`Coluna.de_reais` passou a exigir posse da lista em algum marco, o benchmark
+continuou passando por referencia, e ninguem viu: a verificacao roda testes,
+exemplos, round-trips e interop, e nunca tocava nos benchmarks. So apareceu
+quando alguem foi citar um numero dele.
+
+Consertado, e com ele os numeros de novo (5M linhas, largura SIMD f64 = 4):
+
+| operacao | escalar | SIMD | ganho |
+|---|---|---|---|
+| soma | 9016 us | 2692 us | 3,3x |
+| soma de dois vetores | 15214 us | 8409 us | 1,8x |
+| comparacao | 20254 us | 5673 us | 3,6x |
+| `mes(data)` | 48685 us | 10343 us | 4,7x |
+| `texto == "SP"` | 3011 us | 733 us | 4,1x |
+
+### Adicionado
+
+- `tools/compilar_benches.sh` — compila todos os benchmarks sem rodar nenhum, e
+  entrou no `verificar_tudo.sh` como nono passo. Compilar custa pouco; descobrir
+  na hora de citar custa caro.
+
 ## [1.6.0] — Chave de comparacao
 
 Espaco no meio da palavra e espaco duplo entre palavras sao problemas

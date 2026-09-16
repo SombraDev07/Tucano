@@ -61,7 +61,7 @@ def main() raises:
     var t1 = perf_counter_ns()
     var ns_soma_e = t1 - t0
 
-    var col = Coluna.de_reais("v", dados)
+    var col = Coluna.de_reais("v", dados.copy())
     t0 = perf_counter_ns()
     var soma = col.soma()
     t1 = perf_counter_ns()
