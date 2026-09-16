@@ -37,6 +37,35 @@ def _encontrar(b: List[UInt8], ini: Int, alvo: String) -> Int:
     return -1
 
 
+def _encontrar_ate(b: List[UInt8], ini: Int, fim: Int, alvo: String) -> Int:
+    """Como `_encontrar`, mas **para** em `fim`.
+
+    Existe porque procurar ate o fim do documento e so depois conferir o limite
+    e O(documento) por chamada. Numa celula sem o atributo `t=` — todo numero —
+    a busca varria o resto da planilha inteira para entao descobrir que o que
+    achou estava fora da tag. Com dez mil celulas isso vira tempo quadratico:
+    1000 linhas em 2,5 s, 2000 em 10, 4000 em 41.
+    """
+    var a = alvo.as_bytes()
+    var n = len(a)
+    if n == 0:
+        return ini
+    var limite = fim - n
+    if limite > len(b) - n:
+        limite = len(b) - n
+    var i = ini
+    while i <= limite:
+        var ok = True
+        for j in range(n):
+            if b[i + j] != a[j]:
+                ok = False
+                break
+        if ok:
+            return i
+        i += 1
+    return -1
+
+
 def _faixa(b: List[UInt8], ini: Int, fim: Int) raises -> String:
     if fim <= ini:
         return ""
@@ -50,19 +79,19 @@ def _minusculo_ascii(s: String) -> String:
 def _attr(b: List[UInt8], ini: Int, fim: Int, nome: String) raises -> String:
     var chave = nome + '="'
     var nchave = chave.byte_length()
-    var p = _encontrar(b, ini, chave)
-    if p < 0 or p >= fim:
+    var p = _encontrar_ate(b, ini, fim, chave)
+    if p < 0:
         chave = nome + "='"
         nchave = chave.byte_length()
-        p = _encontrar(b, ini, chave)
-        if p < 0 or p >= fim:
+        p = _encontrar_ate(b, ini, fim, chave)
+        if p < 0:
             return ""
-        var q = _encontrar(b, p + nchave, "'")
-        if q < 0 or q > fim:
+        var q = _encontrar_ate(b, p + nchave, fim, "'")
+        if q < 0:
             return ""
         return _faixa(b, p + nchave, q)
-    var q = _encontrar(b, p + nchave, '"')
-    if q < 0 or q > fim:
+    var q = _encontrar_ate(b, p + nchave, fim, '"')
+    if q < 0:
         return ""
     return _faixa(b, p + nchave, q)
 
@@ -131,18 +160,25 @@ def _unescape(s: String) raises -> String:
     return String(from_utf8=Span(out))
 
 
-def _texto_entre(b: List[UInt8], ini: Int, abertura: String, fechamento: String) raises -> String:
-    var a = _encontrar(b, ini, abertura)
+def _texto_entre(
+    b: List[UInt8], ini: Int, fim: Int, abertura: String, fechamento: String
+) raises -> String:
+    """O texto entre duas marcas, **dentro** de `fim`.
+
+    O limite nao e detalhe: sem ele, uma celula sem `<v>` procurava o proximo
+    `<v>` da planilha inteira e trazia o valor de outra celula.
+    """
+    var a = _encontrar_ate(b, ini, fim, abertura)
     if a < 0:
         return ""
     var ini_txt = a + abertura.byte_length()
     # pular atributos de <t ...>
     if abertura == "<t":
-        var gt = _fim_tag(b, a)
+        var gt = _encontrar_ate(b, a, fim, ">")
         if gt < 0:
             return ""
         ini_txt = gt + 1
-    var f = _encontrar(b, ini_txt, fechamento)
+    var f = _encontrar_ate(b, ini_txt, fim, fechamento)
     if f < 0:
         return ""
     return _unescape(_faixa(b, ini_txt, f))
@@ -587,7 +623,7 @@ def _ler_grade(
             if fecha_c < 0:
                 p = fim + 1
                 continue
-            var valor_in = _texto_entre(xml, fim, "<t", "</t>")
+            var valor_in = _texto_entre(xml, fim, fecha_c, "<t", "</t>")
             _preencher_celula(
                 g, linha, col, tipo_xml, estilo, valor_in, strings, xf_data
             )
@@ -601,7 +637,7 @@ def _ler_grade(
         if fecha_c < 0:
             p = fim + 1
             continue
-        var valor = _texto_entre(xml, fim, "<v>", "</v>")
+        var valor = _texto_entre(xml, fim, fecha_c, "<v>", "</v>")
         p = fecha_c + 4
         if valor == "":
             continue

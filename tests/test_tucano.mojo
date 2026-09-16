@@ -83,6 +83,7 @@ from tucano.codecs import (
 from tucano.deflate import inflar
 from tucano.codecs import codificar_delta_i64, decodificar_delta_i64
 from tucano.zstd import descomprimir_zstd
+from tucano.xlsx import _attr as _attr_xlsx
 from tucano.texto import (
     minusculas as minusculas_txt,
     maiusculas as maiusculas_txt,
@@ -753,6 +754,29 @@ def test_chave_de_comparacao() raises:
     for i in range(chave.linhas()):
         if chave.pegar("c").texto_em(i) == "saopaulo":
             assert_equal(chave.pegar("soma_v").texto_em(i), "1000.0")
+
+
+def test_xlsx_busca_limitada() raises:
+    """Atributo ausente nao pode custar uma varredura do arquivo inteiro.
+
+    `_attr` procurava a chave ate o fim do documento e **so entao** conferia se
+    o que achou estava dentro da tag. Toda celula sem `t=` — todo numero — varria
+    o resto da planilha. Com dez mil celulas isso virava tempo quadratico:
+    1000 linhas em 2,5 s, 2000 em 10, 4000 em 41. Depois do limite: 7, 13 e 27 ms.
+
+    Aqui da para travar a **correcao**, que e o outro lado do mesmo defeito: sem
+    limite, uma celula sem valor pegava o valor da celula seguinte.
+    """
+    var t = ler_xlsx("tests/fixtures/vendas.xlsx")
+    assert_true(t.linhas() > 0)
+
+    # o limite em si, sobre bytes conhecidos: a chave existe DEPOIS do fim dado,
+    # e a resposta tem de ser vazia em vez do que veio de fora
+    var b = List[UInt8]()
+    for x in String('<c r="A1"/><c r="B1" t="s"><v>7</v></c>').as_bytes():
+        b.append(x)
+    assert_equal(_attr_xlsx(b, 0, 10, "r"), "A1")
+    assert_equal(_attr_xlsx(b, 0, 10, "t"), "")
 
 
 def test_remover_duplicadas() raises:

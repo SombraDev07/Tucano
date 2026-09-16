@@ -3,6 +3,35 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [1.7.1] — `ler_xlsx` era quadratico
+
+Medindo a diferenca entre ler `.xlsx` e ler Parquet para responder a uma
+pergunta, o `ler_xlsx` de 200 mil linhas **nao terminou em 30 minutos**. Nao era
+"xlsx e lento": era defeito.
+
+| linhas | antes | depois |
+|---|---|---|
+| 1.000 | 2.498 ms | **7 ms** |
+| 2.000 | 9.993 ms | **13 ms** |
+| 4.000 | 40.873 ms | **27 ms** |
+| 200.000 | nao terminou em 30 min | **1.636 ms** |
+
+Dobrar as linhas quadruplicava o tempo. As 200 mil levariam umas 27 horas.
+
+### Corrigido
+
+- **`_attr` procurava o atributo ate o fim do documento** e so entao conferia se
+  o que achou estava dentro da tag. Toda celula sem `t=` — ou seja, todo numero —
+  varria o resto da planilha inteira para descobrir isso. `_encontrar_ate` para
+  no limite dado.
+- **`_texto_entre` tinha o mesmo defeito, com consequencia pior**: uma celula sem
+  `<v>` procurava o proximo `<v>` da planilha e trazia **o valor de outra
+  celula**. Nao chegou a aparecer porque o chamador descartava o resultado em
+  alguns caminhos, mas era corrupcao silenciosa esperando o caso certo.
+
+O teste trava o segundo: `_attr` sobre bytes conhecidos, com a chave existindo
+depois do limite, tem de devolver vazio em vez do que veio de fora.
+
 ## [1.7.0] — Remover duplicadas
 
 Nao havia como tirar linha repetida. `unicos(nome)` devolve os valores distintos
