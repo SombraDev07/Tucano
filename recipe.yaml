@@ -24,7 +24,7 @@ schema_version: 1
 
 package:
   name: tucano
-  version: "1.6.1"
+  version: "1.7.0"
 
 source:
   path: .

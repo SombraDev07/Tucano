@@ -1048,6 +1048,8 @@ def executar(cols: List[Coluna], etapas: List[Etapa]) raises -> List[Coluna]:
             atual = op_concatenar(atual, e.lote_direito)
         elif e.tipo == TipoEtapa.REMOVER_NA:
             atual = op_remover_na(atual, e.nomes)
+        elif e.tipo == TipoEtapa.REMOVER_DUPLICADAS:
+            atual = op_remover_duplicadas(atual, e.nomes)
         elif e.tipo == TipoEtapa.PREENCHER_NA:
             atual = op_preencher_na(atual, e.nome, e.expr)
         elif e.tipo == TipoEtapa.LIMITE:
@@ -1140,6 +1142,7 @@ def avisos_plano(cols: List[Coluna], etapas: List[Etapa]) raises -> List[String]
             e.tipo == TipoEtapa.ORDENACAO
             or e.tipo == TipoEtapa.CONCATENACAO
             or e.tipo == TipoEtapa.REMOVER_NA
+            or e.tipo == TipoEtapa.REMOVER_DUPLICADAS
             or e.tipo == TipoEtapa.LIMITE
         ):
             pass
@@ -2814,6 +2817,48 @@ def op_remover_na(cols: List[Coluna], nomes: List[String]) raises -> List[Coluna
             if cols[p].eh_ausente(i):
                 ok = False
         if ok:
+            keep[i] = UInt8(1)
+
+    var out = List[Coluna]()
+    for c in cols:
+        out.append(filtrar_coluna(c, keep))
+    return out^
+
+
+def op_remover_duplicadas(
+    cols: List[Coluna], nomes: List[String]
+) raises -> List[Coluna]:
+    """Guarda a **primeira** linha de cada combinacao distinta das chaves.
+
+    Sem chaves, a linha inteira e a chave. Com chaves, as outras colunas vem da
+    primeira linha do grupo — e por isso a ordem importa: se voce quer a venda
+    mais recente de cada produtor, ordene por data antes.
+
+    Reaproveita o `calcular_grupos` do agrupamento em vez de ter uma tabela hash
+    propria: o agrupamento ja sabe formar grupos por indexacao direta quando a
+    chave e texto dicionarizado, e sair duplicando essa decisao seria a mesma
+    logica em dois lugares, envelhecendo em ritmos diferentes.
+    """
+    var n = n_linhas(cols)
+    var chaves = List[String]()
+    if len(nomes) == 0:
+        for c in cols:
+            chaves.append(c.nome)
+    else:
+        for nome in nomes:
+            # confere o nome aqui: dentro do agrupamento o erro sairia falando
+            # de agrupamento, que nao e o que o usuario pediu
+            _ = posicao_no_lote(cols, nome)
+            chaves.append(nome)
+
+    var grupos = calcular_grupos(cols, chaves)
+    var visto = List[UInt8]()
+    visto.resize(grupos.n_grupos, UInt8(0))
+    var keep = _zeros_u8(n)
+    for i in range(n):
+        var g = grupos.ids[i]
+        if visto[g] == 0:
+            visto[g] = UInt8(1)
             keep[i] = UInt8(1)
 
     var out = List[Coluna]()

@@ -26,6 +26,7 @@ struct TipoEtapa:
     comptime REMOVER_NA = 7
     comptime PREENCHER_NA = 8
     comptime LIMITE = 9
+    comptime REMOVER_DUPLICADAS = 10
 
     @staticmethod
     def nome_logico(tipo: Int) raises -> String:
@@ -49,6 +50,8 @@ struct TipoEtapa:
             return "FILL NULLS"
         if tipo == Self.LIMITE:
             return "LIMIT"
+        if tipo == Self.REMOVER_DUPLICADAS:
+            return "DISTINCT"
         raise Error("etapa desconhecida: " + String(tipo))
 
     @staticmethod
@@ -73,6 +76,8 @@ struct TipoEtapa:
             return "FillNullExec"
         if tipo == Self.LIMITE:
             return "LimitExec"
+        if tipo == Self.REMOVER_DUPLICADAS:
+            return "DistinctExec"
         raise Error("etapa desconhecida: " + String(tipo))
 
 
@@ -154,6 +159,10 @@ struct Etapa(Copyable, Movable):
         return Self(TipoEtapa.REMOVER_NA, Expr(), nomes^, "")
 
     @staticmethod
+    def remover_duplicadas(var nomes: List[String]) -> Self:
+        return Self(TipoEtapa.REMOVER_DUPLICADAS, Expr(), nomes^, "")
+
+    @staticmethod
     def limite_de(n: Int) -> Self:
         return Self(
             TipoEtapa.LIMITE, Expr(), List[String](), "", List[Agregacao](),
@@ -185,7 +194,10 @@ struct Etapa(Copyable, Movable):
                 if i < len(self.descendente) and self.descendente[i]:
                     s += " desc"
             return s + "]"
-        if self.tipo == TipoEtapa.REMOVER_NA and len(self.nomes) == 0:
+        if (
+            self.tipo == TipoEtapa.REMOVER_NA
+            or self.tipo == TipoEtapa.REMOVER_DUPLICADAS
+        ) and len(self.nomes) == 0:
             return cabeca + " [todas]"
         var lista = String("[")
         for i in range(len(self.nomes)):

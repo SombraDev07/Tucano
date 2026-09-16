@@ -755,6 +755,56 @@ def test_chave_de_comparacao() raises:
             assert_equal(chave.pegar("soma_v").texto_em(i), "1000.0")
 
 
+def test_remover_duplicadas() raises:
+    """Tira duplicadas guardando a **primeira** linha de cada combinacao."""
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("produtor", ["Ana", "Bruno", "Ana", "Ana", "Carla"]))
+    cols.append(Coluna.de_textos("cpf", ["111", "222", "111", "999", "333"]))
+    cols.append(
+        Coluna.de_inteiros("carga", [Int64(1), Int64(2), Int64(3), Int64(4), Int64(5)])
+    )
+    var t = Tabela(cols^)
+
+    # por uma coluna: sobra a primeira de cada produtor, com as OUTRAS colunas
+    # daquela linha — e por isso que a ordem importa
+    var um = t.remover_duplicadas(["produtor"]).coletar()
+    assert_equal(um.linhas(), 3)
+    assert_equal(um.colunas(), 3)
+    assert_equal(um.pegar("produtor").texto_em(0), "Ana")
+    assert_equal(um.pegar("carga").texto_em(0), "1")
+
+    # por duas: "Ana/999" nao e duplicada de "Ana/111"
+    assert_equal(t.remover_duplicadas(["produtor", "cpf"]).coletar().linhas(), 4)
+
+    # sem argumento, a linha inteira e a chave — aqui nenhuma se repete
+    assert_equal(t.remover_duplicadas().coletar().linhas(), 5)
+
+    # ordenar antes escolhe qual sobrevive
+    var maior = (
+        t.ordenar(["carga"], True)
+         .remover_duplicadas(["produtor"])
+         .coletar()
+    )
+    assert_equal(maior.pegar("produtor").texto_em(0), "Carla")
+    for i in range(maior.linhas()):
+        if maior.pegar("produtor").texto_em(i) == "Ana":
+            assert_equal(carga_em(maior, i), "4")
+
+    # o plano diz o que faz, e o nome errado avisa
+    assert_true("DISTINCT" in t.remover_duplicadas(["produtor"]).descrever())
+    var pegou = False
+    try:
+        _ = t.remover_duplicadas(["produtorr"]).coletar()
+    except e:
+        pegou = True
+        assert_true("produtorr" in String(e))
+    assert_true(pegou)
+
+
+def carga_em(t: Tabela, i: Int) raises -> String:
+    return t.pegar("carga").texto_em(i)
+
+
 def test_coluna_de_marcacao() raises:
     """Comparacao virando coluna, nao filtro — a coluna de "sim/nao" da planilha.
 

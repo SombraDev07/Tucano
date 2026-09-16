@@ -153,6 +153,7 @@ a primeira. Confira antes com `contar_valores`.
 
 | assinatura | o que faz |
 |---|---|
+| `t.remover_duplicadas([nomes])` | Guarda a **primeira** linha de cada combinação distinta. Sem `nomes`, a linha inteira é a chave. Ordene antes se quiser escolher qual sobrevive. |
 | `t.remover_na([nomes])` | Descarta linhas com ausente. Sem `nomes`, olha todas as colunas. |
 | `t.preencher_na(nome, valor)` | Troca ausente por um valor. |
 | `t.eh_ausente(nome, i)` | Se aquela célula está ausente. |

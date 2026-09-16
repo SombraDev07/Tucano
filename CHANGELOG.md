@@ -3,6 +3,27 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [1.7.0] — Remover duplicadas
+
+Nao havia como tirar linha repetida. `unicos(nome)` devolve os valores distintos
+de **uma** coluna e so ela; para ficar com a linha inteira, nada.
+
+### Adicionado
+
+- **`remover_duplicadas([nomes])`** — guarda a **primeira** linha de cada
+  combinacao distinta das colunas dadas. Sem argumento, a linha inteira e a
+  chave. As outras colunas vem da primeira linha do grupo, entao a ordem
+  importa: `ordenar` antes escolhe qual sobrevive.
+
+Entra como etapa do plano (`DISTINCT` no `descrever`), nao como metodo avulso —
+assim encadeia com `unir`, `onde` e o resto, e o otimizador sabe quais colunas
+ela precisa.
+
+Por dentro reaproveita o `calcular_grupos` do agrupamento em vez de ter uma
+tabela hash propria: o agrupamento ja decide entre indexacao direta e hash
+conforme a chave, e duplicar essa decisao seria a mesma logica em dois lugares
+envelhecendo em ritmos diferentes.
+
 ## [1.6.1] — Os benchmarks voltaram a compilar
 
 `bench-m4` — o que mede SIMD contra o laco escalar — **nao compilava**.

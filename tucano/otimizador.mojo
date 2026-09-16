@@ -281,7 +281,10 @@ def colunas_do_plano(
                 # a juncao traz colunas do outro lado: nao da para podar aqui
                 return List[String]()
 
-        elif e.tipo == TipoEtapa.REMOVER_NA:
+        elif (
+            e.tipo == TipoEtapa.REMOVER_NA
+            or e.tipo == TipoEtapa.REMOVER_DUPLICADAS
+        ):
             if len(e.nomes) == 0:
                 return List[String]()  # olha todas as colunas
             for n in e.nomes:

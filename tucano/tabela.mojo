@@ -171,6 +171,21 @@ struct Consulta(Copyable, Movable):
         self.etapas.append(Etapa.remover_na(copia^))
         return self^
 
+    def remover_duplicadas(
+        var self, nomes: List[String] = List[String]()
+    ) raises -> Self:
+        """Guarda a **primeira** linha de cada combinacao distinta.
+
+        Sem argumento, a linha inteira e a chave. Com nomes, duas linhas sao
+        duplicadas quando essas colunas coincidem, e o que sobrevive e a
+        primeira — ordene antes se quiser escolher qual.
+        """
+        var copia = List[String]()
+        for c in nomes:
+            copia.append(c)
+        self.etapas.append(Etapa.remover_duplicadas(copia^))
+        return self^
+
     def preencher_na(var self, nome: String, var valor: Expr) raises -> Self:
         """Substitui os ausentes de uma coluna. Sem conversao implicita."""
         self.etapas.append(Etapa.preencher_na(nome, valor^))
@@ -675,6 +690,13 @@ struct Tabela(Copyable, Movable):
         """Empilha outra tabela. Devolve `Consulta`."""
         var q = Consulta(self.lote())
         return q^.concatenar(outra)
+
+    def remover_duplicadas(
+        self, nomes: List[String] = List[String]()
+    ) raises -> Consulta:
+        """Guarda a primeira linha de cada combinacao distinta. Devolve `Consulta`."""
+        var q = Consulta(self.lote())
+        return q^.remover_duplicadas(nomes)
 
     def remover_na(self, nomes: List[String] = List[String]()) raises -> Consulta:
         """Descarta linhas com ausente. Devolve `Consulta`."""
