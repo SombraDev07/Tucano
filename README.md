@@ -3,7 +3,7 @@
 **Biblioteca tabular nativa em Mojo.** Análise de dados com uma API direta, sobre um engine
 columnar vetorizado — do buffer ao kernel, sem Python em lugar nenhum.
 
-**Versão 1.3.0** · Apache-2.0 · 257 testes
+**Versão 1.3.1** · Apache-2.0 · 257 testes
 
 ```bash
 pixi add tucano -c https://sombradev07.github.io/Tucano

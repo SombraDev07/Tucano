@@ -15,7 +15,7 @@ paginas V1 e V2, sem compressao ou com Snappy.
 
 from std.pathlib import Path
 from std.ffi import external_call
-from std.memory import UnsafePointer
+from std.memory import Pointer, UnsafePointer
 from .thrift import LeitorThrift, TTipo, CampoThrift, ListaThrift
 from .arquivo import LeitorArquivo
 from .paralelo import (
@@ -2220,13 +2220,16 @@ struct _TarefaColuna(Movable):
 
 
 def _trabalhador_coluna(
-    p: UnsafePointer[_TarefaColuna, origin=AnyOrigin[mut=True]]
+    p: Pointer[_TarefaColuna, origin=AnyOrigin[mut=True]]
 ) -> Int:
     """Rotina de entrada da thread. Nao propaga excecao: guarda e volta.
 
     A origin fica fixada em `AnyOrigin[mut=True]` porque solta (`_`) tornaria a
     funcao parametrica, e funcao parametrica nao tem endereco para dar ao
-    `pthread_create`.
+    `pthread_create`. O tipo e `Pointer`, nao `UnsafePointer`: a tarefa e **uma**
+    struct, nao um vetor, e e disso que o `Pointer` trata — o `UnsafePointer`
+    daqui era o tipo errado e avisava a cada compilacao de quem usa a
+    biblioteca.
     """
     try:
         _executar_tarefa(p[])
@@ -3204,7 +3207,7 @@ def _executar_escrita(mut tarefa: _TarefaEscrita) raises:
 
 
 def _trabalhador_escrita(
-    p: UnsafePointer[_TarefaEscrita, origin=AnyOrigin[mut=True]]
+    p: Pointer[_TarefaEscrita, origin=AnyOrigin[mut=True]]
 ) -> Int:
     """Rotina de entrada da thread. Nao propaga excecao: guarda e volta."""
     try:

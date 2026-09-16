@@ -3,6 +3,31 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [1.3.1] — Compilar calado
+
+Quem instalava o Tucano via canal via **quarenta linhas de aviso do meu codigo**
+antes da propria saida, a cada execucao. Nao aparecia aqui: o cache do
+compilador esconde o aviso na segunda compilacao, e no repositorio ele estava
+sempre quente. So apareceu quando alguem rodou num projeto novo.
+
+Zero avisos agora, conferido compilando uma copia limpa do pacote.
+
+### Corrigido
+
+- **`UnsafePointer` no zstd**: os dois fluxos de bits guardavam o **endereco** do
+  buffer para nao copia-lo, e isso era pior que o aviso — o compilador deixa de
+  saber que o buffer precisa continuar vivo, e a destruicao antecipada de um
+  `List` que ninguem mais menciona vira leitura de memoria liberada, que nao da
+  erro: da zero. Agora o buffer entra em cada leitura. Sem copia e sem ponteiro.
+- **`UnsafePointer` nas tarefas de thread**: uma tarefa e **uma** struct, nao um
+  vetor, e disso trata o `Pointer`. Verificado com `pthread_create` de ponta a
+  ponta antes de trocar — o aviso sugeria a troca, mas sugestao de compilador
+  nao e prova.
+- **`getenv` escrito a mao** em `paralelo.mojo`, andando pelo `char*` byte a
+  byte, porque nao se procurou na stdlib antes de escrever. `std.os.getenv` faz
+  isso e devolve `String`.
+- Cinco valores iniciais mortos no zstd, que o compilador apontava um a um.
+
 ## [1.3.0] — Zstd na leitura
 
 O Polars grava zstd **por padrao** — medido, nao suposto: `df.write_parquet(...)`

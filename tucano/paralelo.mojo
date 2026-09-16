@@ -33,7 +33,7 @@ cima disso.
 """
 
 from std.ffi import external_call
-from std.memory import UnsafePointer
+from std.os import getenv
 
 # `_SC_NPROCESSORS_ONLN` no glibc/Linux
 comptime _SC_NPROCESSORS_ONLN = 84
@@ -61,34 +61,20 @@ def _do_ambiente() -> Int:
     precisa poder dizer "uma so". Variavel de ambiente e o lugar certo: nao
     acrescenta parametro em toda funcao de leitura, e e onde quem opera o
     processo ja procura esse tipo de ajuste.
+
+    A primeira versao chamava `getenv` da libc e andava pelo `char*` byte a byte,
+    porque nao se procurou na stdlib antes de escrever. `std.os.getenv` faz isso
+    e devolve `String`.
     """
-    var nome = List[UInt8]()
-    for b in String("TUCANO_THREADS").as_bytes():
-        nome.append(b)
-    nome.append(UInt8(0))  # terminador para a libc
-    # `getenv` devolve NULL quando a variavel nao existe, e no Mojo um `Pointer`
-    # e nao-nulo por construcao. O endereco vem como inteiro, que e onde o zero
-    # ainda quer dizer "nao ha".
-    var endereco = external_call["getenv", Int](nome.unsafe_ptr())
-    if endereco == 0:
+    var texto = getenv("TUCANO_THREADS", "")
+    var bytes = texto.as_bytes()
+    if len(bytes) == 0 or len(bytes) > 9:
         return 0
-    var p = UnsafePointer[UInt8, origin=AnyOrigin[mut=True]](
-        unsafe_from_address=endereco
-    )
     var valor = 0
-    var i = 0
-    while True:
-        var b = p.unsafe_load(i)
-        if b == UInt8(0):
-            break
+    for b in bytes:
         if b < UInt8(48) or b > UInt8(57):
             return 0
         valor = valor * 10 + Int(b - UInt8(48))
-        i += 1
-        if i > 9:
-            return 0
-    if i == 0:
-        return 0
     return valor
 
 

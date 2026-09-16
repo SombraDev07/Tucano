@@ -22,7 +22,6 @@ leitor abre.
 """
 
 from std.ffi import external_call
-from std.memory import UnsafePointer
 
 
 comptime _MAGICA = 0xFD2FB528
@@ -196,13 +195,14 @@ struct _BitsTras(Movable):
     `esgotou()` diz se isso aconteceu, para o chamador recusar em vez de aceitar
     dado inventado.
 
-    O buffer entra como **endereco**, nao como `List`: um bloco tem ate cinco
-    fluxos sobre faixas diferentes do mesmo buffer, e guardar a lista em cada um
-    copiaria o bloco cinco vezes. E a mesma forma que `_do_ambiente` usa com o
-    `getenv` — o buffer vive na pilha de quem chamou, do inicio ao fim.
+    O buffer **nao** e guardado: ele entra em cada leitura. Guardar a `List`
+    copiaria o bloco uma vez por fluxo, e um bloco tem ate cinco; guardar o
+    endereco resolveria a copia e criaria coisa pior — o compilador deixa de
+    saber que o buffer precisa continuar vivo, e a destruicao antecipada de um
+    `List` que ninguem mais menciona vira leitura de memoria liberada, que nao
+    da erro: da zero.
     """
 
-    var endereco: Int
     var ini: Int
     var pos: Int
     var acc: Int
@@ -213,7 +213,6 @@ struct _BitsTras(Movable):
     antemao e o que deixa `esgotou()` ser exato em vez de heuristico."""
 
     def __init__(out self, b: List[UInt8], ini: Int, fim: Int) raises:
-        self.endereco = Int(b.unsafe_ptr())
         self.ini = ini
         self.acc = 0
         self.nbits = 0
@@ -232,18 +231,15 @@ struct _BitsTras(Movable):
         self.pos = fim - 2
         self.total = (fim - 1 - ini) * 8 + alto
 
-    def ler(mut self, n: Int) raises -> Int:
+    def ler(mut self, dados: List[UInt8], n: Int) raises -> Int:
         if n == 0:
             return 0
         if n > 32:
             raise Error("zstd: leitura de mais de 32 bits")
-        var p = UnsafePointer[UInt8, origin=AnyOrigin[mut=True]](
-            unsafe_from_address=self.endereco
-        )
         while self.nbits < n:
             var b = 0
             if self.pos >= self.ini:
-                b = Int(p.unsafe_load(self.pos))
+                b = Int(dados[self.pos])
             self.pos -= 1
             self.acc = (self.acc << 8) | b
             self.nbits += 8
@@ -265,27 +261,22 @@ struct _BitsFrente(Movable):
     os dois no mesmo arquivo e desconfortavel, e e o que o formato pede.
     """
 
-    var endereco: Int
     var pos: Int
     var fim: Int
     var acc: Int
     var nbits: Int
 
-    def __init__(out self, b: List[UInt8], ini: Int, fim: Int):
-        self.endereco = Int(b.unsafe_ptr())
+    def __init__(out self, ini: Int, fim: Int):
         self.pos = ini
         self.fim = fim
         self.acc = 0
         self.nbits = 0
 
-    def ler(mut self, n: Int) -> Int:
-        var p = UnsafePointer[UInt8, origin=AnyOrigin[mut=True]](
-            unsafe_from_address=self.endereco
-        )
+    def ler(mut self, dados: List[UInt8], n: Int) -> Int:
         while self.nbits < n:
             var b = 0
             if self.pos < self.fim:
-                b = Int(p.unsafe_load(self.pos))
+                b = Int(dados[self.pos])
             self.pos += 1
             self.acc |= b << self.nbits
             self.nbits += 8
@@ -393,8 +384,8 @@ def _ler_distribuicao(
     encolhe conforme o que sobra para distribuir — e a parte do formato que mais
     parece arbitraria e a que menos perdoa erro de um bit.
     """
-    var bits = _BitsFrente(b, ini, fim)
-    var accuracy = bits.ler(4) + 5
+    var bits = _BitsFrente(ini, fim)
+    var accuracy = bits.ler(b, 4) + 5
     if accuracy > accuracy_max:
         raise Error("zstd: accuracy FSE acima do permitido")
     var tam = 1 << accuracy
@@ -410,7 +401,7 @@ def _ler_distribuicao(
             # sequencias de simbolos com contagem zero vem em grupos de 2 bits
             var zeros = 0
             while True:
-                var r = bits.ler(2)
+                var r = bits.ler(b, 2)
                 zeros += r
                 if r != 3:
                     break
@@ -424,11 +415,11 @@ def _ler_distribuicao(
 
         var teto = _log2_teto(restante) + 1
         var limite = (1 << teto) - 1 - restante
-        var v = bits.ler(teto - 1)
+        var v = bits.ler(b, teto - 1)
         if v < limite:
             pass
         else:
-            var extra = bits.ler(1)
+            var extra = bits.ler(b, 1)
             v = v + (extra << (teto - 1))
             if v >= (1 << (teto - 1)):
                 v -= limite
@@ -548,20 +539,20 @@ def _ler_huffman(b: List[UInt8], ini: Int, fim: Int) raises -> Tuple[_Huff, Int]
 
     # dois estados alternados sobre o mesmo fluxo, lido de tras para frente
     var bits = _BitsTras(b, inicio_fluxo, fim_pesos)
-    var e1 = bits.ler(tabela.accuracy)
-    var e2 = bits.ler(tabela.accuracy)
+    var e1 = bits.ler(b, tabela.accuracy)
+    var e2 = bits.ler(b, tabela.accuracy)
     var n = 0
     while n < 255:
         pesos.append(Int(tabela.simbolo[e1]))
         n += 1
-        e1 = Int(tabela.base[e1]) + bits.ler(Int(tabela.nbits[e1]))
+        e1 = Int(tabela.base[e1]) + bits.ler(b, Int(tabela.nbits[e1]))
         if bits.esgotou():
             pesos.append(Int(tabela.simbolo[e2]))
             n += 1
             break
         pesos.append(Int(tabela.simbolo[e2]))
         n += 1
-        e2 = Int(tabela.base[e2]) + bits.ler(Int(tabela.nbits[e2]))
+        e2 = Int(tabela.base[e2]) + bits.ler(b, Int(tabela.nbits[e2]))
         if bits.esgotou():
             pesos.append(Int(tabela.simbolo[e1]))
             n += 1
@@ -570,9 +561,10 @@ def _ler_huffman(b: List[UInt8], ini: Int, fim: Int) raises -> Tuple[_Huff, Int]
 
 
 def _decodificar_huff(
-    mut bits: _BitsTras, h: _Huff, quantos: Int, mut out: List[UInt8]
+    dados: List[UInt8], mut bits: _BitsTras, h: _Huff, quantos: Int,
+    mut out: List[UInt8],
 ) raises:
-    var estado = bits.ler(h.maxbits)
+    var estado = bits.ler(dados, h.maxbits)
     var feitos = 0
     while feitos < quantos:
         var s = h.simbolo[estado]
@@ -581,7 +573,7 @@ def _decodificar_huff(
         feitos += 1
         if feitos == quantos:
             break
-        var novos = bits.ler(usados)
+        var novos = bits.ler(dados, usados)
         estado = ((estado << usados) | novos) & ((1 << h.maxbits) - 1)
 
 
@@ -696,9 +688,9 @@ def _ler_literais(
     var tipo = cab & 3
     var formato = (cab >> 2) & 3
     var pos = ini
-    var regenerado = 0
-    var comprimido = 0
-    var fluxos = 1
+    var regenerado: Int
+    var comprimido: Int
+    var fluxos: Int
 
     if tipo == 0 or tipo == 1:  # cru ou RLE
         if formato == 0 or formato == 2:
@@ -778,7 +770,7 @@ def _ler_literais(
     var out = List[UInt8](capacity=regenerado)
     if fluxos == 1:
         var bits = _BitsTras(b, inicio_fluxos, fim_secao)
-        _decodificar_huff(bits, est.huff, regenerado, out)
+        _decodificar_huff(b, bits, est.huff, regenerado, out)
         return (out^, fim_secao - ini)
 
     # quatro fluxos: tabela de saltos com os tres primeiros tamanhos
@@ -803,7 +795,7 @@ def _ler_literais(
     var quantidades = [por_fluxo, por_fluxo, por_fluxo, ultimo]
     for f in range(4):
         var bits = _BitsTras(b, limites[f], limites[f + 1])
-        _decodificar_huff(bits, est.huff, quantidades[f], out)
+        _decodificar_huff(b, bits, est.huff, quantidades[f], out)
     return (out^, fim_secao - ini)
 
 
@@ -856,7 +848,7 @@ def _bloco_comprimido_com_estado(
         return
     var b0 = _u8(b, pos)
     pos += 1
-    var n_seq = 0
+    var n_seq: Int
     if b0 == 0:
         for x in literais:
             saida.append(x)
@@ -899,9 +891,9 @@ def _bloco_comprimido_com_estado(
     var ml_bits = _ml_bits()
 
     # ordem de inicializacao: comprimento de literal, deslocamento, casamento
-    var e_ll = bits.ler(est.fse_ll.accuracy)
-    var e_of = bits.ler(est.fse_of.accuracy)
-    var e_ml = bits.ler(est.fse_ml.accuracy)
+    var e_ll = bits.ler(b, est.fse_ll.accuracy)
+    var e_of = bits.ler(b, est.fse_of.accuracy)
+    var e_ml = bits.ler(b, est.fse_ml.accuracy)
 
     var pl = 0  # quantos literais ja foram copiados
     for s in range(n_seq):
@@ -912,12 +904,12 @@ def _bloco_comprimido_com_estado(
             raise Error("zstd: codigo de sequencia fora da tabela")
 
         # ordem de leitura dos extras: deslocamento, casamento, literal
-        var desloc_bruto = (1 << cod_of) + bits.ler(cod_of)
-        var casamento = ml_base[cod_ml] + bits.ler(ml_bits[cod_ml])
-        var literal = ll_base[cod_ll] + bits.ler(ll_bits[cod_ll])
+        var desloc_bruto = (1 << cod_of) + bits.ler(b, cod_of)
+        var casamento = ml_base[cod_ml] + bits.ler(b, ml_bits[cod_ml])
+        var literal = ll_base[cod_ll] + bits.ler(b, ll_bits[cod_ll])
 
         # ---- deslocamentos repetidos
-        var desloc = 0
+        var desloc: Int
         if desloc_bruto > 3:
             desloc = desloc_bruto - 3
             est.rep[2] = est.rep[1]
@@ -963,9 +955,9 @@ def _bloco_comprimido_com_estado(
 
         # ---- anda os estados: literal, casamento, deslocamento
         if s + 1 < n_seq:
-            e_ll = Int(est.fse_ll.base[e_ll]) + bits.ler(Int(est.fse_ll.nbits[e_ll]))
-            e_ml = Int(est.fse_ml.base[e_ml]) + bits.ler(Int(est.fse_ml.nbits[e_ml]))
-            e_of = Int(est.fse_of.base[e_of]) + bits.ler(Int(est.fse_of.nbits[e_of]))
+            e_ll = Int(est.fse_ll.base[e_ll]) + bits.ler(b, Int(est.fse_ll.nbits[e_ll]))
+            e_ml = Int(est.fse_ml.base[e_ml]) + bits.ler(b, Int(est.fse_ml.nbits[e_ml]))
+            e_of = Int(est.fse_of.base[e_of]) + bits.ler(b, Int(est.fse_of.nbits[e_of]))
 
     # o que sobrou de literais vai inteiro no fim
     for i in range(pl, len(literais)):
