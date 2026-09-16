@@ -2,7 +2,7 @@
 
 Engine tabular **100% Mojo**, com ergonomia direta e semântica de banco de dados.
 
-Versão 1.4.0 — M0 → M33. A partir daqui vale versionamento semântico: o que esta página
+Versão 1.5.0 — M0 → M33. A partir daqui vale versionamento semântico: o que esta página
 chama de estável não muda de assinatura numa versão menor.
 
 Este documento descreve **o que a biblioteca garante**. O `ROADMAP.md` descreve para onde ela vai.
@@ -242,6 +242,9 @@ Materializam sozinhos: `mostrar`, `primeiras`, `linhas`, `colunas`, `shape`, `sc
 
 - Construtores: `coluna(nome)`, `lit(f64)`, `lit_int`, `lit_texto`, `lit_bool`, `lit_data`
 - Fluente: `.gt .ge .lt .le .eq .ne .e .ou .nao`, aritmética `.mais .menos .vezes .sobre`
+- Coluna de marcação: uma comparação em `com_coluna` vira coluna **lógica** —
+  `com_coluna("acima", coluna("valor").gt(lit(1000.0)))`. Desconhecido vira ausente, porque
+  ali o resultado não é mais uma decisão, é um dado
 - Padronizar texto: `normalizar(coluna(nome))` — aparar + minúsculas + sem acento, que é o
   que se faz antes de agrupar ou juntar. As partes também existem soltas:
   `minusculas`, `maiusculas`, `aparar` (tira das pontas **e** junta os do meio) e

@@ -707,6 +707,42 @@ def test_parquet_zstd() raises:
             assert_equal(z.pegar(nome).texto_em(i), g.pegar(nome).texto_em(i))
 
 
+def test_coluna_de_marcacao() raises:
+    """Comparacao virando coluna, nao filtro — a coluna de "sim/nao" da planilha.
+
+    `com_coluna("acima", coluna("v").gt(lit(100.0)))` morria com "no de
+    expressao nao avaliavel como valor: kind 10", que nao diz nada a quem usa.
+    """
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("cidade", ["SP", "RJ", "SP"]))
+    cols.append(Coluna.de_reais("v", [150.0, 90.0, 300.0]))
+    var t = Tabela(cols^)
+
+    var r = t.com_coluna("acima", coluna("v").gt(lit(100.0))).coletar()
+    assert_true(r.pegar("acima").tipo == DType.LOGICO)
+    assert_equal(r.pegar("acima").texto_em(0), "True")
+    assert_equal(r.pegar("acima").texto_em(1), "False")
+
+    # e serve de chave de agrupamento, que e para isso que ela existe
+    var g = (
+        t.com_coluna("acima", coluna("v").gt(lit(100.0)))
+         .agrupar(["acima"])
+         .agregar([contar()])
+         .coletar()
+    )
+    assert_equal(g.linhas(), 2)
+
+    # ausente na entrada vira ausente na marcacao: Desconhecido nao e Falso
+    var aus = List[Bool]()
+    aus.append(False)
+    aus.append(True)
+    var c2 = List[Coluna]()
+    c2.append(Coluna.de_reais("v", [150.0, 0.0], aus^))
+    var t2 = Tabela(c2^)
+    var r2 = t2.com_coluna("acima", coluna("v").gt(lit(100.0))).coletar()
+    assert_true(r2.eh_ausente("acima", 1))
+
+
 def test_padronizar_texto() raises:
     """Planilha de gente escreve a mesma cidade de quatro jeitos."""
     assert_equal(minusculas_txt("São PAULO"), "são paulo")

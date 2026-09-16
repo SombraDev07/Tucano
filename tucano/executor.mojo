@@ -358,7 +358,27 @@ def _avaliar_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> Vetor:
             div_f64(a.reais, b.reais, v.reais, linhas)
         return v^
 
-    raise Error("no de expressao nao avaliavel como valor: kind " + String(k))
+    if (
+        k == Kind.GT or k == Kind.GE or k == Kind.LT or k == Kind.LE
+        or k == Kind.EQ or k == Kind.NE or k == Kind.CONTEM
+        or k == Kind.AND or k == Kind.OR or k == Kind.NOT
+    ):
+        # comparacao virando **coluna**, nao filtro: e a coluna de marcacao da
+        # planilha ("acima de mil? sim/nao"). Passa pela mesma logica de tres
+        # valores do `onde`, e o Desconhecido vira ausente — que e o que ele e
+        # quando o resultado deixa de ser uma decisao e passa a ser um dado.
+        var tri = _tri_no(expr, idx, cols)
+        var v = Vetor.numerico(linhas)
+        for i in range(linhas):
+            if tri[i] == UInt8(Tri.DESCONHECIDO):
+                v.na[i] = UInt8(1)
+            elif tri[i] == UInt8(Tri.VERDADEIRO):
+                v.reais[i] = 1.0
+        return v^
+
+    raise Error(
+        "esta expressao nao produz um valor de coluna: " + expr.descrever()
+    )
 
 
 # ------------------------------------------------------- logica de 3 valores

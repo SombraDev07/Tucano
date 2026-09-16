@@ -3,6 +3,26 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [1.5.0] — Coluna de marcacao
+
+`com_coluna("acima_de_mil", coluna("valor").gt(lit(1000.0)))` morria com
+*"no de expressao nao avaliavel como valor: kind 10"*. A comparacao so existia
+como **filtro**; virar **coluna** — o "sim/nao" que toda planilha tem — nao
+estava previsto.
+
+### Adicionado
+
+- Comparacao, `contem` e logica (`e`, `ou`, `nao`) agora produzem coluna logica
+  em `com_coluna`, e servem de chave em `agrupar`. Passam pela mesma logica de
+  tres valores do `onde`, e o Desconhecido vira **ausente** — que e o que ele e
+  quando o resultado deixa de ser uma decisao e passa a ser um dado.
+
+### Alterado
+
+- A mensagem de quando a expressao realmente nao produz valor deixou de citar o
+  numero interno do tipo de no e passou a imprimir a **expressao**: "kind 10"
+  nao diz nada a quem usa a biblioteca.
+
 ## [1.4.0] — Padronizar texto
 
 Faltava o verbo que mais se usa limpando planilha. A API de expressao tinha
