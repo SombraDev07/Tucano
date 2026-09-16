@@ -19,7 +19,14 @@ from .vetor import Vetor, Unidade
 from .plano import Etapa, TipoEtapa
 from .codecs import real64_para_bits
 from .buffer import espalhar_chave
-from .texto import minusculas, maiusculas, aparar, sem_acento, normalizar
+from .texto import (
+    minusculas,
+    maiusculas,
+    aparar,
+    sem_acento,
+    sem_espacos,
+    normalizar,
+)
 from .kernels import (
     contar_marcados,
     add_f64,
@@ -275,6 +282,7 @@ def _avaliar_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> Vetor:
         or k == Kind.APARAR
         or k == Kind.SEM_ACENTO
         or k == Kind.NORMALIZAR
+        or k == Kind.SEM_ESPACOS
     ):
         var filho = _avaliar_no(expr, n.left, cols)
         if not filho.eh_texto:
@@ -294,6 +302,8 @@ def _avaliar_no(expr: Expr, idx: Int, cols: List[Coluna]) raises -> Vetor:
                 v.textos[i] = aparar(t)
             elif k == Kind.SEM_ACENTO:
                 v.textos[i] = sem_acento(t)
+            elif k == Kind.SEM_ESPACOS:
+                v.textos[i] = sem_espacos(t)
             else:
                 v.textos[i] = normalizar(t)
         return v^
@@ -775,6 +785,7 @@ def tipo_resultado(expr: Expr, idx: Int, esq: List[Campo]) raises -> Int:
         or k == Kind.APARAR
         or k == Kind.SEM_ACENTO
         or k == Kind.NORMALIZAR
+        or k == Kind.SEM_ESPACOS
     ):
         return DType.TEXTO
     if k == Kind.DIV:

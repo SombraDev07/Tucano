@@ -53,6 +53,7 @@ from .expr import (
     maiusculas,
     aparar,
     sem_acento,
+    sem_espacos,
     normalizar,
 )
 from .vetor import Vetor, Unidade

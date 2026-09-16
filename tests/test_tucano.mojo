@@ -15,6 +15,7 @@ from tucano import (
     coluna,
     Expr,
     normalizar,
+    sem_espacos,
     lit,
     lit_int,
     lit_texto,
@@ -87,6 +88,7 @@ from tucano.texto import (
     maiusculas as maiusculas_txt,
     aparar as aparar_txt,
     sem_acento as sem_acento_txt,
+    sem_espacos as sem_espacos_txt,
     normalizar as normalizar_txt,
 )
 from std.pathlib import Path
@@ -705,6 +707,52 @@ def test_parquet_zstd() raises:
         var nome = g.nomes()[c]
         for i in range(g.linhas()):
             assert_equal(z.pegar(nome).texto_em(i), g.pegar(nome).texto_em(i))
+
+
+def test_chave_de_comparacao() raises:
+    """Espaco no meio da palavra e espaco duplo entre palavras sao problemas
+    diferentes, e nenhuma regra de espaco conserta os dois.
+
+        entrada             juntar em um      tirar so os duplos
+        "S  AO P  AULO"     "S AO P AULO"     "SAO PAULO"
+        "São  Paulo"        "São Paulo"       "SãoPaulo"
+
+    Tirar **todo** espaco resolve os dois como chave: fica ilegivel e faz as
+    grafias coincidirem, que e o que o agrupamento precisa.
+    """
+    assert_equal(sem_espacos_txt("S  AO P  AULO"), "SAOPAULO")
+    assert_equal(sem_espacos_txt("São  Paulo"), "SãoPaulo")
+    assert_equal(sem_espacos_txt("  a b  c "), "abc")
+
+    var vals = List[String]()
+    vals.append("São Paulo")
+    vals.append("São  Paulo")
+    vals.append("S  AO PAULO")
+    vals.append("sao paulo")
+    vals.append("Rio de  Janeiro")
+    var cols = List[Coluna]()
+    cols.append(Coluna.de_textos("cidade", vals^))
+    cols.append(
+        Coluna.de_reais("v", [100.0, 200.0, 300.0, 400.0, 500.0])
+    )
+    var t = Tabela(cols^)
+
+    # normalizar sozinho nao junta "S  AO PAULO" com "São Paulo"
+    var so_norm = (
+        t.com_coluna("c", normalizar(coluna("cidade")))
+         .agrupar(["c"]).agregar([soma("v")]).coletar()
+    )
+    assert_equal(so_norm.linhas(), 3)
+
+    # com a chave, as quatro grafias de São Paulo viram uma
+    var chave = (
+        t.com_coluna("c", sem_espacos(normalizar(coluna("cidade"))))
+         .agrupar(["c"]).agregar([soma("v")]).coletar()
+    )
+    assert_equal(chave.linhas(), 2)
+    for i in range(chave.linhas()):
+        if chave.pegar("c").texto_em(i) == "saopaulo":
+            assert_equal(chave.pegar("soma_v").texto_em(i), "1000.0")
 
 
 def test_coluna_de_marcacao() raises:

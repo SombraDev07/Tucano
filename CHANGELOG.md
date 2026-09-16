@@ -3,6 +3,28 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versionamento semantico a partir da 1.0; ate la, `0.MARCO.PATCH`.
 
+## [1.6.0] — Chave de comparacao
+
+Espaco no meio da palavra e espaco duplo entre palavras sao problemas
+diferentes, e **nenhuma regra de espaco conserta os dois**:
+
+| entrada | juntar em um | tirar so os duplos | tirar todos |
+|---|---|---|---|
+| `"S  AO P  AULO"` | `"S AO P AULO"` | `"SAO PAULO"` | `"SAOPAULO"` |
+| `"São  Paulo"` | `"São Paulo"` | `"SãoPaulo"` | `"SãoPaulo"` |
+| `"Rio de  Janeiro"` | `"Rio de Janeiro"` | `"Rio deJaneiro"` | `"RiodeJaneiro"` |
+
+Tirar so os duplos conserta a primeira linha e estraga as outras duas.
+
+### Adicionado
+
+- **`sem_espacos`** — tira todo espaco. Fica ilegivel de proposito: serve como
+  **chave**, nao como texto para mostrar. `sem_espacos(normalizar(coluna(...)))`
+  faz as quatro grafias de São Paulo — inclusive a com espaco no meio da
+  palavra — virarem `saopaulo` e somarem no mesmo grupo.
+
+`aparar` continua como esta: uma e para ler, a outra e para casar.
+
 ## [1.5.0] — Coluna de marcacao
 
 `com_coluna("acima_de_mil", coluna("valor").gt(lit(1000.0)))` morria com

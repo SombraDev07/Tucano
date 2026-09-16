@@ -110,6 +110,31 @@ def aparar(texto: String) raises -> String:
     return String(from_utf8=Span(out))
 
 
+def sem_espacos(texto: String) raises -> String:
+    """Tira **todo** espaco, inclusive o que separa palavras.
+
+    Nao serve para mostrar — serve como **chave de comparacao**. Espaco enfiado
+    no meio da palavra (`"S  AO PAULO"`) e espaco duplo entre palavras
+    (`"São  Paulo"`) sao problemas diferentes, e nenhuma regra conserta os dois:
+
+        entrada             juntar em um    tirar so os duplos   tirar todos
+        "S  AO P  AULO"     "S AO P AULO"   "SAO PAULO"          "SAOPAULO"
+        "São  Paulo"        "São Paulo"     "SãoPaulo"           "SãoPaulo"
+        "Rio de  Janeiro"   "Rio de Janeiro" "Rio deJaneiro"     "RiodeJaneiro"
+
+    Tirar so os duplos conserta o primeiro caso e estraga os outros dois. Tirar
+    todos deixa o texto ilegivel — e faz as quatro grafias coincidirem, que e o
+    que um agrupamento precisa. Por isso esta funcao existe separada de
+    `aparar`: uma e para ler, a outra e para casar.
+    """
+    var b = texto.as_bytes()
+    var out = List[UInt8](capacity=len(b))
+    for x in b:
+        if not _eh_espaco(x):
+            out.append(x)
+    return String(from_utf8=Span(out))
+
+
 def _sem_acento_par(alto: UInt8, baixo: UInt8) -> String:
     """A letra sem acento de uma sequencia de dois bytes, ou vazio se nao houver.
 

@@ -45,6 +45,7 @@ struct Kind:
     comptime APARAR = 52
     comptime SEM_ACENTO = 53
     comptime NORMALIZAR = 54
+    comptime SEM_ESPACOS = 55
 
 
 struct ExprNode(Copyable, Movable):
@@ -288,6 +289,15 @@ def sem_acento(var alvo: Expr) -> Expr:
     return _unario(Kind.SEM_ACENTO, alvo^)
 
 
+def sem_espacos(var alvo: Expr) -> Expr:
+    """Tira todo espaco — chave de comparacao, nao texto para mostrar.
+
+    `sem_espacos(normalizar(coluna("cidade")))` faz `"S  AO PAULO"`,
+    `"São  Paulo"` e `"sao paulo"` virarem a mesma chave.
+    """
+    return _unario(Kind.SEM_ESPACOS, alvo^)
+
+
 def normalizar(var alvo: Expr) -> Expr:
     """Aparar + minusculas + sem acento.
 
@@ -344,6 +354,8 @@ def _descrever_no(expr: Expr, i: Int) raises -> String:
         return "sem_acento(" + _descrever_no(expr, n.left) + ")"
     if k == Kind.NORMALIZAR:
         return "normalizar(" + _descrever_no(expr, n.left) + ")"
+    if k == Kind.SEM_ESPACOS:
+        return "sem_espacos(" + _descrever_no(expr, n.left) + ")"
     if k == Kind.ANO:
         return "ano(" + _descrever_no(expr, n.left) + ")"
     if k == Kind.MES:

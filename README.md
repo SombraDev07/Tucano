@@ -3,7 +3,7 @@
 **Biblioteca tabular nativa em Mojo.** Análise de dados com uma API direta, sobre um engine
 columnar vetorizado — do buffer ao kernel, sem Python em lugar nenhum.
 
-**Versão 1.5.0** · Apache-2.0 · 259 testes
+**Versão 1.6.0** · Apache-2.0 · 260 testes
 
 ```bash
 pixi add tucano -c https://sombradev07.github.io/Tucano
@@ -54,7 +54,8 @@ o que for mais conveniente na hora.
 - **Padronizar texto antes de agrupar** — `normalizar(coluna("cidade"))` faz
   `" São  PAULO "`, `"Sao Paulo"` e `"são paulo"` virarem todos `"sao paulo"`, e o `agrupar`
   deixa de devolver três grupos para a mesma cidade. As partes existem soltas: `minusculas`,
-  `maiusculas`, `aparar`, `sem_acento`.
+  `maiusculas`, `aparar`, `sem_acento`. E `sem_espacos(normalizar(...))` monta uma **chave de
+  comparação** que faz até `"S  AO PAULO"` casar com `"São Paulo"`.
 - **Filtro de texto por trecho** — `coluna("cidade").contem(lit_texto("São"))`, e numa coluna
   dicionarizada a busca roda uma vez por **valor distinto**, não por linha. `em([...])` é o
   `IN` do SQL, açúcar sobre `==` e `ou`, então herda o dicionário e o pushdown.
@@ -679,7 +680,7 @@ numa versão menor.
 | Paralelismo nos operadores de execução | ❌ **medido e recusado** — banda de memória |
 | Painel HTTP | ⏸ estacionado — sem `std.net` não é produto |
 
-259 testes e oito passos de verificação. Roadmap completo em [ROADMAP.md](ROADMAP.md);
+260 testes e oito passos de verificação. Roadmap completo em [ROADMAP.md](ROADMAP.md);
 contrato de API em [tucano/CONTRATO.md](tucano/CONTRATO.md).
 
 Duas coisas que este projeto registra e que valem mais que a tabela acima. Por muitos marcos
