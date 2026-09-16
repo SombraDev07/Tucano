@@ -143,6 +143,25 @@ Para **desinstalar**, apague o arquivo:
 rm "$(dirname "$(which mojo)")/../lib/mojo/tucano.mojoc"
 ```
 
+### No VS Code
+
+A extensão **Mojo** da Modular dá realce e autocomplete. Se o código aparecer quase todo
+branco — só palavras-chave e strings com cor —, o servidor de linguagem subiu sem achar o
+SDK: ele reporta `unable to locate module 'std'` e trata `tucano` como módulo inexistente.
+Diagnóstico rápido: **Output → Mojo Language Server** no VS Code.
+
+A correção é apontar o SDK do projeto em `.vscode/settings.json`:
+
+```json
+{
+  "mojo.sdk.path": "/caminho/absoluto/do/projeto/.pixi/envs/default",
+  "editor.semanticHighlighting.enabled": true
+}
+```
+
+Medido num projeto onde isso acontecia: **7 diagnósticos e 4 tokens semânticos** antes,
+**0 e 27** depois. O caminho é absoluto, então precisa ser refeito se a pasta mudar de lugar.
+
 ### As outras formas
 
 Sem instalar, apontando o `-I` para o clone — é o modo de quem vai mexer no Tucano:
